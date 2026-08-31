@@ -1,0 +1,6 @@
+#!/bin/sh
+[ "$1" = "wlan0" ] || exit 0
+[ "$2" = "up" ] || exit 0
+case "$IP4_ADDRESS_0" in 10.41.*) exit 0 ;; esac
+sleep 2
+systemctl restart --job-mode=ignore-dependencies avahi-daemon.service

@@ -1,0 +1,43 @@
+IMG_NAME=palmimo
+RELEASE=trixie
+DEPLOY_COMPRESSION=xz
+
+FIRST_USER_NAME=user
+# The account SHIPS password-locked (02-account-ssh runs `passwd -l` after
+# stage1 sets this throwaway value) -- but pi-gen refuses
+# DISABLE_FIRST_BOOT_USER_RENAME=1 with an empty FIRST_USER_PASS, and
+# without that flag its export-image step re-arms userconfig.service (the
+# interactive first-boot account wizard) AFTER all stages run. The value
+# below never survives into the image; the lock does.
+# Locked-account + key-only SSH has no sanctioned path past that guard --
+# upstream acknowledges the gap as RPi-Distro/pi-gen#670 (open); this
+# throwaway-then-lock is the standing workaround it describes.
+FIRST_USER_PASS=locked-at-build
+DISABLE_FIRST_BOOT_USER_RENAME=1
+
+# Live equivalent of apply-pi.sh's `raspi-config nonint do_wifi_country JP`
+# self-check: pi-gen's own WPA_COUNTRY config key bakes the same regulatory
+# domain into the image at build time instead.
+WPA_COUNTRY=JP
+
+# SSH is enabled by pi-gen's stock stage2 script when ENABLE_SSH=1
+# (`systemctl enable ssh`). Key-only enforcement (PasswordAuthentication no
+# + KbdInteractiveAuthentication no) is our own sshd_config.d drop-in in
+# 02-account-ssh/, not pi-gen's PUBKEY_ONLY_SSH -- we do not bake any
+# authorized_keys into the image (Portal is the key-registration path), so
+# PUBKEY_SSH_FIRST_USER stays unset.
+ENABLE_SSH=1
+
+# `export` is load-bearing on both PALMIMO_ variables: pi-gen sources this
+# config in build.sh but runs prerun.sh (and friends) as child processes --
+# an unexported variable never reaches them (first real build failed on
+# exactly this).
+# /palmimo-image is where PIGEN_DOCKER_OPTS bind-mounts this repository's
+# checkout into the Docker build container (see pigen/README.md) -- the
+# repo root IS the image directory, so no further subpath is needed.
+export PALMIMO_IMAGE_DIR=/palmimo-image
+
+# Overridable on the command line: `PALMIMO_PORTAL_TAG=v0.1.0-rc1 ./build-docker.sh`.
+export PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.0}"
+
+STAGE_LIST="stage0 stage1 stage2 stage-palmimo"
