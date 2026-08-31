@@ -1,0 +1,8 @@
+Palmimo Image
+Copyright 2026 Jizai Inc.
+
+This product includes software developed at Jizai Inc.
+
+This repository patches a GPL-2.0-licensed file (comitup's nm.py) at build
+and apply time. See README.md, "comitup and the GPL" for what is patched,
+why, and how the patch satisfies GPLv2.

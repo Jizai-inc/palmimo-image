@@ -1,0 +1,7 @@
+[Unit]
+Description=comitup-web replaced by a no-op (Palmimo Portal serves the UI)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes

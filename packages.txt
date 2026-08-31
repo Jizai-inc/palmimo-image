@@ -1,0 +1,4 @@
+comitup
+avahi-daemon
+git
+dnsmasq

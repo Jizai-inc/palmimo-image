@@ -1,0 +1,14 @@
+[Unit]
+Description=Palmimo first-boot personalization
+Before=comitup.service avahi-daemon.service palmimo-portal.service
+RequiresMountsFor=/boot/firmware
+ConditionPathExists=/boot/firmware/palmimo-identity.json
+ConditionPathExists=!/var/lib/palmimo/firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/palmimo/firstboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

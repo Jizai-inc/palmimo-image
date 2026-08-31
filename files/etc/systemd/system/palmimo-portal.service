@@ -1,0 +1,17 @@
+[Unit]
+Description=Palmimo Portal
+After=basic.target
+RequiresMountsFor=/boot/firmware
+
+[Service]
+User=user
+StateDirectory=palmimo
+Environment=PALMIMO_ADAPTERS=real
+Environment=PALMIMO_PORT=80
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/home/user/palmimo-portal/.venv/bin/python -m palmimo_portal
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
