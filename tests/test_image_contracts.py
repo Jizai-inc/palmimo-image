@@ -510,6 +510,47 @@ def test_apply_pi_sh_pipes_the_shared_patch_script_over_ssh() -> None:
     assert '<<"PATCH_NM_PY"' not in text
 
 
+def test_tag_validation_regex_literal_present_in_apply_pi_and_portal_stage() -> None:
+    # Same regex literal, same hardening, in both consumers of a
+    # user-supplied tag (apply-pi.sh over SSH, the pi-gen chroot stage).
+    assert "[A-Za-z0-9._-]" in _text(APPLY_SCRIPT)
+    assert "[A-Za-z0-9._-]" in _text(STAGE_PORTAL_RUN)
+
+
+def test_apply_pi_sh_rejects_a_shell_injection_attempt_in_portal_tag(
+    tmp_path: Path,
+) -> None:
+    # A malicious PORTAL_TAG must be rejected before apply-pi.sh ever
+    # reaches ssh -- prove it by putting a fake `ssh` on PATH that leaves a
+    # marker file, and asserting the marker is never created.
+    marker = tmp_path / "ssh-was-invoked"
+    fake_ssh = tmp_path / "ssh"
+    fake_ssh.write_text(
+        f'#!/bin/sh\ntouch "{marker}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+
+    env = dict(**{"PATH": f"{tmp_path}:{Path('/usr/bin')}:{Path('/bin')}"})
+    result = subprocess.run(
+        ["bash", str(APPLY_SCRIPT)],
+        cwd=IMAGE_DIR,
+        env={
+            **env,
+            "PI_HOST": "x",
+            "PORTAL_TAG": "v1'; echo pwned",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "PORTAL_TAG" in combined
+    assert not marker.exists()
+
+
 # ---------------------------------------------------------------------------
 # polkit rules
 # ---------------------------------------------------------------------------

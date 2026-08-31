@@ -5,6 +5,10 @@
 # ExecStart is /home/user/palmimo-portal/.venv/bin/python -m palmimo_portal).
 
 PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.0}"
+if ! [[ "$PALMIMO_PORTAL_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "PALMIMO_PORTAL_TAG に使用できない文字が含まれています（許可: [A-Za-z0-9._-]）: ${PALMIMO_PORTAL_TAG}" >&2
+  exit 1
+fi
 PORTAL_REPO_URL="https://github.com/Jizai-inc/palmimo-portal.git"
 PORTAL_HOME="/home/${FIRST_USER_NAME}"
 PORTAL_DEST="${PORTAL_HOME}/palmimo-portal"

@@ -1,5 +1,4 @@
-> 2026-08-31 に Jizai 社内リポジトリの `doc/design/palmimo-image.md` から移動。
-> 本文中の「palmimo-portal 設計ドキュメント」は社内文書（非公開）を指す。
+> 本書が前提にする palmimo-portal の設計ドキュメント（機能要件・横断判断・出荷イメージの構成表）は非公開。
 
 # palmimo-image 設計 — 出荷イメージの構成物と適用
 
@@ -15,8 +14,9 @@ palmimo-portal 設計ドキュメント（機能要件・横断判断・出荷�
   そのまま入力にする
 - 実機検証は **構成物・両経路が揃った後に 1 回**（検証計画の節）
 - 前提となる決定: Portal は palmimo-portal リポジトリのタグ clone
-  （分離、2026-08-20）/ 個体番号は識別ファイル注入（2026-08-20 改訂、
-  PR #676）/ 検証用タグは pre-release（`v*-*`、上書き可）
+  （分離、2026-08-20）/ 個体番号は識別ファイル注入で持たせる方式に
+  2026-08-20 に改訂（CPU シリアル等からの導出はやめた）/ 検証用タグは
+  pre-release（`v*-*`、上書き可）
 
 ## 配置
 
@@ -154,7 +154,7 @@ enable_nuke: true
 ## palmimo-firstboot.service + firstboot.sh
 
 ワンショット（`Type=oneshot` + `ConditionPathExists`）。**個体化の情報源は
-識別ファイルのみ**（PR #676 の改訂どおり。CPU シリアル導出はしない）。
+識別ファイルのみ**（上記の改訂どおり。CPU シリアル導出はしない）。
 
 ```
 [Unit]
@@ -282,7 +282,7 @@ update 検証だけできない）。
   WPA2 でのハンドシェイクが（TKIP/PMF パッチ後）成功して join できることを確認
 - **V3 ✗→✓**: captive portal の自動ポップアップは初回スモークでは未達
   （OS の疎通確認プローブに Portal 側が応答していなかった）。
-  **palmimo-portal #15**（unprovisioned 時のみプローブに 302 応答）で解消し、
+  **palmimo-portal#15**（unprovisioned 時のみプローブに 302 応答）で解消し、
   2026-08-21 の再検証で iPhone の Safari 起動を契機にポータルが表示される
   ことを確認（参加した瞬間のシート自動表示は iOS 側挙動に依存し、
   サーバ応答は正しいため受容）
@@ -322,7 +322,8 @@ comitup-web の mask が `DBusException` で HOTSPOT セットアップ全体を
 中断 →（修正後に露見）dnsmasq 未導入で DHCP リースが出ない。3 件とも
 本 PR（`fix/image-hotspot-chain`）で apply-pi.sh / `files/` へ反映済み
 
-UX 上の発見（本設計書の範囲外、palmimo-portal 側で追跡）: **#13 #14 #15**
+UX 上の発見（本設計書の範囲外、palmimo-portal 側で追跡）:
+**palmimo-portal#13 palmimo-portal#14 palmimo-portal#15**
 
 ## cloud-init との境界（2026-08-21 決定）
 

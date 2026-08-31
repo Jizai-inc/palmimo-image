@@ -154,11 +154,16 @@ the changed lines, satisfying the "carry a prominent notice with the date"
 requirement. The idempotency key is that notice marker itself, not just the
 presence of the new keys, so re-running the patch is always a safe no-op.
 The modified `nm.py` stays on the image as plain Python source (never
-compiled or stripped), satisfying GPLv2 §3's source-availability
-requirement. `lib/patch_comitup_nm.py` itself — the script that performs the
-patch — is Jizai Inc.'s own work and is licensed under this repository's
-Apache-2.0 license; only the four lines and the notice it inserts into
-`nm.py` become part of that GPL'd file.
+compiled or stripped) — that covers the source-availability side for this
+modification. The rest of comitup and the underlying OS ship unmodified, as
+stock Debian / Raspberry Pi OS packages; the corresponding source for those
+is available from those projects' own archives, and Jizai does not claim
+more than that here. `lib/patch_comitup_nm.py` itself — the script that
+performs the patch — is Jizai Inc.'s own work and is licensed under this
+repository's Apache-2.0 license. It necessarily quotes the two anchor lines
+it searches for in `nm.py`, a de-minimis excerpt used only to locate the
+insertion point; the lines it inserts become part of the GPL-2.0 file once
+applied.
 
 ## Security model
 
@@ -171,7 +176,12 @@ card itself is out of scope (see `doc/design.md` for the full reasoning).
 SSH ships key-only (`PasswordAuthentication no` +
 `KbdInteractiveAuthentication no`); the `user` account ships password-locked
 with NOPASSWD sudo, since Palmimo Portal — not SSH — is the key-registration
-path.
+path. NOPASSWD sudo is there because Palmimo Portal runs the device's own
+maintenance actions (Wi-Fi setup, updates, power, SSH-key registration)
+through polkit/systemd as this account, so the account is root-equivalent
+by design; since it has no password and no SSH access except keys the owner
+registered through the Portal, the trust boundary is "whoever can log in to
+the Portal / holds the SD card", not the sudo rule.
 
 ## More detail
 

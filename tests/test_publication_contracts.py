@@ -1,13 +1,10 @@
 """Publication hygiene for this repository.
 
-This repository is published (unlike the internal monorepo it was extracted
-from). This module scans every tracked file for content that must never
-reach a public repository: private-network addresses, cloud/manufacturing
-secrets, and the internal monorepo's own name -- a stray reference to it
-would point a reader at a repository they cannot see.
+This repository is published. This module scans every tracked file for
+content that must never reach a public repository: private-network
+addresses, and cloud/manufacturing secrets.
 
-Modeled on the internal monorepo's own copy of this contract (private
-maintenance tooling, not part of any published tree), trimmed to the
+Modeled on an internal, unpublished copy of this contract, trimmed to the
 patterns that make sense standalone here (no cross-tree scanning, no
 internal-vocabulary denylist -- this repository's own contents decide
 what's confidential).
@@ -24,9 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # This file itself necessarily carries the banned patterns as literal test
-# fixtures (the whole repository is published, unlike the internal
-# monorepo's version of this contract, which lives in a tree that is never
-# itself scanned) -- exclude it from the content scan by identity, not by
+# fixtures -- exclude it from the content scan by identity, not by
 # weakening a pattern to dodge its own test data.
 SELF_PATH = Path(__file__).resolve()
 
@@ -34,18 +29,8 @@ MARKDOWN_LINK = re.compile(r"\]\(([^)\s]+)")
 MARKDOWN_LINK_DEFINITION = re.compile(r"^\s*\[[^\]]+\]:\s*(\S+)", re.MULTILINE)
 EXTERNAL_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//|#)")
 
-# The internal monorepo this tree was extracted from, spelled out of two
-# pieces so this file's own source text never contains the contiguous name
-# either (this module's content scan below applies to itself too, minus the
-# literal fixture data covered by SELF_PATH).
-_MONOREPO_REPO_NAME = "mi" + "-mo-devkit-pre"
-
 # Content that must never appear in this repository's published history.
 BANNED_CONTENT = [
-    # A reader outside the company cannot see the internal monorepo above;
-    # a reference to it here is either a dead link or an accidental
-    # disclosure that it exists.
-    re.escape(_MONOREPO_REPO_NAME),
     # AWS access key IDs and private-key headers -- key material, not just
     # vocabulary.
     "AKIA[0-9A-Z]{16}",
@@ -146,11 +131,6 @@ def test_repository_carries_no_banned_content() -> None:
             offenders.append(f"{rel} matched /{pattern}/")
 
     assert offenders == [], f"Content banned from this repository: {offenders}"
-
-
-def test_banned_content_scan_covers_the_monorepo_name() -> None:
-    assert _banned_hits(f"see Jizai-inc/{_MONOREPO_REPO_NAME} for the internal history")
-    assert not _banned_hits("see the palmimo-devkit repository")
 
 
 def test_banned_content_scan_covers_private_addresses_and_secrets() -> None:

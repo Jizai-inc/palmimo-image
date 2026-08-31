@@ -15,15 +15,17 @@
 #   PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh --identity ./palmimo-identity.json
 #   PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh --no-apt
 #
-# The palmimo-portal repository is private for now: the Pi needs either the
-# repository made public, or a git credential already configured for
-# user@$PI_HOST to clone https://github.com/Jizai-inc/palmimo-portal.git
-# non-interactively (e.g. a `credential.helper` entry, or an SSH remote with
-# a deploy key). This script does not bake in or accept a token.
+# The Pi clones https://github.com/Jizai-inc/palmimo-portal.git (public)
+# anonymously over HTTPS. This script does not bake in or accept a token.
 set -euo pipefail
 
 : "${PI_HOST:?PI_HOST=<pi-user>@<addr> を指定してください}"
 : "${PORTAL_TAG:?PORTAL_TAG=<tag> を指定してください（例: v0.1.0-rc1）}"
+
+if ! [[ "$PORTAL_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "PORTAL_TAG に使用できない文字が含まれています（許可: [A-Za-z0-9._-]）: ${PORTAL_TAG}" >&2
+  exit 2
+fi
 
 IMAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES_SRC="${IMAGE_DIR}/files/"
