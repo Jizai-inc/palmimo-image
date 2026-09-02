@@ -48,8 +48,12 @@ STAGE_ACCOUNT_RUN = STAGE_DIR / "02-account-ssh" / "00-run.sh"
 STAGE_SUDOERS_FILE = STAGE_DIR / "02-account-ssh" / "files" / "010-palmimo-user"
 STAGE_SSHD_DROPIN = STAGE_DIR / "02-account-ssh" / "files" / "50-palmimo-key-only.conf"
 STAGE_PORTAL_RUN = STAGE_DIR / "03-portal" / "00-run.sh"
+STAGE_OSS_RUN = STAGE_DIR / "04-oss-compliance" / "00-run.sh"
+STAGE_OSS_SOURCES_FILE = STAGE_DIR / "04-oss-compliance" / "files" / "palmimo-src.sources"
+COLLECT_OSS_COMPLIANCE_LIB = IMAGE_DIR / "lib" / "collect_oss_compliance.py"
+OSS_SOURCE_EXCLUDE_FILE = IMAGE_DIR / "oss-source-exclude.txt"
 
-PIGEN_SHELL_SCRIPTS = [STAGE_PRERUN, STAGE_CORE_RUN, STAGE_ACCOUNT_RUN, STAGE_PORTAL_RUN]
+PIGEN_SHELL_SCRIPTS = [STAGE_PRERUN, STAGE_CORE_RUN, STAGE_ACCOUNT_RUN, STAGE_PORTAL_RUN, STAGE_OSS_RUN]
 
 
 def _text(path: Path) -> str:
@@ -724,6 +728,48 @@ def test_pigen_portal_step_matches_apply_pi_sh_fetch_static_invocation() -> None
     assert "python -m palmimo_portal.fetch_static --tag" in text
     # Same ExecStart target the design doc pins for palmimo-portal.service.
     assert 'PORTAL_DEST="${PORTAL_HOME}/palmimo-portal"' in text
+
+
+def test_oss_compliance_stage_references_the_collector_and_exclude_list() -> None:
+    text = _text(STAGE_OSS_RUN)
+    assert "collect_oss_compliance.py" in text
+    assert "oss-source-exclude.txt" in text
+    assert COLLECT_OSS_COMPLIANCE_LIB.is_file()
+    assert OSS_SOURCE_EXCLUDE_FILE.is_file()
+
+
+def test_oss_compliance_stage_enables_then_removes_deb_src() -> None:
+    text = _text(STAGE_OSS_RUN)
+    assert "palmimo-src.sources" in text
+    assert "rm -f" in text
+    # The sources file is written, used (apt-get update), and then removed
+    # -- the shipped image must never carry deb-src entries. The removal
+    # line must come after the install line, and a second `apt-get update`
+    # must follow the removal so the on-disk apt state matches reality.
+    install_idx = text.index('install -m 0644 "files/palmimo-src.sources"')
+    remove_idx = text.index('rm -f "${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"')
+    assert install_idx < remove_idx
+    assert text.count("apt-get update") >= 2
+
+    sources_text = _text(STAGE_OSS_SOURCES_FILE)
+    assert "Types: deb-src" in sources_text
+    assert "RELEASE" in sources_text
+
+
+def test_oss_compliance_stage_supports_the_skip_flag() -> None:
+    text = _text(STAGE_OSS_RUN)
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE" in text
+
+
+def test_pigen_config_exports_the_skip_corresponding_source_flag() -> None:
+    text = _text(PIGEN_CONFIG)
+    assert re.search(r"^export PALMIMO_SKIP_CORRESPONDING_SOURCE=", text, re.MULTILINE)
+
+
+def test_boot_licenses_readme_documents_pi_and_portal_subdirectories() -> None:
+    text = _text(FILES_DIR / "boot" / "firmware" / "licenses" / "README.txt")
+    assert "pi/" in text
+    assert "portal/" in text
 
 
 def test_account_stage_sets_a_real_shell_before_locking() -> None:

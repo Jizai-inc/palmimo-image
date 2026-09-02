@@ -94,6 +94,50 @@ def test_assemble_docker_opts_with_portal_tag(tmp_path: Path) -> None:
     assert opts == f"--volume {tmp_path}:/palmimo-image:ro -e PALMIMO_PORTAL_TAG=v0.1.0-rc1"
 
 
+def test_assemble_docker_opts_without_skip_corresponding_source_by_default(tmp_path: Path) -> None:
+    opts = make_image.assemble_docker_opts(tmp_path, None)
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE" not in opts
+
+
+def test_assemble_docker_opts_with_skip_corresponding_source(tmp_path: Path) -> None:
+    opts = make_image.assemble_docker_opts(tmp_path, None, skip_corresponding_source=True)
+    assert opts == f"--volume {tmp_path}:/palmimo-image:ro -e PALMIMO_SKIP_CORRESPONDING_SOURCE=1"
+
+
+def test_assemble_docker_opts_with_portal_tag_and_skip_corresponding_source(tmp_path: Path) -> None:
+    opts = make_image.assemble_docker_opts(tmp_path, "v0.1.0-rc1", skip_corresponding_source=True)
+    assert opts == (
+        f"--volume {tmp_path}:/palmimo-image:ro -e PALMIMO_PORTAL_TAG=v0.1.0-rc1 -e PALMIMO_SKIP_CORRESPONDING_SOURCE=1"
+    )
+
+
+def test_build_plan_defaults_skip_corresponding_source_to_false(tmp_path: Path) -> None:
+    plan = make_image.build_plan(tmp_path, pigen_ref=make_image.PIGEN_REF, portal_tag=None)
+    assert plan.skip_corresponding_source is False
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE" not in plan.docker_opts
+
+
+def test_build_plan_propagates_skip_corresponding_source(tmp_path: Path) -> None:
+    plan = make_image.build_plan(
+        tmp_path, pigen_ref=make_image.PIGEN_REF, portal_tag=None, skip_corresponding_source=True
+    )
+    assert plan.skip_corresponding_source is True
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE=1" in plan.docker_opts
+
+
+def test_cli_skip_corresponding_source_flag_reaches_the_plan(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(MAKE_IMAGE_SCRIPT), "--dry-run", "--skip-corresponding-source"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE=1" in result.stdout
+    assert "skip corresponding source: True" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Deploy-image selection
 # ---------------------------------------------------------------------------

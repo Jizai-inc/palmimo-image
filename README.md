@@ -174,40 +174,32 @@ Of the two remaining options — bundle the source (§3(a) / GPLv3 §6(a)) or
 ship a written offer valid for three years (§3(b) / §6(b)) — we bundle,
 because a bundled copy needs no request-handling process and the SD card is
 already the medium every unit ships on. So we ship the corresponding source
-for the apt packages on the image alongside the binaries, on that same
-medium: at build time, the pi-gen stage collects every apt package's
-source (not just the GPL/LGPL ones — license detection is not something to
-trust blindly; the size cost of that over-inclusion will be measured
-against a real build once this step is implemented) into
-`/usr/share/palmimo/sources/` on the rootfs. That
-step is not implemented in this pull request — it lands in a follow-up PR
-that also generates the apt and Portal license trees below at build time,
-since both need the same package/dependency enumeration machinery. This
-repository does not otherwise claim more than passing along stock Debian /
-Raspberry Pi OS package sources unmodified (`lib/patch_comitup_nm.py` above
-is the one exception).
+for every apt source package on the image alongside the binaries, on that
+same medium (GPLv2 §3(a) / GPLv3
+§6(a)): the `04-oss-compliance` pi-gen stage (`lib/collect_oss_compliance.py`,
+run inside the chroot at build time) enumerates the source packages actually
+installed, fetches each one's source at the exact version present in that
+build into `/usr/share/palmimo/sources/debian/<source>_<version>/` (`.dsc` +
+tarball, not extracted), and writes a `MANIFEST.txt` alongside it. Every
+source package is collected, not just ones a license-field heuristic flags
+as GPL/LGPL — apt's own metadata is not trustworthy enough to filter on —
+except the small, hand-reviewed exclusion list in `oss-source-exclude.txt`
+(non-free firmware blobs that carry no source-provision obligation in the
+first place). The same stage also generates the apt and Portal license
+trees under `/boot/firmware/licenses/` described below. See
+`doc/design.md`, "対応ソースとライセンス全文の同梱", for the full design and
+failure matrix. This repository does not otherwise claim more than passing
+along stock Debian / Raspberry Pi OS package sources unmodified
+(`lib/patch_comitup_nm.py` above is the one exception).
 
-This apt-package collection does not cover everything on the image, though.
-`uv` (installed as a prebuilt binary, not an apt package) and Palmimo
-Portal (its own Python venv plus a prebuilt static frontend bundle, neither
-apt either) sit outside that machinery entirely. Their license *display*
-lives at `tools/uv/` and `portal/` respectively (see below), but whether
-either actually carries a (L)GPL component that would itself require
-corresponding source is an open question this repository has not yet
-resolved. A further, narrower gap even within `tools/uv/`: `uv`'s binary
-statically links a set of Rust crates, and `tools/uv/`'s two files (its own
-dual Apache-2.0/MIT license) do not cover per-crate attribution for
-everything linked into it. The plan, not yet done, is to pin the exact
-`uv` version we ship and pull that version's own crate-attribution bundle
-rather than hand-assembling one.
-
-GPLv3 §6 also has a User Product / Installation Information clause: for a
-"User Product" it would require giving the owner a way to install a
-modified version of the GPLv3'd binaries that the device accepts as
-authentic. That does not apply here — the owner already has an
-unrestricted root account on their own device, with no signature
-verification or key requirement standing between them and installing
-modified software, so there is no Installation Information to withhold.
+Building with `tools/make_image.py --skip-corresponding-source` (or
+`PALMIMO_SKIP_CORRESPONDING_SOURCE=1`) skips only the source-fetch step, for
+a faster dev-loop rebuild — license copying still runs, and the resulting
+`MANIFEST.txt` is stamped `STATUS: INCOMPLETE` so a build made this way
+cannot be mistaken for a shippable one. A full build adds roughly 1.3–2GB
+to the `.img.xz` (the corresponding source is already-compressed `.dsc` +
+tarballs); pi-gen's export step sizes the rootfs from its actual on-disk
+usage, so no pi-gen configuration change was needed for that growth.
 
 ### `/boot/firmware/licenses/`
 
@@ -218,7 +210,7 @@ subdirectory per source of static third-party software:
 
 - `display-firmware/` — the RP2350 face-display firmware's third-party notices; see `NOTICE` there.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
-- `pi/`, `portal/` — apt package and Palmimo Portal dependency license trees, generated at build time (not part of this PR; see above).
+- `pi/`, `portal/` — apt package and Palmimo Portal dependency license trees, generated at build time by the `04-oss-compliance` pi-gen stage (see above).
 
 See `files/boot/firmware/licenses/README.txt` for the full layout
 explanation, written for whoever is holding the SD card.
