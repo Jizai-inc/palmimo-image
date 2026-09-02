@@ -1,0 +1,17 @@
+Types: deb-src
+URIs: http://deb.debian.org/debian/
+Suites: RELEASE RELEASE-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+
+Types: deb-src
+URIs: http://deb.debian.org/debian-security/
+Suites: RELEASE-security
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+
+Types: deb-src
+URIs: http://archive.raspberrypi.com/debian/
+Suites: RELEASE
+Components: main
+Signed-By: /usr/share/keyrings/raspberrypi-archive-keyring.pgp

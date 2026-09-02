@@ -62,7 +62,7 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
 ## ステージ構成
 
 `stage-palmimo/` は pi-gen 標準の `stage2`（Raspberry Pi OS Lite）の後に
-走る。サブステージ 4 つ:
+走る。サブステージ 5 つ:
 
 - `00-packages/` — `00-packages` はチェックインしない。`prerun.sh` が
   ビルド時に `packages.txt` から生成する。ドリフトするものをここに
@@ -78,6 +78,22 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
   ゼロから作るため。
 - `03-portal/` — uv 導入・`palmimo-portal` のタグ clone・
   `uv sync --frozen --no-dev`・`fetch_static`（Updater と同一コードパス）。
+- `04-oss-compliance/` — `03-portal` の後（venv が出来てから）に走る。
+  一時的に deb-src を有効化 (`files/palmimo-src.sources`) して
+  `apt-get update` → `lib/collect_oss_compliance.py` をチェックインコピー
+  を作らず `$PALMIMO_IMAGE_DIR` からチロートの `/tmp` へコピーして
+  `on_chroot` で実行 → 削除 → deb-src を無効化して再度
+  `apt-get update`（出荷イメージは deb-src を持たない）。chroot に実際に
+  入っているパッケージの版と同じ対応ソースを
+  `/usr/share/palmimo/sources/` に集め、apt の copyright と Portal の
+  Python 依存ライセンスを `/boot/firmware/licenses/{pi,portal}/` に写す
+  （GPLv2 §3(a) / GPLv3 §6(a)。詳細は `../doc/design.md` の
+  「対応ソースとライセンス全文の同梱」）。
+  `PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`config` で export 済み、
+  `tools/make_image.py --skip-corresponding-source` からも渡せる）は
+  対応ソース取得だけを飛ばす開発用エスケープハッチ — ライセンスのコピー
+  自体は常に行われ、`MANIFEST.txt` の先頭に `STATUS: INCOMPLETE` が
+  刻まれるので、この設定で作ったイメージが出荷可能と誤認されることはない。
 
 `EXPORT_IMAGE` がこのステージを最終 `.img` の export 対象として指す。
 `.workspace/` は `make_image.py` の作業場（gitignored・消して良い）。
