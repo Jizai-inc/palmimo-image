@@ -168,15 +168,17 @@ applied.
 
 ### Corresponding source for the rest of the image (GPLv2 §3(a) / GPLv3 §6(a))
 
-Palmimo DevKit is sold, not distributed at no charge, so the "written offer,
-valid for three years, good for the cost of physically performing the
-distribution" fallback (GPLv2 §3(b) / GPLv3 §6(b)) is not the path taken
-here — that clause exists for no-charge distributors who cannot practically
-bundle source with every copy. Being a paid distributor instead, we ship the
-corresponding source for every GPL- or LGPL-licensed apt package on the
-image alongside the binaries, on the same medium the product ships on
-(GPLv2 §3(a) / GPLv3 §6(a)): at build time, the pi-gen stage collects each
-such package's source into `/usr/share/palmimo/sources/` on the rootfs. That
+Palmimo DevKit is sold, so the "tell them where to get it" option (GPLv2
+§3(c)) is unavailable: that clause is limited to noncommercial distribution.
+Of the two remaining options — bundle the source (§3(a) / GPLv3 §6(a)) or
+ship a written offer valid for three years (§3(b) / §6(b)) — we bundle,
+because a bundled copy needs no request-handling process and the SD card is
+already the medium every unit ships on. So we ship the corresponding source
+for the apt packages on the image alongside the binaries, on that same
+medium: at build time, the pi-gen stage collects every apt package's
+source (not just the GPL/LGPL ones — license detection is not something to
+trust blindly, and over-inclusion is harmless) into `/usr/share/palmimo/sources/`
+on the rootfs. That
 step is not implemented in this pull request — it lands in a follow-up PR
 that also generates the apt and Portal license trees below at build time,
 since both need the same package/dependency enumeration machinery. This
