@@ -135,10 +135,29 @@ echo "==> [6/9] files/ -> / (sudo rsync)"
 # tests/test_image_contracts.py). No --delete: this tree only ever
 # adds/overwrites known paths, never deletes files a hand-applied Pi might
 # have added under the same directories for other reasons.
+#
+# --exclude boot/firmware: on a real device /boot/firmware is vfat (FAT32),
+# which has no concept of Unix ownership or permission bits. -a's chown/
+# chmod on files under it fails there, rsync returns 23 (partial transfer),
+# and `set -e` aborts the whole script. files/boot/firmware/ (the third-party
+# licenses tree, see README.md "Licenses and corresponding source") is sent
+# separately below, without -a, so it never hits that failure mode.
 rsync -az \
   --rsync-path='sudo rsync' \
+  --exclude boot/firmware \
   -e 'ssh -o BatchMode=yes' \
   "$FILES_SRC" "${PI_HOST}:/"
+
+# files/boot/firmware/ -> /boot/firmware/ (vfat: no ownership/permission bits)
+# --no-perms --no-owner --no-group: vfat cannot represent Unix modes/uid/gid,
+# and asking rsync to apply them (as -a implies) is exactly what --exclude
+# boot/firmware above avoids. -r replaces -a's recursion without also
+# requesting the metadata preservation vfat can't honor.
+rsync -rz \
+  --no-perms --no-owner --no-group \
+  --rsync-path='sudo rsync' \
+  -e 'ssh -o BatchMode=yes' \
+  "${FILES_SRC}boot/firmware/" "${PI_HOST}:/boot/firmware/"
 
 echo "==> [7/9] systemd: daemon-reload, enable units"
 # comitup-web is intentionally NOT masked or enabled here: files/ just placed

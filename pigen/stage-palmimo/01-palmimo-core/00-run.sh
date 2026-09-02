@@ -28,8 +28,14 @@ EOF
 # 3. files/ -> / : identical tree, identical destination, as apply-pi.sh's
 #    `rsync -az ... "$FILES_SRC" "${PI_HOST}:/"` step (units, polkit rule,
 #    comitup.conf, the NM avahi dispatcher hook, firstboot.sh, the
-#    comitup-web no-op replacement unit). -a preserves the modes files/ was
-#    checked in with.
+#    comitup-web no-op replacement unit, and files/boot/firmware/licenses/ --
+#    the third-party license texts, see README.md "Licenses and
+#    corresponding source"). -a preserves the modes files/ was checked in
+#    with; unlike apply-pi.sh, this rsync targets the rootfs directly
+#    (ext4), not a live vfat /boot/firmware, so it needs no special-casing
+#    here -- export-image later copies /boot/firmware into the FAT
+#    partition on its own (see pigen/.workspace/pi-gen/export-image/
+#    prerun.sh).
 rsync -a "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"
 
 # 4. dnsmasq: comitup spawns its own dnsmasq instance for hotspot DHCP/DNS

@@ -819,6 +819,61 @@ def test_workspace_gitignore_is_exactly_the_self_ignoring_pattern() -> None:
     assert lines == ["*", "!.gitignore"]
 
 
+# ---------------------------------------------------------------------------
+# /boot/firmware/licenses/: static third-party license texts and notices
+# (MIT/BSD/Apache/OFL binary-distribution requirement -- see README.md,
+# "Licenses and corresponding source")
+# ---------------------------------------------------------------------------
+
+BOOT_LICENSES_DIR = FILES_DIR / "boot" / "firmware" / "licenses"
+DISPLAY_FW_LICENSES_DIR = BOOT_LICENSES_DIR / "display-firmware"
+DISPLAY_FW_NOTICE = DISPLAY_FW_LICENSES_DIR / "NOTICE"
+
+_STATIC_LICENSE_FILES = [
+    BOOT_LICENSES_DIR / "README.txt",
+    DISPLAY_FW_NOTICE,
+    DISPLAY_FW_LICENSES_DIR / "licenses" / "Apache-2.0.txt",
+    DISPLAY_FW_LICENSES_DIR / "licenses" / "BSD-3-Clause.txt",
+    DISPLAY_FW_LICENSES_DIR / "licenses" / "BSD-3-Clause-STMicroelectronics.txt",
+    DISPLAY_FW_LICENSES_DIR / "licenses" / "OFL-1.1.txt",
+    DISPLAY_FW_LICENSES_DIR / "licenses" / "MIT-TinyUSB.txt",
+    BOOT_LICENSES_DIR / "tools" / "uv" / "LICENSE-APACHE",
+    BOOT_LICENSES_DIR / "tools" / "uv" / "LICENSE-MIT",
+]
+
+
+@pytest.mark.parametrize("path", _STATIC_LICENSE_FILES, ids=lambda p: p.relative_to(BOOT_LICENSES_DIR).as_posix())
+def test_boot_licenses_tree_carries_the_static_notices(path: Path) -> None:
+    assert path.is_file(), f"expected license file missing: {path}"
+    assert path.stat().st_size > 0, f"license file is empty: {path}"
+
+
+def test_display_firmware_notice_names_the_binary_linked_components() -> None:
+    text = _text(DISPLAY_FW_NOTICE)
+    for name in ("TinyUSB", "pico-sdk", "STMicroelectronics", "Noto Emoji", "Waveshare"):
+        assert name in text, f"NOTICE does not mention {name}"
+
+    for filename in (
+        "Apache-2.0.txt",
+        "BSD-3-Clause.txt",
+        "BSD-3-Clause-STMicroelectronics.txt",
+        "OFL-1.1.txt",
+        "MIT-TinyUSB.txt",
+    ):
+        assert filename in text, f"NOTICE does not reference licenses/{filename}"
+
+
+def test_apply_script_sends_boot_licenses_without_ownership() -> None:
+    text = _text(APPLY_SCRIPT)
+    assert "--exclude boot/firmware" in text
+    assert "--no-perms" in text
+
+
+def test_licenses_readme_points_at_the_source_tree_path() -> None:
+    text = _text(BOOT_LICENSES_DIR / "README.txt")
+    assert "/usr/share/palmimo/sources/" in text
+
+
 def test_root_gitignore_does_not_also_ignore_workspace() -> None:
     # Pinning the anti-pattern: a top-level ".workspace" or
     # "pigen/.workspace" entry in the root .gitignore would stop

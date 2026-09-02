@@ -1,0 +1,306 @@
+Palmimo face display firmware (RP2350) -- third-party notices. This file is
+the canonical copy; the firmware source tree links to it.
+
+The firmware in question is the RP2350 face-display firmware (the `.uf2`
+flashed onto Palmimo's Waveshare RP2350-Touch-LCD-2.8C display board),
+which drives the device's procedural face and emoji expressions.
+
+palmimo devkit -- RP2350 face display firmware
+=============================================
+
+This firmware bundles third-party source. Every bundled file is covered by one
+of the licenses below; full texts are in `licenses/`.
+
+  Waveshare RP2350-Touch-LCD-2.8C demo   Apache-2.0    licenses/Apache-2.0.txt
+  Raspberry Pi board header              BSD-3-Clause  licenses/BSD-3-Clause.txt
+  Raspberry Pi pico_sdk_import.cmake     BSD-3-Clause  full text inside the file
+  STMicroelectronics bitmap fonts        BSD-3-Clause  licenses/BSD-3-Clause-STMicroelectronics.txt
+  Noto Emoji artwork                     OFL-1.1 and   licenses/OFL-1.1.txt
+                                         Apache-2.0    licenses/Apache-2.0.txt
+                                         (§4 explains why both)
+  Raspberry Pi Pico SDK (pico-sdk)       BSD-3-Clause  licenses/BSD-3-Clause.txt
+  TinyUSB (bundled in pico-sdk)          MIT           licenses/MIT-TinyUSB.txt
+
+
+1. Waveshare board support code (Apache-2.0)
+--------------------------------------------
+
+    vendor/bsp/    — ST7701S RGB driver, PIO scan-out, I2C, GT911 touch,
+                     QMI8658 IMU, PCF85063 RTC, battery, buzzer, DMA IRQ helpers
+    vendor/GUI/    — GUI_Paint drawing helpers
+    vendor/CMakeLists.txt, vendor/*/CMakeLists.txt
+                   — build glue. Waveshare's, Apache-2.0 like the rest of the
+                     demo, and carrying no per-file license header. This
+                     includes vendor/Fonts/CMakeLists.txt: the fonts beside it
+                     are STMicroelectronics' (§2), but the build glue is not.
+
+Upstream: https://github.com/waveshareteam/RP2350-Touch-LCD-2.8C
+          (examples/C/libraries/), Copyright 2026 Waveshare, Apache-2.0.
+
+Waveshare published this repository on 2026-08-07 in response to our request.
+The sources are identical to the demo ZIP previously distributed from the
+product wiki after line-ending normalization (the ZIP ships CRLF): every file
+below matches the sha256 we had pinned against that ZIP. Apache-2.0 §4 lets us
+redistribute these files, modified, as long as the license text travels with
+them and modified files say so.
+
+The text that travels is licenses/Apache-2.0.txt, and it is the canonical
+Apache-2.0 as published at https://www.apache.org/licenses/LICENSE-2.0.txt
+(sha256 cfc7749b…, checked 2026-08-11) — not Waveshare's copy of it. The two
+differ only in the appendix, the "how to apply the License to your work"
+boilerplate, which Waveshare filled in with their own copyright line and which
+is not part of the license terms. The canonical text is used because this same
+file is what §4 relies on for the Noto Emoji artwork, and a file stamped with
+one copyright holder's name should not be the thing another holder's grant
+points at. Sections 1-9 are identical either way, and the URL the license
+itself names is the one this file came from. (Contrast
+licenses/BSD-3-Clause.txt and licenses/OFL-1.1.txt, which ARE verbatim upstream
+copies — see §3 and §4. There the upstream file itself is the artifact worth
+preserving; here the artifact is the license terms.)
+
+Upstream ships a LICENSE but no NOTICE file, so §4(d) adds nothing to carry
+over here (checked 2026-08-08).
+
+All 35 files under vendor/, plus boards/waveshare_rp2350_touch_lcd_2.8c.h and
+pico_sdk_import.cmake, were compared against upstream file by file (37 in
+total — upstream's own LICENSE is not among them, and is not vendored: see the
+paragraph above): 30 are byte-identical to it after line-ending normalization,
+and the modified ones are exactly the seven listed below. Each carries a notice
+at the top of the file, per §4(b):
+
+  - vendor/bsp/bsp_gt911.c
+      * g_gt911_irq_flag marked volatile — written in the GPIO IRQ callback,
+        read in the main loop.
+      * read buffer zero-initialized — an uninitialized buffer let a failed
+        I2C read present a stale data-ready bit. Touch is an exercised path.
+      * product-id buffer widened to data[5]={0} so the 4-byte read is
+        NUL-terminated before strstr()/printf("%s") (stack over-read).
+  - vendor/bsp/bsp_gt911.h
+      * exported bsp_gt911_reset() and bsp_gt911_reg_read_byte() so the
+        application can re-initialize a misbehaving GT911 with a bounded retry
+        (bsp_gt911_init() retries forever and would hang the main loop).
+  - vendor/bsp/bsp_st7701s.h
+      * BSP_LCD_PCLK_FREQ lowered 16 MHz -> 10 MHz, dropping the refresh from
+        ~60 Hz to ~38 Hz so the ~19 ms procedural face render fits inside one
+        scan period (tear-free). Expressions are slow, so the lower rate is fine.
+  - vendor/bsp/pio_rgb.c
+      * two manual pixel-copy loops replaced with memcpy (the DMA-complete ISR
+        copy and the framebuffer blit). Both run every frame.
+  - vendor/bsp/CMakeLists.txt
+      * dropped the no-OS-FatFS-SD link; comments trimmed.
+  - vendor/CMakeLists.txt
+      * dropped the lvgl and no-OS-FatFS-SD add_subdirectory lines; the face
+        firmware uses neither.
+  - boards/waveshare_rp2350_touch_lcd_2.8c.h  (Raspberry Pi BSD-3, see §3)
+      * PICO_PLATFORM set via comment-form for pico-sdk 2.1.1 compatibility
+        (see README.md build notes).
+      * PICO_FLASH_SIZE_BYTES default raised 4 MB -> 16 MB to match the board
+        actually shipped; the #define below it already assumed 16 MB.
+
+Not vendored from upstream:
+
+  - bsp_sd_card.* and the no-OS-FatFS-SD dependency — the face firmware does
+    not use the microSD slot.
+  - lvgl — not used by the face firmware.
+  - The wiki's schematic PDF is not redistributed here: it is not part of the
+    Apache-2.0 repository. See README.md for the official link.
+
+Known upstream issue worked around at the call site (not patched here, so the
+vendored file stays identical to upstream):
+
+  - GUI_Paint.c Paint_DrawString_EN swaps foreground and background before
+    handing them to Paint_DrawChar. Every src/face_serial.c call compensates by
+    passing the arguments as (background, foreground); the reason is spelled out
+    once, at the first call site in draw_confirm(). Patching the vendored file
+    instead would silently break all of those calls.
+
+Known upstream issues left as-is (not exercised by the face firmware, kept
+faithful so upstream diffs stay readable):
+
+  - bsp_battery.c average_filter: uninitialized accumulator + per-element
+    division. The battery module is not called by face_serial.
+  - bsp_qmi8658.c: double-precision sqrt/atan (IMU module, not used yet).
+  - bsp_pcf85063.c: unused local (RTC module, not used).
+  - GUI_Paint.c (Scale==2 path): `Color&0xff == BLACK` operator-precedence bug.
+    face_serial draws with native scale65, not the 1bpp path.
+  - GUI_Paint.c Paint_DrawNum: the digit buffer can be overrun by a
+    sufficiently long number. face_serial does not call it.
+
+
+2. STMicroelectronics bitmap fonts (BSD-3-Clause)
+-------------------------------------------------
+
+    vendor/Fonts/  — font8/12/16/20/24 ASCII plus font12CN/font24CN
+                     (CMakeLists.txt in that directory is Waveshare's build
+                     glue and belongs to §1, not here)
+
+Copyright (c) 2014 STMicroelectronics. Redistributed by Waveshare in the demo
+above and vendored here unmodified. Each of the font files listed above
+carries this same license text in its own header, so no per-file notice is
+needed — but binary distribution (this SD image) does not ship the source
+headers, so the full text is reproduced verbatim, copyright line included, as
+licenses/BSD-3-Clause-STMicroelectronics.txt (extracted from the font12.c
+header; the text is identical across all seven font files). The CN fonts are
+unused by this firmware but kept so the tree matches upstream.
+
+
+3. Raspberry Pi board header and SDK import (BSD-3-Clause)
+----------------------------------------------------------
+
+    boards/waveshare_rp2350_touch_lcd_2.8c.h  — Copyright (c) 2020 Raspberry Pi
+                                                (Trading) Ltd. Carries an SPDX
+                                                identifier but no license text,
+                                                so the full text is vendored as
+                                                licenses/BSD-3-Clause.txt.
+                                                Modified — see §1.
+    pico_sdk_import.cmake                     — Copyright (c) 2020 Raspberry Pi
+                                                (Trading) Ltd. Full license text
+                                                is in the file. Unmodified.
+
+licenses/BSD-3-Clause.txt is reproduced verbatim from pico-sdk's LICENSE.TXT,
+including the duplicated year in "Copyright 2020 (c) 2020 Raspberry Pi (Trading)
+Ltd." — that is upstream's wording, not a typo introduced here. Do not "fix" it:
+the point of the file is to be the license text as the copyright holder wrote it.
+The same file also covers the Raspberry Pi Pico SDK itself — see §5.
+
+
+4. Emoji artwork (SIL Open Font License 1.1 and Apache-2.0 — both apply)
+------------------------------------------------------------------------
+
+    assets/neon/     — the 80 emoji images compiled into the firmware: our
+                       restyled derivatives of Noto Color Emoji, generated by
+                       tools/stylize_emoji.py (black-background compositing,
+                       saturation boost, soft blur, additive halo — a mechanical
+                       per-image filter). This is the only emoji input the build
+                       consumes: tools/conv_emoji.py reads this directory and
+                       converts it to RGB565 C arrays. What it actually converts
+                       is the 80-codepoint EMOJI table hardcoded in that script;
+                       the src/CMakeLists.txt glob over this directory only
+                       triggers a rebuild. The two agree today (80 = 80), but
+                       adding a PNG here does not put it in the firmware.
+    assets/noto512/  — twelve unmodified Noto Color Emoji originals. NOT
+                       compiled into the firmware; used only by
+                       tools/gen_readme_icons.py to render the README icons.
+    docs/emoji/      — the twelve README icons themselves: 96px LANCZOS
+                       downscales of assets/noto512, produced by
+                       tools/gen_readme_icons.py. These are Modified Versions,
+                       as the neon set is, and likewise NOT compiled into the
+                       firmware.
+
+All three sets come from the Noto Emoji project, Copyright 2013 Google LLC —
+https://github.com/googlefonts/noto-emoji, the 512x512 png/512/emoji_u*.png
+bitmaps at commit 8998f5dd (2025-09-12). The noto512 files are byte-identical
+to upstream, and every neon file was generated from the same-named upstream
+bitmap (both verified 2026-08-10). stylize_emoji.py takes the source bitmaps
+via --cat as a locally assembled catalog directory holding unmodified copies of
+the png/512 files. Those copies sit in named subdirectories, and the names are
+load-bearing rather than decorative: the script converts only the subdirectories
+listed in --groups, whose default (emotion_face,heart,arrow,symbol) does not
+reproduce this set. The neon images were produced from the catalog's `all`
+directory (3731 files, the full png/512 set) with --style neon_feat, and the 80
+shipped here were then picked by hand out of that output and copied into
+assets/neon/ — the selection intent is recorded in tools/conv_emoji.py, not in
+any script argument. All 80 filenames are present under `all` (verified
+2026-08-10).
+
+License: upstream says two different things about this artwork, and the
+disagreement cannot be settled from upstream alone. This tree therefore does
+not pick a winner — it carries both license texts and satisfies both sets of
+obligations.
+
+What upstream says, and where the contradiction came from (checked 2026-08-11):
+
+  - The README assigns licenses per directory: the fonts subdirectory is under
+    "SIL Open Font License, version 1.1"; "Tools and most image resources are
+    under the Apache license, version 2.0"; third_party/region-flags is public
+    domain. Read literally, the png/512 bitmaps used here are image resources,
+    so Apache-2.0. That wording is deliberate: commit 51a7d28c6b (2016-10-20),
+    "Clarify copyright status of image data in the main README", is what
+    widened "Tools" to "Tools and most image resources".
+  - Issue #45 ("License for pngs and svgs?") asked upstream this exact
+    question. The maintainer answered the same day: "Apache for the source
+    data. Flag images are public domain, or copyright-free, there's a list. I
+    updated the README.md file."
+  - But that README sentence links to ./LICENSE, which at the commit we use
+    holds the OFL 1.1 text. It did not always: ./LICENSE carried the full
+    Apache-2.0 text from 2015 until commit 254596e5f8 (2024-07-29, "Update
+    LICENSE to OFL") replaced it. That commit touched LICENSE and nothing
+    else — the README's Apache-2.0 sentence and its link were left as they
+    were, which is how the two came to disagree.
+  - png/ has no license file of its own, so reading by directory inheritance
+    lands on OFL 1.1 through the root file.
+  - The bitmaps are not extracted from the OFL font; they are the font's build
+    input (Makefile: EMOJI_SRC_DIR ?= png/128, and the README: "The assets
+    provided in the repo are all those used to build the NotoColorEmoji
+    font"). So "OFL because it came out of a font" does not hold.
+  - Apache-2.0 also appears at svg/LICENSE (Copyright 2013 Google, Inc.) and
+    third_party/color_emoji/LICENSE, but only as the 13-line boilerplate
+    header; upstream ships no full Apache-2.0 text anywhere.
+
+On this evidence the Apache-2.0 reading is the stronger one, and redistributors
+who review licensing read it that way: Debian's fonts-noto-color-emoji
+copyright file, updated 2025-09-15 and so after the 2024 swap, still maps
+fonts/* to OFL and everything else to Apache-2.0. Against that, the
+repository's own machine-readable state at 8998f5dd says OFL 1.1, and no
+upstream statement since the swap addresses png/ — the question has not been
+put to upstream. So it is not settled, and picking a side would silently drop
+the other one's obligations: Apache-2.0 requires its own terms to ship, which
+including the OFL text does not accomplish, and vice versa. Both apply here:
+
+  Attribution — Noto Emoji, Copyright 2013 Google LLC / Google, Inc.,
+  https://github.com/googlefonts/noto-emoji at commit 8998f5dd.
+  Texts — licenses/OFL-1.1.txt and licenses/Apache-2.0.txt.
+
+licenses/OFL-1.1.txt is byte-identical to upstream's ./LICENSE at that commit
+(sha256 500bb1cc…, checked 2026-08-10). licenses/Apache-2.0.txt is the canonical
+Apache-2.0 text from apache.org (§1), so it carries no copyright holder's name
+of its own and serves both the Waveshare code in §1 and the artwork here.
+
+Points that matter for this firmware:
+
+  - OFL §2 and Apache-2.0 §4(a) both want the license text to travel with the
+    files. Both texts are in licenses/, and binary distributions must carry
+    them (see README).
+  - Apache-2.0 §4(b) wants modified files to say so. A PNG cannot carry an
+    in-file notice the way the vendor sources in §1 do, so the modification
+    record above is the practical equivalent rather than literal compliance.
+  - Upstream ships no NOTICE file, so Apache-2.0 §4(d) adds nothing to carry
+    over here — same as §1.
+  - No Reserved Font Name is declared (the copyright line carries no "with
+    Reserved Font Name"), so OFL §3 imposes no renaming on derivatives.
+  - Under OFL §5 the restyled neon derivatives stay OFL 1.1 on that reading.
+  - For selling the devkit: shipping the images inside the firmware and selling
+    the devkit is permitted on either reading — Apache-2.0 imposes no such
+    restriction, and OFL §2 expressly allows bundling with software and selling
+    that. Selling the emoji artwork on its own is permitted only under the
+    Apache-2.0 reading, since OFL §1 forbids it. Do not do that until upstream
+    has been asked and has answered.
+
+
+5. Linked into the firmware binary, not in the source tree
+------------------------------------------------------------
+
+These are not vendored as source in the firmware repository (they are
+fetched at build time via PICO_SDK_PATH), but their code is compiled and
+linked directly into the shipped `.uf2` binary, so their notices belong
+here just as much as the vendored code above.
+
+  - Raspberry Pi Pico SDK (pico-sdk, tag 2.1.1)
+      Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+      License: BSD-3-Clause
+      Full text: licenses/BSD-3-Clause.txt (the same file §3 uses — this is
+      the SDK's own LICENSE.TXT, which boards/*.h and pico_sdk_import.cmake
+      above are copied from).
+
+  - TinyUSB (bundled inside pico-sdk 2.1.1 at lib/tinyusb; linked into this
+    firmware via pico_enable_stdio_usb(), which the build enables for the
+    firmware's USB-serial control channel)
+      Copyright (c) 2018, hathach (tinyusb.org)
+      License: MIT
+      Full text: licenses/MIT-TinyUSB.txt (pico-sdk 2.1.1's bundled copy of
+      TinyUSB's own LICENSE file)
+
+  - Prebuilt pioasm / picotool — build-time-only tools invoked by the CMake
+    build to generate PIO headers and produce the final `.uf2`; neither
+    ships any of its own code inside the firmware binary. See README.md
+    build notes for how they are obtained.
