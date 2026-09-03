@@ -92,8 +92,7 @@ at the top of the file, per §4(b):
       * dropped the lvgl and no-OS-FatFS-SD add_subdirectory lines; the face
         firmware uses neither.
   - boards/waveshare_rp2350_touch_lcd_2.8c.h  (Raspberry Pi BSD-3, see §3)
-      * PICO_PLATFORM set via comment-form for pico-sdk 2.1.1 compatibility
-        (see README.md build notes).
+      * PICO_PLATFORM set via comment-form for pico-sdk 2.1.1 compatibility.
       * PICO_FLASH_SIZE_BYTES default raised 4 MB -> 16 MB to match the board
         actually shipped; the #define below it already assumed 16 MB.
 
@@ -136,12 +135,17 @@ faithful so upstream diffs stay readable):
 
 Copyright (c) 2014 STMicroelectronics. Redistributed by Waveshare in the demo
 above and vendored here unmodified. Each of the font files listed above
-carries this same license text in its own header, so no per-file notice is
-needed — but binary distribution (this SD image) does not ship the source
-headers, so the full text is reproduced verbatim, copyright line included, as
-licenses/BSD-3-Clause-STMicroelectronics.txt (extracted from the font12.c
-header; the text is identical across all seven font files). The CN fonts are
-unused by this firmware but kept so the tree matches upstream.
+(vendor/Fonts/font8.c, font12.c, font16.c, font20.c, font24.c, font12CN.c,
+font24CN.c) carries this same license text in its own header, so no
+per-file notice is needed — but binary distribution (this SD image) does
+not ship the source headers, so the full text is reproduced verbatim,
+copyright line included, in licenses/BSD-3-Clause-STMicroelectronics.txt.
+That file is extracted verbatim from the font12.c header (the text is
+identical across all seven font files) and, per the "verbatim" claim
+above, carries only the copyright line and the license body -- no
+provenance prose of our own, which is why that explanation lives here
+instead. The CN fonts are unused by this firmware but kept so the tree
+matches upstream.
 
 
 3. Raspberry Pi board header and SDK import (BSD-3-Clause)
@@ -260,7 +264,7 @@ Points that matter for this firmware:
 
   - OFL §2 and Apache-2.0 §4(a) both want the license text to travel with the
     files. Both texts are in licenses/, and binary distributions must carry
-    them (see README).
+    them (see ../README.txt).
   - Apache-2.0 §4(b) wants modified files to say so. A PNG cannot carry an
     in-file notice the way the vendor sources in §1 do, so the modification
     record above is the practical equivalent rather than literal compliance.
@@ -302,5 +306,4 @@ here just as much as the vendored code above.
 
   - Prebuilt pioasm / picotool — build-time-only tools invoked by the CMake
     build to generate PIO headers and produce the final `.uf2`; neither
-    ships any of its own code inside the firmware binary. See README.md
-    build notes for how they are obtained.
+    ships any of its own code inside the firmware binary.

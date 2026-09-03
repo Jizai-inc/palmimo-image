@@ -1,11 +1,5 @@
 Copyright (c) 2014 STMicroelectronics
 
-Extracted verbatim from the license header carried in each of the bundled
-STMicroelectronics bitmap font source files (vendor/Fonts/font8.c,
-font12.c, font16.c, font20.c, font24.c, font12CN.c, font24CN.c) in the
-Palmimo face display firmware source tree. See display-firmware/NOTICE,
-section 2, for which files this covers.
-
 Redistribution and use in source and binary forms, with or without modification,
 are permitted provided that the following conditions are met:
   1. Redistributions of source code must retain the above copyright notice,

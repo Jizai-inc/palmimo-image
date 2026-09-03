@@ -177,14 +177,37 @@ already the medium every unit ships on. So we ship the corresponding source
 for the apt packages on the image alongside the binaries, on that same
 medium: at build time, the pi-gen stage collects every apt package's
 source (not just the GPL/LGPL ones — license detection is not something to
-trust blindly, and over-inclusion is harmless) into `/usr/share/palmimo/sources/`
-on the rootfs. That
+trust blindly; the size cost of that over-inclusion will be measured
+against a real build once this step is implemented) into
+`/usr/share/palmimo/sources/` on the rootfs. That
 step is not implemented in this pull request — it lands in a follow-up PR
 that also generates the apt and Portal license trees below at build time,
 since both need the same package/dependency enumeration machinery. This
 repository does not otherwise claim more than passing along stock Debian /
 Raspberry Pi OS package sources unmodified (`lib/patch_comitup_nm.py` above
 is the one exception).
+
+This apt-package collection does not cover everything on the image, though.
+`uv` (installed as a prebuilt binary, not an apt package) and Palmimo
+Portal (its own Python venv plus a prebuilt static frontend bundle, neither
+apt either) sit outside that machinery entirely. Their license *display*
+lives at `tools/uv/` and `portal/` respectively (see below), but whether
+either actually carries a (L)GPL component that would itself require
+corresponding source is an open question this repository has not yet
+resolved. A further, narrower gap even within `tools/uv/`: `uv`'s binary
+statically links a set of Rust crates, and `tools/uv/`'s two files (its own
+dual Apache-2.0/MIT license) do not cover per-crate attribution for
+everything linked into it. The plan, not yet done, is to pin the exact
+`uv` version we ship and pull that version's own crate-attribution bundle
+rather than hand-assembling one.
+
+GPLv3 §6 also has a User Product / Installation Information clause: for a
+"User Product" it would require giving the owner a way to install a
+modified version of the GPLv3'd binaries that the device accepts as
+authentic. That does not apply here — the owner already has an
+unrestricted root account on their own device, with no signature
+verification or key requirement standing between them and installing
+modified software, so there is no Installation Information to withhold.
 
 ### `/boot/firmware/licenses/`
 
@@ -197,10 +220,12 @@ static third-party software:
 
 - `display-firmware/` — the RP2350 face-display firmware's third-party
   notices (Waveshare BSD/Apache code, STMicroelectronics fonts, Noto Emoji
-  artwork, the Raspberry Pi Pico SDK, and TinyUSB). `NOTICE` here is the
-  **canonical** copy — the firmware's own source tree (a private monorepo,
-  not published) links to this file rather than carrying a second copy, so
-  the two never drift apart. See `files/boot/firmware/licenses/display-firmware/NOTICE`.
+  artwork, the Raspberry Pi Pico SDK, and TinyUSB). `NOTICE` here is meant
+  to become the **canonical** copy: a follow-up pull request against the
+  monorepo replaces `firmware/display/NOTICE` (in that private monorepo,
+  not published) with a symlink to this file. Until that PR lands the two
+  copies can diverge, since nothing enforces they stay in sync today. See
+  `files/boot/firmware/licenses/display-firmware/NOTICE`.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
 - `pi/`, `portal/` — apt package and Palmimo Portal dependency license
   trees, generated at build time (not part of this PR; see above).
