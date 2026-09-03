@@ -78,24 +78,9 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
   ゼロから作るため。
 - `03-portal/` — uv 導入・`palmimo-portal` のタグ clone・
   `uv sync --frozen --no-dev`・`fetch_static`（Updater と同一コードパス）。
-- `04-oss-compliance/` — `03-portal` の後（venv が出来てから）に走る。
-  一時的に deb-src を有効化 (`files/palmimo-src.sources`) して
-  `apt-get update` → `lib/collect_oss_compliance.py` をチェックインコピー
-  を作らず `$PALMIMO_IMAGE_DIR` から chroot の `/tmp` へコピーして
-  `on_chroot` で実行 → 削除 → deb-src を無効化（`trap` による無条件
-  クリーンアップ。`apt-get update` を再度打ち直すのではなく
-  `/var/lib/apt/lists/` の Sources インデックスだけを削除して、出荷
-  イメージは deb-src を持たない状態にする）。chroot に実際に
-  入っているパッケージの版と同じ対応ソースを
-  `/usr/share/palmimo/sources/` に集め、apt の copyright と Portal の
-  Python 依存ライセンスを `/boot/firmware/licenses/{pi,portal}/` に写す
-  （GPLv2 §3(a) / GPLv3 §6(a)。詳細は `../doc/design.md` の
-  「対応ソースとライセンス全文の同梱」）。
-  `PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`config` で export 済み、
-  `tools/make_image.py --skip-corresponding-source` からも渡せる）は
-  対応ソース取得だけを飛ばす開発用エスケープハッチ — ライセンスのコピー
-  自体は常に行われ、`MANIFEST.txt` の先頭に `STATUS: INCOMPLETE` が
-  刻まれるので、この設定で作ったイメージが出荷可能と誤認されることはない。
+- `04-oss-compliance/` — `03-portal` の後、`lib/collect_oss_compliance.py`
+  を chroot にコピーして実行・削除。対応ソース（GPLv2 §3(a) / GPLv3
+  §6(a)）と apt/Portal のライセンスを集める。詳細は `../doc/design.md`。
 
 `EXPORT_IMAGE` がこのステージを最終 `.img` の export 対象として指す。
 `.workspace/` は `make_image.py` の作業場（gitignored・消して良い）。

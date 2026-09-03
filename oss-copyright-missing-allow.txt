@@ -1,13 +1,7 @@
 # apt packages allowed to have no /usr/share/doc/<package>/copyright file
-# (see lib/collect_oss_compliance.py and README.md, "Corresponding source
-# for the rest of the image"). Same format as oss-source-exclude.txt: one
-# binary package name per line, `#` for comments/reasons. Any package
-# missing its copyright file that is NOT listed here fails the build --
-# collect_oss_compliance.py lists the offending package name(s) and exits
-# non-zero, so a missing copyright file is caught at build time, not
-# discovered later on a shipped image.
-#
-# Empty by design: no package has been hand-reviewed and approved for this
-# exception yet. Add an entry here only after confirming by hand that the
-# package genuinely ships no copyright file and that this is not itself a
-# packaging bug worth reporting upstream.
+# (see lib/collect_oss_compliance.py and README.md). Same format as
+# oss-source-exclude.txt. Any missing-copyright package NOT listed here
+# fails the build.
+
+# Empty by design: nothing has been hand-reviewed and approved yet. Add an
+# entry only after confirming by hand it's not a packaging bug upstream.

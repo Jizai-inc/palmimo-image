@@ -2,45 +2,18 @@
 """Collect GPL/LGPL corresponding source and third-party license metadata
 onto the Palmimo image, at pi-gen build time, inside the chroot.
 
-Runs the same way lib/patch_comitup_nm.py does: copied into the chroot as a
-single stdlib-only file and invoked as `python3 collect_oss_compliance.py`
-by pigen/stage-palmimo/04-oss-compliance/00-run.sh, then deleted -- the
-shipped image never keeps this script. See README.md ("Licenses and
-corresponding source") and doc/design.md ("対応ソースとライセンス全文の同梱")
-for why this exists and what it satisfies.
+Copied into the chroot as a single stdlib-only file and run by
+pigen/stage-palmimo/04-oss-compliance/00-run.sh, which deletes it before
+the image ships. See README.md ("Licenses and corresponding source") and
+doc/design.md for the policy this satisfies.
 
-Policy (GPLv2 section 3(a) / GPLv3 section 6(a)): Palmimo DevKit is sold,
-not distributed at no charge, so the image ships the corresponding source
-for every apt source package alongside the binaries, on the same medium --
-not a written offer. The machine-readable license metadata on an apt
-package is not trustworthy enough to filter by license family, so every
-source package is collected except the explicit, hand-reviewed exclusion
-list in oss-source-exclude.txt (non-free firmware blobs that carry no
-source-provision obligation).
+Every I/O boundary is a parameter (the `run` callable, rootfs path, output
+paths), so this module is unit-testable without dpkg or network; only
+main() wires it to the real subprocess/filesystem.
 
-Every I/O boundary is a parameter -- the `run` callable that shells out to
-apt-get, the rootfs path, and every output path -- so this module's logic
-is unit-testable on a host with no dpkg database and no network (see
-tests/test_collect_oss_compliance.py). Only main() wires those parameters
-to the real subprocess/filesystem.
-
-Everything this script inspects has to actually be *installed* -- dpkg-query
-output is filtered on `${db:Status-Status} == installed` in both queries it
-runs (source-package enumeration and copyright-file enumeration), so a
-purged-but-config-remaining package never triggers a source fetch or a
-"missing copyright" report for something not actually shipped.
-
-Final layout this script produces:
-
-  <root>/usr/share/palmimo/sources/MANIFEST.txt
-  <root>/usr/share/palmimo/sources/debian/<source>_<version>/*.dsc + tarballs
-  <root>/boot/firmware/licenses/MANIFEST.txt (copy of the above, readable from a PC)
-  <root>/boot/firmware/licenses/pi/common-licenses/
-  <root>/boot/firmware/licenses/pi/<binary-package>/copyright
-  <root>/boot/firmware/licenses/portal/python/<dist>-<version>/LICENSE-METADATA.txt (+ License-File copies)
-  <root>/boot/firmware/licenses/portal/python-runtime/<uv-managed-python-dir>/licenses/
-  <root>/boot/firmware/licenses/portal/THIRD_PARTY_NOTICES.md
-  <root>/boot/firmware/licenses/portal/THIRD_PARTY_LICENSES.txt (if the portal build produced one)
+Final layout: <root>/usr/share/palmimo/sources/ (fetched source +
+MANIFEST.txt, copied to <root>/boot/firmware/licenses/) and
+<root>/boot/firmware/licenses/{pi,portal}/ (copyright/license text).
 """
 
 from __future__ import annotations
@@ -63,75 +36,53 @@ DPKG_QUERY_INSTALLED_FORMAT = "${Package}\t${db:Status-Status}\n"
 
 _INSTALLED_STATUS = "installed"
 
-# Read by copy_portal_licenses(): the METADATA header fields worth keeping.
-# Everything else in a METADATA file is package body text (long description,
-# author, project URLs, ...) that is not a license declaration and must not
-# leak into LICENSE-METADATA.txt.
+# METADATA header fields worth keeping; everything else is body text.
 _METADATA_HEADER_PREFIXES = ("License-Expression:", "License:", "Classifier: License ::")
 _LICENSE_FILE_PREFIX = "License-File:"
 
 RunFunc = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
 
-# ---------------------------------------------------------------------------
 # dpkg-query output -> (source, version) pairs / installed package names
-# ---------------------------------------------------------------------------
+def _parse_dpkg_query_lines(dpkg_query_output: str, field_count: int) -> list[tuple[str, ...]]:
+    """Split dpkg-query output into stripped, tab-separated field tuples,
+    skipping blank lines. Raises ValueError on a line with the wrong field
+    count."""
+    rows: list[tuple[str, ...]] = []
+    for line in dpkg_query_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = tuple(line.split("\t"))
+        if len(parts) != field_count:
+            raise ValueError(f"unexpected dpkg-query line (expected {field_count} tab-separated fields): {line!r}")
+        rows.append(parts)
+    return rows
 
 
 def list_source_packages(dpkg_query_output: str) -> set[tuple[str, str]]:
-    """Parse `dpkg-query -W -f='${binary:Package}\\t${source:Package}\\t
-    ${source:Version}\\t${db:Status-Status}\\n'` output into the set of
-    (source package, source version) pairs to fetch.
-
-    Multiple binary packages built from the same source collapse to one
-    pair (dedup is the point: apt-get source only needs to run once per
-    source package). Only lines whose dpkg status is "installed" count --
-    a purged-but-config-remaining package ("config-files", "half-installed",
-    ...) is not actually on the image and must not trigger a fetch."""
-    pairs: set[tuple[str, str]] = set()
-    for line in dpkg_query_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) != 4:
-            raise ValueError(f"unexpected dpkg-query line (expected 4 tab-separated fields): {line!r}")
-        _binary, source, version, status = parts
-        if status != _INSTALLED_STATUS:
-            continue
-        pairs.add((source, version))
-    return pairs
+    """Parse dpkg-query output (DPKG_QUERY_SOURCE_FORMAT) into the set of
+    installed (source package, source version) pairs to fetch."""
+    return {
+        (source, version)
+        for _binary, source, version, status in _parse_dpkg_query_lines(dpkg_query_output, 4)
+        if status == _INSTALLED_STATUS
+    }
 
 
 def list_installed_packages(dpkg_query_output: str) -> list[str]:
-    """Parse `dpkg-query -W -f='${Package}\\t${db:Status-Status}\\n'` output
-    into the sorted list of package names whose dpkg status is
-    "installed"."""
-    names: set[str] = set()
-    for line in dpkg_query_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) != 2:
-            raise ValueError(f"unexpected dpkg-query line (expected 2 tab-separated fields): {line!r}")
-        name, status = parts
-        if status != _INSTALLED_STATUS:
-            continue
-        names.add(name)
-    return sorted(names)
+    """Parse dpkg-query output (DPKG_QUERY_INSTALLED_FORMAT) into the sorted
+    list of installed package names."""
+    return sorted(
+        {name for name, status in _parse_dpkg_query_lines(dpkg_query_output, 2) if status == _INSTALLED_STATUS}
+    )
 
 
-# ---------------------------------------------------------------------------
 # oss-source-exclude.txt / oss-copyright-missing-allow.txt (same format)
-# ---------------------------------------------------------------------------
-
-
 def parse_exclude_file(text: str) -> dict[str, str]:
-    """Parse a name-list file (oss-source-exclude.txt or
-    oss-copyright-missing-allow.txt): one package name per line, with an
-    optional `# reason` trailing comment. Full-line comments and blank
-    lines are ignored. Returns {name: reason} (reason is "" if none given)."""
+    """Parse a name-list file (one name per line, optional `# reason`
+    trailing comment; full-line comments and blanks ignored) into
+    {name: reason}."""
     result: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -149,11 +100,7 @@ def parse_exclude_file(text: str) -> dict[str, str]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # .dsc Checksums-Sha256 parsing/verification
-# ---------------------------------------------------------------------------
-
-
 def parse_dsc_checksums_sha256(dsc_text: str) -> list[tuple[str, str, int]]:
     """Return (filename, sha256, size) tuples from a .dsc's Checksums-Sha256
     field. Returns [] if the field is absent."""
@@ -176,11 +123,7 @@ def parse_dsc_checksums_sha256(dsc_text: str) -> list[tuple[str, str, int]]:
     return entries
 
 
-# ---------------------------------------------------------------------------
 # fetch_sources: apt-get source --download-only --only-source <src>=<ver>
-# ---------------------------------------------------------------------------
-
-
 @dataclasses.dataclass(frozen=True)
 class FetchResult:
     source: str
@@ -200,10 +143,8 @@ def _find_dsc(dest_dir: Path) -> Path | None:
 
 
 def _verify_dsc(dsc_path: Path) -> tuple[list[str], list[tuple[str, str, int]]]:
-    """Verify a fetched .dsc's Checksums-Sha256 field against the files
-    actually on disk next to it. Returns (problems, files) -- files is the
-    (filename, sha256, size) list, including the .dsc itself, when problems
-    is empty."""
+    """Verify a fetched .dsc's Checksums-Sha256 field against the files on
+    disk. Returns (problems, files); files includes the .dsc itself."""
     problems: list[str] = []
     dsc_sha = sha256_file(dsc_path)
     dsc_size = dsc_path.stat().st_size
@@ -238,21 +179,11 @@ def fetch_sources(
     run: RunFunc,
     exclude: Mapping[str, str],
 ) -> list[FetchResult]:
-    """Fetch every (source, version) pair's corresponding source into
-    out_dir/<source>_<version>/ via `apt-get source --download-only
-    --only-source <source>=<version>`, run through the injected `run`
-    callable (so this is testable without a real apt-get).
-
-    A successful fetch is not just "zero exit and a .dsc appeared" -- every
-    file the .dsc declares via its Checksums-Sha256 field must be present
-    and hash-match, or the pair counts as failed (a partial/corrupt mirror
-    download must not silently ship broken corresponding source).
-
-    Every pair is attempted, even after an earlier one fails -- callers
-    decide what to do with the failures (see failed_results /
-    format_failure_report) rather than this function aborting early, so a
-    single bad mirror entry does not hide failures in the rest of the
-    fetch."""
+    """Fetch every (source, version) pair into out_dir/<source>_<version>/
+    via `apt-get source`, through the injected `run` callable. A fetch
+    counts as failed unless every file the .dsc declares is present and
+    hash-matches. Every pair is attempted even after an earlier failure;
+    callers inspect failed_results / format_failure_report."""
     results: list[FetchResult] = []
     for source, version in sorted(pairs):
         if source in exclude:
@@ -286,11 +217,7 @@ def format_failure_report(failures: Iterable[FetchResult]) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # write_manifest
-# ---------------------------------------------------------------------------
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -311,15 +238,9 @@ def write_manifest(
     portal_third_party_licenses_present: bool,
     portal_python_runtime_dirs: Iterable[str],
 ) -> None:
-    """Write MANIFEST.txt. Deterministic: the source table is sorted by
-    (source, version, status, filename) regardless of input order, so a
-    re-run over the same inputs produces a byte-identical file (useful for
-    diffing images). Written atomically (tmp file + os.replace) so a reader
-    never observes a partially-written file.
-
-    STATUS is OK unless one of several conditions holds, in which case it
-    is INCOMPLETE and every applicable reason is listed -- each condition
-    means "a human needs to look at this before the image ships"."""
+    """Write MANIFEST.txt deterministically (sorted rows) and atomically
+    (tmp file + os.replace). STATUS is OK unless a listed condition holds,
+    in which case it is INCOMPLETE with every applicable reason listed."""
     dists_without_license_text = sorted(set(portal_dists_without_license_text))
     python_runtime_dirs = sorted(set(portal_python_runtime_dirs))
 
@@ -429,11 +350,7 @@ def write_manifest(
     os.replace(tmp_path, out_path)
 
 
-# ---------------------------------------------------------------------------
 # copy_pi_licenses: /usr/share/common-licenses + per-package copyright
-# ---------------------------------------------------------------------------
-
-
 @dataclasses.dataclass(frozen=True)
 class PiLicenseReport:
     copied: list[str]
@@ -442,11 +359,8 @@ class PiLicenseReport:
 
 def copy_pi_licenses(rootfs: Path, out_dir: Path, packages: Iterable[str]) -> PiLicenseReport:
     """Copy /usr/share/common-licenses/ and each installed package's
-    /usr/share/doc/<package>/copyright into out_dir. A copyright file that
-    is itself a symlink (common when several binary packages share one
-    source's copyright file) is copied by its resolved content, not as a
-    dangling/relative symlink -- shutil.copyfile follows symlinks by
-    default, which is exactly the behavior wanted here."""
+    /usr/share/doc/<package>/copyright into out_dir (symlinks resolved,
+    via shutil.copyfile)."""
     common_src = rootfs / "usr" / "share" / "common-licenses"
     common_dst = out_dir / "common-licenses"
     if common_src.is_dir():
@@ -470,11 +384,7 @@ def copy_pi_licenses(rootfs: Path, out_dir: Path, packages: Iterable[str]) -> Pi
     return PiLicenseReport(copied=copied, missing=missing)
 
 
-# ---------------------------------------------------------------------------
 # copy_portal_licenses: dist-info METADATA + License-File + repo-level notices
-# ---------------------------------------------------------------------------
-
-
 @dataclasses.dataclass(frozen=True)
 class PortalLicenseReport:
     dists: list[str]
@@ -505,26 +415,13 @@ def _extract_license_metadata(metadata_text: str) -> tuple[list[str], list[str]]
 
 
 def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: Path) -> PortalLicenseReport:
-    """Process every *.dist-info/ in venv_site_packages: extract the
-    License-Expression / License / Classifier: License :: header lines from
-    METADATA into <out_dir>/python/<dist>-<version>/LICENSE-METADATA.txt,
-    and copy each file named by a License-File: header (relative to the
-    dist-info directory, commonly directly inside it or under a licenses/
-    subdirectory) alongside it.
-
-    A dist whose METADATA declares a License-File: that does not actually
-    exist is recorded in `missing_license_files` -- the caller (main())
-    treats this as fatal, since a license file we claim to ship but don't
-    have is worse than not looking. A dist with neither a license header
-    nor a License-File at all gets no LICENSE-METADATA.txt (an empty file
-    would be misleading) and is recorded in `dists_without_license_text`
-    for manual review instead.
-
-    Also copies portal_root/THIRD_PARTY_NOTICES.md and, if it exists,
-    palmimo_portal/static/THIRD_PARTY_LICENSES.txt (generated by a parallel
-    portal-side PR) -- its absence is only a warning here, never a hard
-    failure of this function (the caller decides what that means for
-    STATUS)."""
+    """For every *.dist-info/ in venv_site_packages, extract METADATA's
+    license header lines into LICENSE-METADATA.txt and copy each
+    License-File: target alongside it. A declared License-File that does
+    not exist is fatal (see missing_license_files); a dist with neither a
+    header nor a License-File is recorded in dists_without_license_text.
+    Also copies THIRD_PARTY_NOTICES.md and, if present,
+    THIRD_PARTY_LICENSES.txt from portal_root (absence is only a warning)."""
     python_out = out_dir / "python"
     dists: list[str] = []
     dists_without_license_text: list[str] = []
@@ -591,21 +488,12 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
     )
 
 
-# ---------------------------------------------------------------------------
 # find_portal_venv_site_packages: glob, never guess a Python minor version
-# ---------------------------------------------------------------------------
-
-
 def find_portal_venv_site_packages(portal_root: Path) -> Path:
-    """Locate the Portal venv's site-packages directory by globbing
-    <portal_root>/.venv/lib/python*/site-packages -- this script must not
-    hardcode a Python minor version (uv creates the venv matching the
-    portal's own .python-version, which can drift from the chroot's system
-    Python across a Debian release). Raises RuntimeError, naming every
-    path actually looked at, when no candidate directory exists, or when
-    every candidate exists but contains zero *.dist-info directories (an
-    empty/broken venv must fail the build loudly, not silently ship zero
-    Python dependency licenses)."""
+    """Locate the Portal venv's site-packages by globbing
+    <portal_root>/.venv/lib/python*/site-packages (never hardcode the
+    minor version). Raises RuntimeError if no candidate exists or every
+    candidate has zero *.dist-info directories."""
     pattern = str(portal_root / ".venv" / "lib" / "python*" / "site-packages")
     candidates = sorted(Path(p) for p in glob.glob(pattern))
     existing = [c for c in candidates if c.is_dir()]
@@ -622,17 +510,11 @@ def find_portal_venv_site_packages(portal_root: Path) -> Path:
     )
 
 
-# ---------------------------------------------------------------------------
 # uv-managed Python runtime detection (portal_home/.local/share/uv/python/)
-# ---------------------------------------------------------------------------
-
-
 def find_uv_managed_pythons(portal_home: Path) -> list[Path]:
-    """List directories under <portal_home>/.local/share/uv/python/ -- each
-    one is a python-build-standalone runtime uv downloaded on its own
-    (rather than using the chroot's system Python), which this script has
-    not reviewed for bundled-license implications (e.g. a statically linked
-    GPLv3 readline). Returns [] if the directory does not exist."""
+    """List python-build-standalone runtime dirs under
+    <portal_home>/.local/share/uv/python/ (not license-reviewed by this
+    script). Returns [] if the directory does not exist."""
     uv_python_dir = portal_home / ".local" / "share" / "uv" / "python"
     if not uv_python_dir.is_dir():
         return []
@@ -640,12 +522,8 @@ def find_uv_managed_pythons(portal_home: Path) -> list[Path]:
 
 
 def copy_uv_python_runtime_licenses(uv_pythons: Iterable[Path], out_dir: Path) -> list[str]:
-    """Copy each uv-managed Python runtime's licenses/ subdirectory (when
-    present) to out_dir/<runtime-dir-name>/licenses/. Returns the names of
-    runtimes actually copied -- a runtime dir with no licenses/ subdir is
-    skipped (and, either way, the caller still records every runtime dir
-    name in MANIFEST.txt under "needs a decision", since a copied license
-    text does not itself resolve whether that runtime is safe to ship)."""
+    """Copy each uv-managed runtime's licenses/ subdirectory (if present)
+    to out_dir/<runtime-dir-name>/licenses/. Returns the names copied."""
     copied: list[str] = []
     for py_dir in uv_pythons:
         licenses_src = py_dir / "licenses"
@@ -657,15 +535,9 @@ def copy_uv_python_runtime_licenses(uv_pythons: Iterable[Path], out_dir: Path) -
     return copied
 
 
-# ---------------------------------------------------------------------------
 # main: wires the pure functions above to the real chroot filesystem/apt-get
-# ---------------------------------------------------------------------------
-
-
 def _real_run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    """The one subprocess wrapper main() uses -- for apt-get source (with a
-    meaningful cwd) and both dpkg-query calls alike (cwd is irrelevant to
-    dpkg-query but harmless to pass)."""
+    """The one subprocess wrapper main() uses."""
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
 
 
@@ -715,9 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     exclude = parse_exclude_file(exclude_path.read_text(encoding="utf-8"))
     copyright_allow = parse_exclude_file(copyright_allow_path.read_text(encoding="utf-8"))
 
-    # A previous interrupted build (or a re-run over the same chroot) must
-    # not leave stale output behind -- every output directory this script
-    # owns is wiped before anything is written.
+    # Wipe stale output from a previous interrupted/re-run build first.
     shutil.rmtree(sources_out, ignore_errors=True)
     shutil.rmtree(licenses_out / "pi", ignore_errors=True)
     shutil.rmtree(licenses_out / "portal", ignore_errors=True)

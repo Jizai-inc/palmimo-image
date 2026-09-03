@@ -429,59 +429,29 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 
 ## 対応ソースとライセンス全文の同梱（実装済み、2026-09-02）
 
-`04-oss-compliance/` ステージが、`03-portal` の後（Portal venv ができて
-から）に走り、`lib/collect_oss_compliance.py`（chroot 内で `python3` 単体
-実行される標準ライブラリのみのスクリプト。`patch_comitup_nm.py` と同じ
-「コピーして実行して消す」契約）を通じて次の 3 つを同時に行う:
+`04-oss-compliance/` ステージ（`03-portal` の後）が
+`lib/collect_oss_compliance.py`（`patch_comitup_nm.py` と同じ「コピーして
+実行して消す」契約）を通じて 3 つを行う:
 
-1. **対応ソースの収集**（GPLv2 §3(a) / GPLv3 §6(a)）: `dpkg-query -W`
-   で chroot に実際にインストールされているパッケージを列挙し、
-   `(source package, source version)` の集合へ縮約したうえで、各々を
-   `apt-get source --download-only --only-source <src>=<ver>` で
-   `/usr/share/palmimo/sources/debian/<src>_<ver>/` に取得する
-   （`.dsc` + tarball、展開しない）。**ビルド時に chroot に入っている版と
-   同じ版**を取りに行くのが眼目 — 後から集めると出荷時の版がミラーから
-   消えていることがあるため。apt のライセンスメタデータは機械判定として
-   信用しないため、GPL 系に絞らず全ソースパッケージを対象にし、
-   `oss-source-exclude.txt`（非フリーのファームウェアブロブ 3 件のみ —
-   `firmware-nonfree` / `raspi-firmware` / `bluez-firmware`。いずれも
-   ソース提供義務のあるライセンスを含まない）だけを手動レビュー済みの
-   例外として除く。取得は deb-src を一時的に有効化して行い
-   （`04-oss-compliance/files/palmimo-src.sources`、debian
-   main/contrib/non-free/non-free-firmware + debian-security +
-   archive.raspberrypi.com、`stage0/00-configure-apt` と同じ鍵）、収集後に
-   その sources ファイルを削除して `apt-get update` を打ち直す — 出荷
-   イメージが deb-src を持つことは決してない。
-2. **apt パッケージの copyright**: `/usr/share/common-licenses/`（GPL-2 /
-   GPL-3 / LGPL-2.1 などの本文）と各パッケージの
-   `/usr/share/doc/<pkg>/copyright`（シンボリックリンクは実体を辿る）を
-   `/boot/firmware/licenses/pi/` に複製する。
-3. **Portal の Python 依存ライセンス**: Portal venv の
-   `*.dist-info/METADATA` から `License:` / `License-Expression:` /
-   `Classifier: License ::` 行を抜き出して
-   `/boot/firmware/licenses/portal/python/<dist>-<version>/LICENSE-METADATA.txt`
-   に書き、`License-File:` が指すファイルを同じディレクトリへコピーする。
-   Portal リポジトリ直下の `THIRD_PARTY_NOTICES.md` と、存在すれば
-   `palmimo_portal/static/THIRD_PARTY_LICENSES.txt`（portal 側の並行 PR
-   が生成する npm 依存ライセンス）も `/boot/firmware/licenses/portal/`
-   に写す。
+1. **対応ソースの収集**（GPLv2 §3(a) / GPLv3 §6(a)）: `dpkg-query -W` で
+   chroot に実際にインストールされている `(source, version)` を列挙し、
+   一時的に有効化した deb-src から `apt-get source` で
+   `/usr/share/palmimo/sources/debian/<src>_<ver>/` に取得（`.dsc` +
+   tarball、展開しない）。`oss-source-exclude.txt` の 3 件（非フリー
+   ファームウェアブロブ）だけを除く全パッケージが対象。取得後 deb-src は
+   削除する。
+2. **apt パッケージの copyright**: `/usr/share/common-licenses/` と各
+   パッケージの `/usr/share/doc/<pkg>/copyright` を
+   `/boot/firmware/licenses/pi/` に複製。
+3. **Portal の Python 依存ライセンス**: `*.dist-info/METADATA` から
+   ライセンス行を抜き出し `/boot/firmware/licenses/portal/python/` に、
+   `THIRD_PARTY_NOTICES.md` / `THIRD_PARTY_LICENSES.txt` も
+   `/boot/firmware/licenses/portal/` に写す。
 
-収集結果は `/usr/share/palmimo/sources/MANIFEST.txt`
-（ソースパッケージごとの `source version status file sha256`、決定的な
-順序、除外理由、apt copyright が見つからなかったパッケージの一覧、
-`THIRD_PARTY_LICENSES.txt` の有無）に記録する。
-
-`PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`pigen/config` で export 済み。
-`tools/make_image.py --skip-corresponding-source` からも `-e` で渡せる）
-は対応ソース取得（1.）だけを飛ばす開発用エスケープハッチ — apt/Portal の
-ライセンスコピー（2., 3.）は常に行われ、`MANIFEST.txt` の先頭に
-`STATUS: INCOMPLETE -- corresponding source was skipped (development
-build, NOT shippable)` が刻まれる。`make_image.py` はビルド完了時にこの
-フラグ付きだった場合、標準出力に大きな警告を出す。
-
-対応ソースは既に圧縮済みの `.dsc` + tarball を並べるだけなので、
-`.img.xz` はおよそ 1.3〜2GB 大きくなる見込み。pi-gen の export-image は
-rootfs の実サイズを `du` で決めるため、pi-gen 側の設定変更は不要。
+収集結果は `/usr/share/palmimo/sources/MANIFEST.txt` に記録する。
+`PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`--skip-corresponding-source` から
+も渡せる）は 1. だけを飛ばす開発用エスケープハッチで、`MANIFEST.txt` は
+`STATUS: INCOMPLETE` になる。`.img.xz` の増分見込みは未実測。
 
 ### 失敗マトリクス
 
@@ -491,7 +461,7 @@ rootfs の実サイズを `du` で決めるため、pi-gen 側の設定変更は
 | ネットワーク断（deb-src の `apt-get update` 自体が失敗、または個々の `apt-get source` がネットワークエラー） | `apt-get update` は `set -e` の chroot ヒアドキュメントの下で失敗し、ステージ全体が非ゼロ終了 — 部分的な `/usr/share/palmimo/sources/` は残るが `MANIFEST.txt` 無しなので「未完成」と判別できる | 静的検証のみ（`bash -n` / スクリプト構造）。実ネットワーク断は on-device 検証の対象外 | `build-docker.sh` の出力に apt のエラーがそのまま出る | ネットワーク復旧後に再ビルド（`apt-get update` は冪等、コンテナは pi-gen が最初からやり直す） |
 | ディスクフル（`apt-get source` の多数呼び出しが 1.3〜2GB 超を要求） | `apt-get source` が個別に非ゼロ終了 → 上の「ミラーに無い」と同じ失敗パスに合流し、全件試行後に非ゼロ終了 | 同上（fetch_sources のアグリゲーション自体はユニットテスト済み） | ディスク関連のエラーメッセージが `error: failed to fetch corresponding source ...` の理由欄にそのまま入る | ビルドホストの空き容量を確保して再ビルド（`--clean` でワークスペースを畳んでからでも良い） |
 | スキップフラグ付きビルドの誤出荷（`PALMIMO_SKIP_CORRESPONDING_SOURCE=1` のまま `dist/` の画像を配布） | イメージ自体は正常に起動するが `MANIFEST.txt` の先頭が `STATUS: INCOMPLETE -- corresponding source was skipped ...` | `test_write_manifest_records_skip_status_first_line` | `make_image.py` の標準出力末尾に警告（ビルド時点）。イメージだけを受け取った場合は `/usr/share/palmimo/sources/MANIFEST.txt`（と、PC からも読める `/boot/firmware/licenses/MANIFEST.txt` のコピー）を見るまで気づけない | 出荷前チェックリストに「`MANIFEST.txt` の `STATUS: OK` を確認」を追加する運用でカバー（自動ゲートは未実装 — 今後の課題） |
-| 途中でプロセス死（ステージ実行中に chroot ごとホスト/コンテナが kill される、電源断、ビルドホストの OOM killer など） | `04-oss-compliance/00-run.sh` は 5. の対策で毎回の実行冒頭に出力ディレクトリ（`sources_out`、`licenses_out/pi`、`licenses_out/portal`）を `shutil.rmtree` するため、前回の中断ビルドの半端な成果物が次回ビルドに混入することはない。7. の対策で `MANIFEST.txt` は一時ファイル書き込み + `os.replace` によるアトミック置換なので、書き込み中に死んでも壊れた/半端な `MANIFEST.txt` が残ることはない（tmp ファイルが残るだけで、正規のパスには古い内容か何も無いかのどちらか）。11. の対策で deb-src の一時 sources ファイルとスクリプトのコピーは `trap cleanup EXIT` で削除されるため、シェルスクリプト自体が `kill -9` される最悪ケース以外は残留しない | `test_main_cleans_previous_build_output_directories_first`（5.）、`test_write_manifest_is_written_atomically_via_tmp_and_replace`（7.）、`test_oss_compliance_stage_cleans_up_via_trap_unconditionally`（11.） | 次回ビルドのログに前回の中断を示す痕跡は出ないが、`MANIFEST.txt` の `STATUS` は必ず今回の実行結果だけを反映する | 中断されたビルドは単純に再実行すればよい — 出力ディレクトリの毎回クリア・MANIFEST のアトミック書き込み・trap クリーンアップの三点で、途中状態が次回実行の判断を汚さないことが保証されている |
+| 途中でプロセス死（ステージ実行中に chroot ごとホスト/コンテナが kill される、電源断、ビルドホストの OOM killer など） | 出力ディレクトリは毎回実行冒頭で `shutil.rmtree` される（前回の中断成果物が混入しない）。`MANIFEST.txt` は一時ファイル + `os.replace` のアトミック置換。deb-src の一時ファイルは `trap cleanup EXIT` で削除される | `test_main_cleans_previous_build_output_directories_first`、`test_oss_compliance_stage_cleans_up_via_trap_unconditionally` | 次回ビルドのログに前回の中断を示す痕跡は出ないが、`MANIFEST.txt` の `STATUS` は必ず今回の実行結果だけを反映する | 中断されたビルドは単純に再実行すればよい |
 
 ## 識別ファイル仕様 v2（2026-08-21 決定）
 
@@ -529,11 +499,6 @@ rootfs の実サイズを `du` で決めるため、pi-gen 側の設定変更は
 - polkit の comitup 許可が実際に必要か（T9 では user 権限で D-Bus 呼び出しが
   通っている — バスポリシー次第）。実機で確認し、不要なら書かない
 - 03-portal で `UV_PYTHON_DOWNLOADS=never` + システム Python を使うか、
-  python-build-standalone（PBS）の `licenses/` をそのまま採るかを決める。
-  portal の `.python-version` は 3.12、trixie のシステム Python は 3.13
-  なので uv がその場で PBS ランタイムをダウンロードし得る
-  （`~/.local/share/uv/python/` 配下）。readline(GPLv3) が静的リンクされて
-  いる可能性があり、`collect_oss_compliance.py` は現状これを検出して
-  `MANIFEST.txt` の「Uncovered binaries (needs a decision)」に列挙し
-  `STATUS: INCOMPLETE` にするだけ — ライセンス上出荷可能かどうかの判断は
-  人間が行う
+  python-build-standalone の `licenses/` をそのまま採るかを決める
+  （`collect_oss_compliance.py` は現状検出して `STATUS: INCOMPLETE` にする
+  だけ — readline(GPLv3) 静的リンクの出荷可否は人間が判断）
