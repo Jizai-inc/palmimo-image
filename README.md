@@ -196,9 +196,12 @@ Building with `tools/make_image.py --skip-corresponding-source` (or
 `PALMIMO_SKIP_CORRESPONDING_SOURCE=1`) skips only the source-fetch step, for
 a faster dev-loop rebuild — license copying still runs, and the resulting
 `MANIFEST.txt` is stamped `STATUS: INCOMPLETE` so a build made this way
-cannot be mistaken for a shippable one. A full build adds roughly 1.3–2GB
-to the `.img.xz` (the corresponding source is already-compressed `.dsc` +
-tarballs); pi-gen's export step sizes the rootfs from its actual on-disk
+cannot be mistaken for a shippable one. A full build is expected to add
+roughly 1.3–2GB to the `.img.xz` (the corresponding source is
+already-compressed `.dsc` + tarballs) — this is an estimate made before
+any real build had exercised this stage, not a measured figure; record
+the actual size and `MANIFEST.txt` contents from the first real build
+that does. pi-gen's export step sizes the rootfs from its actual on-disk
 usage, so no pi-gen configuration change was needed for that growth.
 
 ### `/boot/firmware/licenses/`

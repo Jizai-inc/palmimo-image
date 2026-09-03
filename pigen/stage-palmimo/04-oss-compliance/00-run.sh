@@ -13,6 +13,30 @@
 
 : "${PALMIMO_IMAGE_DIR:?PALMIMO_IMAGE_DIR is unset -- see pigen/README.md (PIGEN_DOCKER_OPTS bind mount)}"
 
+SOURCES_FILE="${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"
+COLLECTOR_TMP="${ROOTFS_DIR}/tmp/collect_oss_compliance.py"
+EXCLUDE_TMP="${ROOTFS_DIR}/tmp/oss-source-exclude.txt"
+COPYRIGHT_ALLOW_TMP="${ROOTFS_DIR}/tmp/oss-copyright-missing-allow.txt"
+
+# Unconditional cleanup of everything this stage writes outside the final
+# image: the temporarily-enabled deb-src entry and the scratch
+# collector/exclude-list/allow-list copies. Wired up two ways so a
+# previous interrupted build's leftovers or this run's own failure never
+# survive to the next stage or the next build:
+#   - `trap cleanup EXIT` fires no matter how this script exits (normal
+#     completion, `set -e` aborting on an error, or the
+#     PALMIMO_SKIP_CORRESPONDING_SOURCE=1 dev-loop path that never touches
+#     deb-src at all) -- never put this only inside the `if [ ... != 1 ]`
+#     branch below, or a skip-flag build would skip cleanup entirely.
+#   - the explicit call right after defining it also cleans up anything a
+#     previous run left behind (e.g. this script was killed mid-stage)
+#     before this run writes anything new.
+cleanup() {
+	rm -f "${SOURCES_FILE}" "${COLLECTOR_TMP}" "${EXCLUDE_TMP}" "${COPYRIGHT_ALLOW_TMP}"
+}
+trap cleanup EXIT
+cleanup
+
 # 1. Enable deb-src temporarily. apt-get source needs deb-src entries to
 #    resolve a source package; the shipped image must not carry them (a
 #    purchaser's device has no business fetching Debian source packages),
@@ -20,9 +44,8 @@
 #    stage script -- never present when 01-palmimo-core's rsync or any
 #    later stage runs.
 if [ "${PALMIMO_SKIP_CORRESPONDING_SOURCE:-}" != "1" ]; then
-	install -m 0644 "files/palmimo-src.sources" \
-		"${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"
-	sed -i "s/RELEASE/${RELEASE}/g" "${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"
+	install -m 0644 "files/palmimo-src.sources" "${SOURCES_FILE}"
+	sed -i "s/RELEASE/${RELEASE}/g" "${SOURCES_FILE}"
 	on_chroot <<- 'EOF'
 		apt-get update
 	EOF
@@ -30,9 +53,10 @@ fi
 
 # 2. Run the collector. Same "copy in, run, delete" contract as
 #    lib/patch_comitup_nm.py in 01-palmimo-core: the shipped image never
-#    keeps this script or the exclusion list.
-install -m 0644 "${PALMIMO_IMAGE_DIR}/lib/collect_oss_compliance.py" "${ROOTFS_DIR}/tmp/collect_oss_compliance.py"
-install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-source-exclude.txt" "${ROOTFS_DIR}/tmp/oss-source-exclude.txt"
+#    keeps this script, the exclusion list, or the copyright-allow list.
+install -m 0644 "${PALMIMO_IMAGE_DIR}/lib/collect_oss_compliance.py" "${COLLECTOR_TMP}"
+install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-source-exclude.txt" "${EXCLUDE_TMP}"
+install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-copyright-missing-allow.txt" "${COPYRIGHT_ALLOW_TMP}"
 
 IMG_DATE="$(date +%Y-%m-%d)"
 on_chroot <<- EOF
@@ -40,18 +64,20 @@ on_chroot <<- EOF
 		python3 /tmp/collect_oss_compliance.py \
 		--root / \
 		--exclude-file /tmp/oss-source-exclude.txt \
+		--copyright-allow-file /tmp/oss-copyright-missing-allow.txt \
 		--img-date "${IMG_DATE}"
 EOF
 
-rm -f "${ROOTFS_DIR}/tmp/collect_oss_compliance.py" "${ROOTFS_DIR}/tmp/oss-source-exclude.txt"
-
-# 3. Disable deb-src again -- never ship it. Re-running apt-get update
-#    afterward keeps the package index consistent with the sources that
-#    actually remain (matches the "leave apt in a state matching what's on
-#    disk" contract the rest of this stage relies on).
+# 3. Disable deb-src again -- never ship it. The `trap` above removes the
+#    sources file itself on exit either way; here we only need to undo the
+#    side effect of step 1's index refresh having indexed it. Rather than
+#    refreshing the index a second time (a redundant network round-trip
+#    the build does not otherwise need), delete just the Sources indexes
+#    that step 1 wrote for the deb-src entry -- the on-disk apt state ends
+#    up matching "deb-src never existed" without depending on the network
+#    again.
 if [ "${PALMIMO_SKIP_CORRESPONDING_SOURCE:-}" != "1" ]; then
-	rm -f "${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"
 	on_chroot <<- 'EOF'
-		apt-get update
+		rm -f /var/lib/apt/lists/*_Sources /var/lib/apt/lists/*_source_*
 	EOF
 fi
