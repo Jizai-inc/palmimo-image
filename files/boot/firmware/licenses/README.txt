@@ -17,9 +17,10 @@ Subdirectories
       attribution file; licenses/ holds the full texts it points to.
 
   tools/uv/
-      License texts for `uv`, the Python package manager binary this
-      image installs on first boot (see apply-pi.sh / the pi-gen stage).
-      uv is dual-licensed Apache-2.0 OR MIT; both texts are included.
+      License texts for `uv`, the Python package manager binary
+      installed into the image at build time (see apply-pi.sh / the
+      pi-gen stage). uv is dual-licensed Apache-2.0 OR MIT; both texts
+      are included.
 
   pi/
       Copyright files for every apt package installed on this image (not
@@ -39,11 +40,11 @@ Subdirectories
 Corresponding source (GPL / LGPL)
 -----------------------------------
 
-Palmimo DevKit is sold, not merely distributed at no charge, so GPLv2 3(a)
-/ GPLv3 6(a) style "same-medium, on request only" delivery is not enough --
-we ship the source alongside the binaries on the medium the product itself
-comes on. Every apt source package's corresponding source is collected at
-build time and included on this same SD card, at:
+Palmimo DevKit is sold, not merely distributed at no charge. We use
+GPLv2 §3(a) / GPLv3 §6(a): the corresponding source accompanies the
+binaries on this SD card, rather than only being available on written
+request (the §3(b) / §6(b) option). Corresponding source for every apt
+source package on this image is collected at image build time into:
 
     /usr/share/palmimo/sources/
 
@@ -52,11 +53,12 @@ so it cannot be read directly by inserting the card into a PC's SD slot --
 read it from the device itself (a terminal on the Pi) or over SSH/SCP from
 another machine on the network. This mirrors comitup's own modified
 nm.py, which Jizai Inc. patches for WPA2/PMF hotspot security and ships as
-plain, unstripped Python source under GPLv2 2(a) (see this repository's
+plain, unstripped Python source under GPLv2 §2(a) (see this repository's
 README.md, "Licenses and corresponding source", for the details of that
 patch).
 
-Completeness is not a claim this README makes on its own -- check it.
+Check the STATUS line at the top of MANIFEST.txt in this directory: only
+STATUS: OK means the collection is complete.
 MANIFEST.txt (both at /usr/share/palmimo/sources/MANIFEST.txt and, for
 convenience, right here at /boot/firmware/licenses/MANIFEST.txt) opens
 with a STATUS line. STATUS: OK means this build collected everything it
