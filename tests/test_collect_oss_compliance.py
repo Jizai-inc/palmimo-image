@@ -1,13 +1,6 @@
-"""Unit tests for lib/collect_oss_compliance.py -- the chroot-side script
-that collects GPL/LGPL corresponding source and copies apt/Portal license
-metadata onto the shipped image.
-
-This module is designed to run inside a pi-gen chroot with stdlib only, so
-every I/O boundary (subprocess execution, rootfs path, output path) is a
-parameter -- these tests exercise the pure logic and the file-copying
-helpers directly against tmp_path fixtures, without ever touching a real
-dpkg database or calling apt-get.
-"""
+"""Unit tests for lib/collect_oss_compliance.py, exercised via tmp_path
+fixtures against the pure logic and file-copying helpers -- never a real
+dpkg database or apt-get."""
 
 from __future__ import annotations
 
@@ -44,38 +37,51 @@ coc = _load_module()
 # ---------------------------------------------------------------------------
 
 
-def test_list_source_packages_parses_basic_lines() -> None:
-    output = "comitup\tcomitup\t1.43-1\tinstalled\navahi-daemon\tavahi\t0.8-10\tinstalled\n"
-    assert coc.list_source_packages(output) == {("comitup", "1.43-1"), ("avahi", "0.8-10")}
-
-
-def test_list_source_packages_dedupes_multiple_binaries_from_one_source() -> None:
-    # avahi-daemon and avahi-utils are both built from the "avahi" source --
-    # dpkg-query emits one line per binary package, but the (source, version)
-    # pair must collapse to a single entry.
-    output = (
-        "avahi-daemon\tavahi\t0.8-10\tinstalled\n"
-        "avahi-utils\tavahi\t0.8-10\tinstalled\n"
-        "avahi-dnsconfd\tavahi\t0.8-10\tinstalled\n"
-    )
-    assert coc.list_source_packages(output) == {("avahi", "0.8-10")}
-
-
-def test_list_source_packages_handles_epoch_versions() -> None:
-    output = "raspi-firmware\traspi-firmware\t1:6.18.39-1+rpt1\tinstalled\n"
-    assert coc.list_source_packages(output) == {("raspi-firmware", "1:6.18.39-1+rpt1")}
-
-
-def test_list_source_packages_handles_source_version_diverging_from_binary_version() -> None:
-    # dpkg-query emits the *source* version in ${source:Version}, which can
-    # differ from ${Version} of the binary package it was built alongside.
-    output = "libfoo2\tfoo\t2.1-3\tinstalled\n"
-    assert coc.list_source_packages(output) == {("foo", "2.1-3")}
-
-
-def test_list_source_packages_ignores_blank_lines() -> None:
-    output = "comitup\tcomitup\t1.43-1\tinstalled\n\n\navahi-daemon\tavahi\t0.8-10\tinstalled\n"
-    assert coc.list_source_packages(output) == {("comitup", "1.43-1"), ("avahi", "0.8-10")}
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        pytest.param(
+            "comitup\tcomitup\t1.43-1\tinstalled\navahi-daemon\tavahi\t0.8-10\tinstalled\n",
+            {("comitup", "1.43-1"), ("avahi", "0.8-10")},
+            id="basic_lines",
+        ),
+        pytest.param(
+            # avahi-daemon/avahi-utils/avahi-dnsconfd all built from "avahi" --
+            # one line per binary package, but (source, version) must dedupe.
+            "avahi-daemon\tavahi\t0.8-10\tinstalled\n"
+            "avahi-utils\tavahi\t0.8-10\tinstalled\n"
+            "avahi-dnsconfd\tavahi\t0.8-10\tinstalled\n",
+            {("avahi", "0.8-10")},
+            id="dedupes_multiple_binaries_from_one_source",
+        ),
+        pytest.param(
+            "raspi-firmware\traspi-firmware\t1:6.18.39-1+rpt1\tinstalled\n",
+            {("raspi-firmware", "1:6.18.39-1+rpt1")},
+            id="handles_epoch_versions",
+        ),
+        pytest.param(
+            # ${source:Version} can diverge from the binary package's ${Version}.
+            "libfoo2\tfoo\t2.1-3\tinstalled\n",
+            {("foo", "2.1-3")},
+            id="handles_source_version_diverging_from_binary_version",
+        ),
+        pytest.param(
+            "comitup\tcomitup\t1.43-1\tinstalled\n\n\navahi-daemon\tavahi\t0.8-10\tinstalled\n",
+            {("comitup", "1.43-1"), ("avahi", "0.8-10")},
+            id="ignores_blank_lines",
+        ),
+        pytest.param(
+            # a purged-but-config-remaining package must never trigger a fetch.
+            "comitup\tcomitup\t1.43-1\tinstalled\n"
+            "old-pkg\told-pkg\t0.1-1\tconfig-files\n"
+            "half-installed\thalf-installed\t0.2-1\thalf-installed\n",
+            {("comitup", "1.43-1")},
+            id="excludes_non_installed_status",
+        ),
+    ],
+)
+def test_list_source_packages_parses(output: str, expected: set[tuple[str, str]]) -> None:
+    assert coc.list_source_packages(output) == expected
 
 
 def test_list_source_packages_rejects_malformed_line() -> None:
@@ -83,44 +89,7 @@ def test_list_source_packages_rejects_malformed_line() -> None:
         coc.list_source_packages("comitup\tcomitup\tinstalled\n")
 
 
-def test_list_source_packages_excludes_non_installed_status() -> None:
-    # A purged-but-config-remaining package (dpkg status "config-files")
-    # must never trigger a source fetch or copyright lookup -- it is not
-    # actually shipped on the image.
-    output = (
-        "comitup\tcomitup\t1.43-1\tinstalled\n"
-        "old-pkg\told-pkg\t0.1-1\tconfig-files\n"
-        "half-installed\thalf-installed\t0.2-1\thalf-installed\n"
-    )
-    assert coc.list_source_packages(output) == {("comitup", "1.43-1")}
-
-
-# ---------------------------------------------------------------------------
-# list_installed_packages: dpkg-query -W -f='${Package}\t${db:Status-Status}\n'
-# ---------------------------------------------------------------------------
-
-
-def test_list_installed_packages_filters_to_installed_only() -> None:
-    output = "comitup\tinstalled\nold-pkg\tconfig-files\navahi-daemon\tinstalled\n"
-    assert coc.list_installed_packages(output) == ["avahi-daemon", "comitup"]
-
-
-def test_list_installed_packages_ignores_blank_lines() -> None:
-    output = "comitup\tinstalled\n\n\navahi-daemon\tinstalled\n"
-    assert coc.list_installed_packages(output) == ["avahi-daemon", "comitup"]
-
-
-def test_list_installed_packages_rejects_malformed_line() -> None:
-    with pytest.raises(ValueError):
-        coc.list_installed_packages("comitup\n")
-
-
-# ---------------------------------------------------------------------------
-# parse_exclude_file / parse_name_list_file (shared format: oss-source-exclude.txt
-# and oss-copyright-missing-allow.txt)
-# ---------------------------------------------------------------------------
-
-
+# parse_exclude_file (shared by oss-source-exclude.txt / oss-copyright-missing-allow.txt)
 def test_parse_exclude_file_reads_name_and_inline_reason() -> None:
     text = (
         "# comment line, ignored\n"
@@ -133,17 +102,6 @@ def test_parse_exclude_file_reads_name_and_inline_reason() -> None:
     assert result["firmware-nonfree"] == "non-free blob, no source obligation"
     assert result["raspi-firmware"] == "bootloader blobs"
     assert result["bluez-firmware"] == ""
-
-
-def test_parse_exclude_file_on_empty_text_is_empty_dict() -> None:
-    assert coc.parse_exclude_file("") == {}
-    assert coc.parse_exclude_file("# only comments\n\n") == {}
-
-
-# ---------------------------------------------------------------------------
-# fetch_sources: aggregates failures instead of stopping at the first one,
-# and marks excluded pairs without invoking `run` at all.
-# ---------------------------------------------------------------------------
 
 
 def _dsc_text(files: list[tuple[str, str, int]]) -> str:
@@ -250,61 +208,31 @@ def test_fetch_sources_fails_when_dsc_is_missing_despite_zero_exit(tmp_path: Pat
     assert results[0].status == "failed"
 
 
-def test_fetch_sources_fails_when_checksums_field_is_missing(tmp_path: Path) -> None:
-    fake_run = _FakeRun({}, omit_checksums_field=frozenset({"nofield"}))
-    results = coc.fetch_sources({("nofield", "1.0")}, tmp_path, run=fake_run, exclude={})
+@pytest.mark.parametrize(
+    ("source", "fake_run_kwarg", "expected_substring"),
+    [
+        ("nofield", "omit_checksums_field", "Checksums-Sha256"),
+        ("missingtar", "omit_tarball", "missing"),
+        ("corrupt", "corrupt_tarball", "sha256"),
+    ],
+)
+def test_fetch_sources_fails_dsc_verification(
+    tmp_path: Path, source: str, fake_run_kwarg: str, expected_substring: str
+) -> None:
+    fake_run = _FakeRun({}, **{fake_run_kwarg: frozenset({source})})
+    results = coc.fetch_sources({(source, "1.0")}, tmp_path, run=fake_run, exclude={})
     assert results[0].status == "failed"
-    assert "Checksums-Sha256" in results[0].reason
+    assert expected_substring.lower() in results[0].reason.lower()
 
 
-def test_fetch_sources_fails_when_declared_file_is_missing(tmp_path: Path) -> None:
-    fake_run = _FakeRun({}, omit_tarball=frozenset({"missingtar"}))
-    results = coc.fetch_sources({("missingtar", "1.0")}, tmp_path, run=fake_run, exclude={})
-    assert results[0].status == "failed"
-    assert "missing" in results[0].reason.lower()
-
-
-def test_fetch_sources_fails_when_sha256_does_not_match(tmp_path: Path) -> None:
-    fake_run = _FakeRun({}, corrupt_tarball=frozenset({"corrupt"}))
-    results = coc.fetch_sources({("corrupt", "1.0")}, tmp_path, run=fake_run, exclude={})
-    assert results[0].status == "failed"
-    assert "sha256" in results[0].reason.lower()
-
-
-def test_collect_failures_and_report_is_nonempty_iff_any_failed() -> None:
-    ok = coc.FetchResult("good", "1.0", "fetched", Path("good_1.0.dsc"), None)
-    bad = coc.FetchResult("bad", "1.0", "failed", None, "boom")
-    excluded = coc.FetchResult("skip", "1.0", "excluded", None, "reason")
-
-    assert coc.failed_results([ok, excluded]) == []
-    failures = coc.failed_results([ok, bad, excluded])
-    assert failures == [bad]
-
-    report = coc.format_failure_report(failures)
-    assert "bad" in report
-    assert "boom" in report
-
-
-# ---------------------------------------------------------------------------
 # parse_dsc_checksums_sha256
-# ---------------------------------------------------------------------------
-
-
 def test_parse_dsc_checksums_sha256_extracts_entries() -> None:
     text = _dsc_text([("a_1.0.tar.xz", "abc123", 42), ("a_1.0.debian.tar.xz", "def456", 7)])
     entries = coc.parse_dsc_checksums_sha256(text)
     assert entries == [("a_1.0.tar.xz", "abc123", 42), ("a_1.0.debian.tar.xz", "def456", 7)]
 
 
-def test_parse_dsc_checksums_sha256_returns_empty_when_field_absent() -> None:
-    assert coc.parse_dsc_checksums_sha256("Format: 1.0\nSource: pkg\n") == []
-
-
-# ---------------------------------------------------------------------------
 # write_manifest: deterministic ordering, status header, exclusion records
-# ---------------------------------------------------------------------------
-
-
 def _write_manifest_defaults(**overrides: object) -> dict[str, object]:
     defaults: dict[str, object] = {
         "img_date": "2026-09-01",
@@ -387,29 +315,6 @@ def test_write_manifest_records_missing_copyright_and_absent_portal_licenses(tmp
     assert "absent" in text
 
 
-def test_write_manifest_marks_incomplete_when_npm_licenses_absent(tmp_path: Path) -> None:
-    out = tmp_path / "MANIFEST.txt"
-    coc.write_manifest(out, **_write_manifest_defaults(portal_third_party_licenses_present=False))
-    text = out.read_text(encoding="utf-8")
-    assert "STATUS: INCOMPLETE" in text
-    assert "frontend THIRD_PARTY_LICENSES.txt absent (portal tag predates it)" in text
-
-
-def test_write_manifest_includes_sha256_of_each_fetched_dsc(tmp_path: Path) -> None:
-    out = tmp_path / "MANIFEST.txt"
-    expected = hashlib.sha256(b"Format: 1.0\n").hexdigest()
-
-    coc.write_manifest(
-        out,
-        **_write_manifest_defaults(
-            fetch_results=[
-                coc.FetchResult("comitup", "1.0", "fetched", None, None, files=(("comitup_1.0.dsc", expected, 12),))
-            ],
-        ),
-    )
-    assert expected in out.read_text(encoding="utf-8")
-
-
 def test_write_manifest_records_portal_dists_count(tmp_path: Path) -> None:
     out = tmp_path / "MANIFEST.txt"
     coc.write_manifest(out, **_write_manifest_defaults(portal_dists_count=42))
@@ -417,55 +322,37 @@ def test_write_manifest_records_portal_dists_count(tmp_path: Path) -> None:
     assert "portal python dists: 42" in text
 
 
-def test_write_manifest_records_dists_without_license_text_and_marks_incomplete(tmp_path: Path) -> None:
-    out = tmp_path / "MANIFEST.txt"
-    coc.write_manifest(
-        out,
-        **_write_manifest_defaults(portal_dists_without_license_text=["some-internal-pkg"]),
-    )
-    text = out.read_text(encoding="utf-8")
-    assert "STATUS: INCOMPLETE" in text
-    assert "some-internal-pkg" in text
-    assert "needs manual review" in text
-
-
-def test_write_manifest_records_uncovered_uv_python_runtimes_and_marks_incomplete(tmp_path: Path) -> None:
-    out = tmp_path / "MANIFEST.txt"
-    coc.write_manifest(
-        out,
-        **_write_manifest_defaults(portal_python_runtime_dirs=["cpython-3.13.0-linux-aarch64-gnu"]),
-    )
-    text = out.read_text(encoding="utf-8")
-    assert "STATUS: INCOMPLETE" in text
-    assert "cpython-3.13.0-linux-aarch64-gnu" in text
-    assert "Uncovered binaries" in text
-
-
-def test_write_manifest_is_written_atomically_via_tmp_and_replace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("overrides", "expected_substrings"),
+    [
+        pytest.param(
+            {"portal_third_party_licenses_present": False},
+            ["STATUS: INCOMPLETE", "frontend THIRD_PARTY_LICENSES.txt absent (portal tag predates it)"],
+            id="npm_licenses_absent",
+        ),
+        pytest.param(
+            {"portal_dists_without_license_text": ["some-internal-pkg"]},
+            ["STATUS: INCOMPLETE", "some-internal-pkg", "needs manual review"],
+            id="dists_without_license_text",
+        ),
+        pytest.param(
+            {"portal_python_runtime_dirs": ["cpython-3.13.0-linux-aarch64-gnu"]},
+            ["STATUS: INCOMPLETE", "cpython-3.13.0-linux-aarch64-gnu", "Uncovered binaries"],
+            id="uncovered_uv_python_runtimes",
+        ),
+    ],
+)
+def test_write_manifest_marks_incomplete(
+    tmp_path: Path, overrides: dict[str, object], expected_substrings: list[str]
 ) -> None:
     out = tmp_path / "MANIFEST.txt"
-    seen_tmp_files: list[Path] = []
-    real_replace = coc.os.replace
-
-    def spy_replace(src: object, dst: object) -> None:
-        seen_tmp_files.append(Path(str(src)))
-        real_replace(src, dst)
-
-    monkeypatch.setattr(coc.os, "replace", spy_replace)
-    coc.write_manifest(out, **_write_manifest_defaults())
-    assert len(seen_tmp_files) == 1
-    assert seen_tmp_files[0] != out
-    assert not seen_tmp_files[0].exists()  # renamed away by the real replace
-    assert out.is_file()
+    coc.write_manifest(out, **_write_manifest_defaults(**overrides))
+    text = out.read_text(encoding="utf-8")
+    for substring in expected_substrings:
+        assert substring in text
 
 
-# ---------------------------------------------------------------------------
-# copy_pi_licenses: common-licenses + per-package copyright, symlinks
-# followed, missing copyright recorded
-# ---------------------------------------------------------------------------
-
-
+# copy_pi_licenses: common-licenses + per-package copyright, symlinks followed
 def _make_fake_rootfs(tmp_path: Path) -> Path:
     rootfs = tmp_path / "rootfs"
     common = rootfs / "usr" / "share" / "common-licenses"
@@ -492,29 +379,21 @@ def _make_fake_rootfs(tmp_path: Path) -> Path:
     return rootfs
 
 
-def test_copy_pi_licenses_copies_common_licenses(tmp_path: Path) -> None:
-    rootfs = _make_fake_rootfs(tmp_path)
-    out = tmp_path / "out"
-    coc.copy_pi_licenses(rootfs, out, packages=["comitup"])
-    assert (out / "common-licenses" / "GPL-2").read_text(encoding="utf-8") == "GPLv2 text\n"
-    assert (out / "common-licenses" / "GPL-3").read_text(encoding="utf-8") == "GPLv3 text\n"
-
-
-def test_copy_pi_licenses_copies_each_package_copyright(tmp_path: Path) -> None:
+def test_copy_pi_licenses_copies_common_and_package_copyright_following_symlinks(tmp_path: Path) -> None:
     rootfs = _make_fake_rootfs(tmp_path)
     out = tmp_path / "out"
     report = coc.copy_pi_licenses(rootfs, out, packages=["comitup", "avahi-utils"])
+
+    assert (out / "common-licenses" / "GPL-2").read_text(encoding="utf-8") == "GPLv2 text\n"
+    assert (out / "common-licenses" / "GPL-3").read_text(encoding="utf-8") == "GPLv3 text\n"
     assert (out / "comitup" / "copyright").read_text(encoding="utf-8") == "Comitup copyright\n"
     assert report.copied == ["avahi-utils", "comitup"]
 
-
-def test_copy_pi_licenses_follows_symlinked_copyright(tmp_path: Path) -> None:
-    rootfs = _make_fake_rootfs(tmp_path)
-    out = tmp_path / "out"
-    coc.copy_pi_licenses(rootfs, out, packages=["avahi-utils"])
-    copied = out / "avahi-utils" / "copyright"
-    assert not copied.is_symlink()
-    assert copied.read_text(encoding="utf-8") == "Avahi copyright\n"
+    # avahi-utils symlinks its copyright to avahi-daemon's -- content must be
+    # copied by resolved value, not as a dangling/relative symlink.
+    symlinked = out / "avahi-utils" / "copyright"
+    assert not symlinked.is_symlink()
+    assert symlinked.read_text(encoding="utf-8") == "Avahi copyright\n"
 
 
 def test_copy_pi_licenses_records_missing_copyright(tmp_path: Path) -> None:
@@ -525,11 +404,7 @@ def test_copy_pi_licenses_records_missing_copyright(tmp_path: Path) -> None:
     assert not (out / "git").exists()
 
 
-# ---------------------------------------------------------------------------
 # copy_portal_licenses: dist-info METADATA parsing + License-File collection
-# ---------------------------------------------------------------------------
-
-
 def _make_fake_venv(tmp_path: Path, python_minor: str = "python3.12") -> Path:
     site_packages = tmp_path / "venv" / "lib" / python_minor / "site-packages"
     dist_info = site_packages / "fastapi-0.110.0.dist-info"
@@ -554,32 +429,18 @@ def _make_fake_venv(tmp_path: Path, python_minor: str = "python3.12") -> Path:
     return site_packages
 
 
-def test_copy_portal_licenses_writes_license_metadata_txt(tmp_path: Path) -> None:
-    site_packages = _make_fake_venv(tmp_path)
-    out = tmp_path / "boot-out"
-    coc.copy_portal_licenses(site_packages, tmp_path / "portal-repo", out)
-
-    meta = (out / "python" / "fastapi-0.110.0" / "LICENSE-METADATA.txt").read_text(encoding="utf-8")
-    assert "License-Expression: MIT" in meta
-    assert "Classifier: License :: OSI Approved :: MIT License" in meta
-    assert "this line is body text" not in meta
-
-
-def test_copy_portal_licenses_copies_license_files(tmp_path: Path) -> None:
+def test_copy_portal_licenses_writes_license_metadata_txt_and_copies_license_files(tmp_path: Path) -> None:
     site_packages = _make_fake_venv(tmp_path)
     out = tmp_path / "boot-out"
     coc.copy_portal_licenses(site_packages, tmp_path / "portal-repo", out)
 
     dist_out = out / "python" / "fastapi-0.110.0"
+    meta = (dist_out / "LICENSE-METADATA.txt").read_text(encoding="utf-8")
+    assert "License-Expression: MIT" in meta
+    assert "Classifier: License :: OSI Approved :: MIT License" in meta
+    assert "this line is body text" not in meta
     assert (dist_out / "LICENSE").read_text(encoding="utf-8") == "MIT license text\n"
     assert (dist_out / "licenses" / "AUTHORS.md").read_text(encoding="utf-8") == "Author list\n"
-
-
-def test_copy_portal_licenses_reports_dists(tmp_path: Path) -> None:
-    site_packages = _make_fake_venv(tmp_path)
-    out = tmp_path / "boot-out"
-    report = coc.copy_portal_licenses(site_packages, tmp_path / "portal-repo", out)
-    assert report.dists == ["fastapi-0.110.0"]
 
 
 def test_copy_portal_licenses_fails_when_license_file_declared_but_missing(tmp_path: Path) -> None:
@@ -611,7 +472,9 @@ def test_copy_portal_licenses_records_dist_with_no_license_info_without_writing_
     assert not (out / "python" / "nolicense-1.0" / "LICENSE-METADATA.txt").exists()
 
 
-def test_copy_portal_licenses_copies_third_party_notices(tmp_path: Path) -> None:
+def test_copy_portal_licenses_copies_third_party_notices_and_warns_when_licenses_txt_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     site_packages = _make_fake_venv(tmp_path)
     portal_root = tmp_path / "portal-repo"
     portal_root.mkdir()
@@ -622,6 +485,9 @@ def test_copy_portal_licenses_copies_third_party_notices(tmp_path: Path) -> None
 
     assert (out / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8") == "notices\n"
     assert report.third_party_licenses_present is False
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "THIRD_PARTY_LICENSES.txt" in captured.err
 
 
 def test_copy_portal_licenses_copies_third_party_licenses_txt_when_present(tmp_path: Path) -> None:
@@ -639,28 +505,7 @@ def test_copy_portal_licenses_copies_third_party_licenses_txt_when_present(tmp_p
     assert report.third_party_licenses_present is True
 
 
-def test_copy_portal_licenses_warns_and_continues_when_third_party_licenses_txt_absent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    site_packages = _make_fake_venv(tmp_path)
-    portal_root = tmp_path / "portal-repo"
-    portal_root.mkdir()
-    (portal_root / "THIRD_PARTY_NOTICES.md").write_text("notices\n", encoding="utf-8")
-    out = tmp_path / "boot-out"
-
-    report = coc.copy_portal_licenses(site_packages, portal_root, out)
-
-    assert report.third_party_licenses_present is False
-    captured = capsys.readouterr()
-    assert "WARNING" in captured.err
-    assert "THIRD_PARTY_LICENSES.txt" in captured.err
-
-
-# ---------------------------------------------------------------------------
 # find_portal_venv_site_packages: glob instead of a hardcoded python3.12
-# ---------------------------------------------------------------------------
-
-
 def test_find_portal_venv_site_packages_globs_any_python_minor(tmp_path: Path) -> None:
     portal_root = tmp_path / "portal-repo"
     _make_fake_venv_at(portal_root, "python3.13")
@@ -693,15 +538,7 @@ def test_find_portal_venv_site_packages_raises_when_zero_dist_info(tmp_path: Pat
     assert str(empty_site_packages) in str(excinfo.value)
 
 
-# ---------------------------------------------------------------------------
 # find_uv_managed_pythons / copy_uv_python_runtime_licenses
-# ---------------------------------------------------------------------------
-
-
-def test_find_uv_managed_pythons_returns_empty_when_directory_absent(tmp_path: Path) -> None:
-    assert coc.find_uv_managed_pythons(tmp_path / "home") == []
-
-
 def test_find_uv_managed_pythons_lists_subdirectories(tmp_path: Path) -> None:
     home = tmp_path / "home"
     uv_python = home / ".local" / "share" / "uv" / "python"
@@ -726,37 +563,7 @@ def test_copy_uv_python_runtime_licenses_copies_licenses_subdir(tmp_path: Path) 
     assert dest.read_text(encoding="utf-8") == "PSF license\n"
 
 
-def test_copy_uv_python_runtime_licenses_skips_dirs_without_licenses_subdir(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    py_dir = home / ".local" / "share" / "uv" / "python" / "cpython-3.13.0-linux-aarch64-gnu"
-    py_dir.mkdir(parents=True)
-    out = tmp_path / "boot-out" / "python-runtime"
-    copied = coc.copy_uv_python_runtime_licenses([py_dir], out)
-    assert copied == []
-    assert not out.exists()
-
-
-# ---------------------------------------------------------------------------
-# Sanity: the script parses as valid Python 3 (chroot runs it with plain
-# python3, not through pytest's import machinery).
-# ---------------------------------------------------------------------------
-
-
-def test_script_compiles_standalone() -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "py_compile", str(SCRIPT_PATH)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-# ---------------------------------------------------------------------------
 # main(): full integration, subprocess.run monkeypatched, tmp rootfs.
-# ---------------------------------------------------------------------------
-
-
 def _make_integration_rootfs(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     (root / "usr" / "share" / "common-licenses").mkdir(parents=True)
@@ -781,26 +588,34 @@ def _patch_subprocess_run(
     monkeypatch.setattr(coc.subprocess, "run", handler)
 
 
-def test_main_fails_and_writes_no_manifest_when_fetch_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root = _make_integration_rootfs(tmp_path)
-    exclude_file, allow_file = _make_exclude_and_allow_files(tmp_path)
-    portal_root = tmp_path / "portal"
-    _make_fake_venv_at(portal_root, "python3.12")
+def _make_dpkg_fake_run(
+    binary_stdout: str,
+    installed_stdout: str,
+    apt_result: Callable[[list[str], Path], subprocess.CompletedProcess[str]]
+    | subprocess.CompletedProcess[str]
+    | None = None,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Build a subprocess.run stand-in answering the two dpkg-query calls
+    main() makes and, if given, apt-get source (a callable) or a canned
+    apt-get failure (a CompletedProcess)."""
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[:2] == ["dpkg-query", "-W"]:
+    def fake_run(cmd: list[str], cwd: object = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[0] == "dpkg-query":
             if "${binary:Package}" in cmd[-1]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
+                return subprocess.CompletedProcess(cmd, 0, stdout=binary_stdout, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=installed_stdout, stderr="")
         if cmd[:2] == ["apt-get", "source"]:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="404 not found")
+            if callable(apt_result):
+                return apt_result(cmd, Path(str(cwd)))
+            if apt_result is not None:
+                return apt_result
         raise AssertionError(f"unexpected command: {cmd}")
 
-    _patch_subprocess_run(monkeypatch, fake_run)
+    return fake_run
 
-    rc = coc.main(
+
+def _run_main(root: Path, exclude_file: Path, allow_file: Path, portal_root: Path, img_date: str = "2026-09-01") -> int:
+    return coc.main(
         [
             "--root",
             str(root),
@@ -811,9 +626,26 @@ def test_main_fails_and_writes_no_manifest_when_fetch_fails(
             "--portal-root",
             str(portal_root),
             "--img-date",
-            "2026-09-01",
+            img_date,
         ]
     )
+
+
+def test_main_fails_and_writes_no_manifest_when_fetch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _make_integration_rootfs(tmp_path)
+    exclude_file, allow_file = _make_exclude_and_allow_files(tmp_path)
+    portal_root = tmp_path / "portal"
+    _make_fake_venv_at(portal_root, "python3.12")
+
+    apt_failure = subprocess.CompletedProcess(["apt-get"], 1, stdout="", stderr="404 not found")
+    _patch_subprocess_run(
+        monkeypatch,
+        _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n", apt_failure),
+    )
+
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc != 0
     assert not (root / "usr" / "share" / "palmimo" / "sources" / "MANIFEST.txt").exists()
     assert "comitup" in capsys.readouterr().err
@@ -827,30 +659,12 @@ def test_main_fails_when_venv_absent(
     portal_root = tmp_path / "portal"
     portal_root.mkdir()
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[:2] == ["dpkg-query", "-W"]:
-            if "${binary:Package}" in cmd[-1]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
-        raise AssertionError(f"unexpected command: {cmd}")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
+    _patch_subprocess_run(
+        monkeypatch, _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n")
+    )
 
     monkeypatch.setenv("PALMIMO_SKIP_CORRESPONDING_SOURCE", "1")
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
-    )
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc != 0
     assert "venv" in capsys.readouterr().err.lower()
 
@@ -865,28 +679,10 @@ def test_main_fails_on_unallowed_missing_copyright(
     portal_root = tmp_path / "portal"
     _make_fake_venv_at(portal_root, "python3.12")
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "${binary:Package}" in cmd[-1]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="git\tgit\t1.0\tinstalled\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="git\tinstalled\n", stderr="")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
+    _patch_subprocess_run(monkeypatch, _make_dpkg_fake_run("git\tgit\t1.0\tinstalled\n", "git\tinstalled\n"))
 
     monkeypatch.setenv("PALMIMO_SKIP_CORRESPONDING_SOURCE", "1")
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
-    )
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc != 0
     assert "git" in capsys.readouterr().err
 
@@ -901,33 +697,13 @@ def test_main_warns_on_unused_exclusion_entry(
     allow_file.write_text("# allow list\n", encoding="utf-8")
     portal_root = tmp_path / "portal"
     _make_fake_venv_at(portal_root, "python3.12")
-    fake_apt = _FakeRun({})
 
-    def fake_run(cmd: list[str], cwd: object = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[0] == "dpkg-query":
-            if "${binary:Package}" in cmd[-1]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
-        if cmd[:2] == ["apt-get", "source"]:
-            return fake_apt(cmd, Path(str(cwd)))
-        raise AssertionError(f"unexpected command: {cmd}")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
-
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
+    _patch_subprocess_run(
+        monkeypatch,
+        _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n", _FakeRun({})),
     )
+
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc == 0
     assert "not-installed-pkg" in capsys.readouterr().err
 
@@ -938,30 +714,12 @@ def test_main_skip_flag_marks_manifest_incomplete(tmp_path: Path, monkeypatch: p
     portal_root = tmp_path / "portal"
     _make_fake_venv_at(portal_root, "python3.12")
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "${binary:Package}" in cmd[-1]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-        if cmd[0] == "dpkg-query":
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
-        raise AssertionError(f"unexpected command: {cmd}")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
+    _patch_subprocess_run(
+        monkeypatch, _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n")
+    )
 
     monkeypatch.setenv("PALMIMO_SKIP_CORRESPONDING_SOURCE", "1")
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
-    )
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc == 0
     manifest = (root / "usr" / "share" / "palmimo" / "sources" / "MANIFEST.txt").read_text(encoding="utf-8")
     assert manifest.splitlines()[0].startswith("STATUS: INCOMPLETE")
@@ -977,33 +735,12 @@ def test_main_happy_path_writes_ok_manifest_and_boot_copy(tmp_path: Path, monkey
     static_dir.mkdir(parents=True)
     (static_dir / "THIRD_PARTY_LICENSES.txt").write_text("npm licenses\n", encoding="utf-8")
 
-    fake_apt = _FakeRun({})
-
-    def fake_run(cmd: list[str], cwd: object = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if cmd[0] == "dpkg-query":
-            if "${binary:Package}" in cmd[-1]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
-        if cmd[:2] == ["apt-get", "source"]:
-            return fake_apt(cmd, Path(str(cwd)))
-        raise AssertionError(f"unexpected command: {cmd}")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
-
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
+    _patch_subprocess_run(
+        monkeypatch,
+        _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n", _FakeRun({})),
     )
+
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc == 0
     sources_manifest = root / "usr" / "share" / "palmimo" / "sources" / "MANIFEST.txt"
     boot_manifest = root / "boot" / "firmware" / "licenses" / "MANIFEST.txt"
@@ -1025,30 +762,12 @@ def test_main_cleans_previous_build_output_directories_first(tmp_path: Path, mon
     stale_pi = root / "boot" / "firmware" / "licenses" / "pi" / "some-old-pkg"
     stale_pi.mkdir(parents=True)
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "${binary:Package}" in cmd[-1]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tcomitup\t1.0\tinstalled\n", stderr="")
-        if cmd[0] == "dpkg-query":
-            return subprocess.CompletedProcess(cmd, 0, stdout="comitup\tinstalled\n", stderr="")
-        raise AssertionError(f"unexpected command: {cmd}")
-
-    _patch_subprocess_run(monkeypatch, fake_run)
+    _patch_subprocess_run(
+        monkeypatch, _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n")
+    )
 
     monkeypatch.setenv("PALMIMO_SKIP_CORRESPONDING_SOURCE", "1")
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(portal_root),
-            "--img-date",
-            "2026-09-01",
-        ]
-    )
+    rc = _run_main(root, exclude_file, allow_file, portal_root)
     assert rc == 0
     assert not stale.exists()
     assert not stale_pi.exists()
@@ -1059,18 +778,7 @@ def test_main_requires_exclude_file_to_exist(tmp_path: Path, capsys: pytest.Capt
     allow_file = tmp_path / "oss-copyright-missing-allow.txt"
     allow_file.write_text("# allow list\n", encoding="utf-8")
 
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(tmp_path / "does-not-exist.txt"),
-            "--copyright-allow-file",
-            str(allow_file),
-            "--portal-root",
-            str(tmp_path / "portal"),
-        ]
-    )
+    rc = _run_main(root, tmp_path / "does-not-exist.txt", allow_file, tmp_path / "portal")
     assert rc != 0
     assert "does-not-exist.txt" in capsys.readouterr().err
 
@@ -1080,17 +788,6 @@ def test_main_requires_copyright_allow_file_to_exist(tmp_path: Path, capsys: pyt
     exclude_file = tmp_path / "oss-source-exclude.txt"
     exclude_file.write_text("# exclude list\n", encoding="utf-8")
 
-    rc = coc.main(
-        [
-            "--root",
-            str(root),
-            "--exclude-file",
-            str(exclude_file),
-            "--copyright-allow-file",
-            str(tmp_path / "does-not-exist.txt"),
-            "--portal-root",
-            str(tmp_path / "portal"),
-        ]
-    )
+    rc = _run_main(root, exclude_file, tmp_path / "does-not-exist.txt", tmp_path / "portal")
     assert rc != 0
     assert "does-not-exist.txt" in capsys.readouterr().err

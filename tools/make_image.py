@@ -411,8 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-corresponding-source",
         action="store_true",
-        help="Skip collecting GPL/LGPL corresponding source (dev only, the result is not shippable). "
-        "License copying still runs; MANIFEST.txt is stamped STATUS: INCOMPLETE.",
+        help="Skip collecting GPL/LGPL corresponding source (dev only; the result is not shippable).",
     )
     parser.add_argument(
         "--clean",
