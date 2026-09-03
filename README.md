@@ -192,6 +192,29 @@ failure matrix. This repository does not otherwise claim more than passing
 along stock Debian / Raspberry Pi OS package sources unmodified
 (`lib/patch_comitup_nm.py` above is the one exception).
 
+This apt-package collection does not cover everything on the image, though.
+`uv` (installed as a prebuilt binary, not an apt package) and Palmimo
+Portal (its own Python venv plus a prebuilt static frontend bundle, neither
+apt either) sit outside that machinery entirely. Their license *display*
+lives at `tools/uv/` and `portal/` respectively (see below), but whether
+either actually carries a (L)GPL component that would itself require
+corresponding source is an open question this repository has not yet
+resolved — the stage flags a uv-managed Python runtime as `STATUS:
+INCOMPLETE` precisely because of that. A further, narrower gap even within
+`tools/uv/`: `uv`'s binary statically links a set of Rust crates, and
+`tools/uv/`'s two files (its own dual Apache-2.0/MIT license) do not cover
+per-crate attribution for everything linked into it. The plan, not yet
+done, is to pin the exact `uv` version we ship and pull that version's own
+crate-attribution bundle rather than hand-assembling one.
+
+GPLv3 §6 also has a User Product / Installation Information clause: for a
+"User Product" it would require giving the owner a way to install a
+modified version of the GPLv3'd binaries that the device accepts as
+authentic. That does not apply here — the owner already has an
+unrestricted root account on their own device, with no signature
+verification or key requirement standing between them and installing
+modified software, so there is no Installation Information to withhold.
+
 Building with `tools/make_image.py --skip-corresponding-source` (or
 `PALMIMO_SKIP_CORRESPONDING_SOURCE=1`) skips only the source-fetch step, for
 a faster dev-loop rebuild — license copying still runs, and the resulting
@@ -206,14 +229,25 @@ usage, so no pi-gen configuration change was needed for that growth.
 
 ### `/boot/firmware/licenses/`
 
-MIT, BSD, Apache-2.0, and OFL require attaching copyright notices and license
-text to binary distributions. `files/boot/firmware/` places a `licenses/`
-directory on the boot (FAT32) partition, readable from any PC, with one
-subdirectory per source of static third-party software:
+MIT, BSD, Apache-2.0, and OFL all require attaching copyright notices and
+license text to binary distributions — and the SD card is this product's
+only bundled storage medium, so that's where they go. `files/boot/firmware/`
+places a `licenses/` directory on the boot (FAT32) partition, readable from
+any PC without booting the device, with one subdirectory per source of
+static third-party software:
 
-- `display-firmware/` — the RP2350 face-display firmware's third-party notices; see `NOTICE` there.
+- `display-firmware/` — the RP2350 face-display firmware's third-party
+  notices (Waveshare BSD/Apache code, STMicroelectronics fonts, Noto Emoji
+  artwork, the Raspberry Pi Pico SDK, and TinyUSB). `NOTICE` here is meant
+  to become the **canonical** copy: a follow-up pull request against the
+  monorepo replaces `firmware/display/NOTICE` (in that private monorepo,
+  not published) with a symlink to this file. Until that PR lands the two
+  copies can diverge, since nothing enforces they stay in sync today. See
+  `files/boot/firmware/licenses/display-firmware/NOTICE`.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
-- `pi/`, `portal/` — apt package and Palmimo Portal dependency license trees, generated at build time by the `04-oss-compliance` pi-gen stage (see above).
+- `pi/`, `portal/` — apt package and Palmimo Portal dependency license
+  trees, generated at build time by the `04-oss-compliance` pi-gen stage
+  (see above).
 
 See `files/boot/firmware/licenses/README.txt` for the full layout
 explanation, written for whoever is holding the SD card.
