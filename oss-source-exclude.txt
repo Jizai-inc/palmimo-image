@@ -16,7 +16,9 @@
 firmware-nonfree
 
 # Raspberry Pi boot firmware (start*.elf, bootcode.bin, GPU firmware) --
-# binary-only, Broadcom's redistribution license, no source available.
+# Debian does carry a raspi-firmware source package, but its contents are
+# binary blobs under Broadcom's redistribution license with no GPL/LGPL
+# component inside that would trigger a source-provision obligation.
 raspi-firmware
 
 # Bluetooth controller firmware blobs (brcm/bcm43xx .hcd files) --

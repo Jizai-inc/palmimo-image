@@ -24,13 +24,21 @@ is unit-testable on a host with no dpkg database and no network (see
 tests/test_collect_oss_compliance.py). Only main() wires those parameters
 to the real subprocess/filesystem.
 
+Everything this script inspects has to actually be *installed* -- dpkg-query
+output is filtered on `${db:Status-Status} == installed` in both queries it
+runs (source-package enumeration and copyright-file enumeration), so a
+purged-but-config-remaining package never triggers a source fetch or a
+"missing copyright" report for something not actually shipped.
+
 Final layout this script produces:
 
   <root>/usr/share/palmimo/sources/MANIFEST.txt
   <root>/usr/share/palmimo/sources/debian/<source>_<version>/*.dsc + tarballs
+  <root>/boot/firmware/licenses/MANIFEST.txt (copy of the above, readable from a PC)
   <root>/boot/firmware/licenses/pi/common-licenses/
   <root>/boot/firmware/licenses/pi/<binary-package>/copyright
   <root>/boot/firmware/licenses/portal/python/<dist>-<version>/LICENSE-METADATA.txt (+ License-File copies)
+  <root>/boot/firmware/licenses/portal/python-runtime/<uv-managed-python-dir>/licenses/
   <root>/boot/firmware/licenses/portal/THIRD_PARTY_NOTICES.md
   <root>/boot/firmware/licenses/portal/THIRD_PARTY_LICENSES.txt (if the portal build produced one)
 """
@@ -40,6 +48,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import glob
 import hashlib
 import os
 import shutil
@@ -49,7 +58,10 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 
-DPKG_QUERY_FORMAT = "${binary:Package}\t${source:Package}\t${source:Version}\n"
+DPKG_QUERY_SOURCE_FORMAT = "${binary:Package}\t${source:Package}\t${source:Version}\t${db:Status-Status}\n"
+DPKG_QUERY_INSTALLED_FORMAT = "${Package}\t${db:Status-Status}\n"
+
+_INSTALLED_STATUS = "installed"
 
 # Read by copy_portal_licenses(): the METADATA header fields worth keeping.
 # Everything else in a METADATA file is package body text (long description,
@@ -62,38 +74,63 @@ RunFunc = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
 
 # ---------------------------------------------------------------------------
-# dpkg-query output -> (source, version) pairs
+# dpkg-query output -> (source, version) pairs / installed package names
 # ---------------------------------------------------------------------------
 
 
 def list_source_packages(dpkg_query_output: str) -> set[tuple[str, str]]:
-    """Parse `dpkg-query -W -f='${binary:Package}\\t${source:Package}\\t${source:Version}\\n'`
-    output into the set of (source package, source version) pairs to fetch.
+    """Parse `dpkg-query -W -f='${binary:Package}\\t${source:Package}\\t
+    ${source:Version}\\t${db:Status-Status}\\n'` output into the set of
+    (source package, source version) pairs to fetch.
 
     Multiple binary packages built from the same source collapse to one
     pair (dedup is the point: apt-get source only needs to run once per
-    source package)."""
+    source package). Only lines whose dpkg status is "installed" count --
+    a purged-but-config-remaining package ("config-files", "half-installed",
+    ...) is not actually on the image and must not trigger a fetch."""
     pairs: set[tuple[str, str]] = set()
     for line in dpkg_query_output.splitlines():
         line = line.strip()
         if not line:
             continue
         parts = line.split("\t")
-        if len(parts) != 3:
-            raise ValueError(f"unexpected dpkg-query line (expected 3 tab-separated fields): {line!r}")
-        _binary, source, version = parts
+        if len(parts) != 4:
+            raise ValueError(f"unexpected dpkg-query line (expected 4 tab-separated fields): {line!r}")
+        _binary, source, version, status = parts
+        if status != _INSTALLED_STATUS:
+            continue
         pairs.add((source, version))
     return pairs
 
 
+def list_installed_packages(dpkg_query_output: str) -> list[str]:
+    """Parse `dpkg-query -W -f='${Package}\\t${db:Status-Status}\\n'` output
+    into the sorted list of package names whose dpkg status is
+    "installed"."""
+    names: set[str] = set()
+    for line in dpkg_query_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 2:
+            raise ValueError(f"unexpected dpkg-query line (expected 2 tab-separated fields): {line!r}")
+        name, status = parts
+        if status != _INSTALLED_STATUS:
+            continue
+        names.add(name)
+    return sorted(names)
+
+
 # ---------------------------------------------------------------------------
-# oss-source-exclude.txt
+# oss-source-exclude.txt / oss-copyright-missing-allow.txt (same format)
 # ---------------------------------------------------------------------------
 
 
 def parse_exclude_file(text: str) -> dict[str, str]:
-    """Parse oss-source-exclude.txt: one source package name per line, with
-    an optional `# reason` trailing comment. Full-line comments and blank
+    """Parse a name-list file (oss-source-exclude.txt or
+    oss-copyright-missing-allow.txt): one package name per line, with an
+    optional `# reason` trailing comment. Full-line comments and blank
     lines are ignored. Returns {name: reason} (reason is "" if none given)."""
     result: dict[str, str] = {}
     for raw_line in text.splitlines():
@@ -113,6 +150,33 @@ def parse_exclude_file(text: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# .dsc Checksums-Sha256 parsing/verification
+# ---------------------------------------------------------------------------
+
+
+def parse_dsc_checksums_sha256(dsc_text: str) -> list[tuple[str, str, int]]:
+    """Return (filename, sha256, size) tuples from a .dsc's Checksums-Sha256
+    field. Returns [] if the field is absent."""
+    lines = dsc_text.splitlines()
+    entries: list[tuple[str, str, int]] = []
+    in_section = False
+    for line in lines:
+        if line.startswith("Checksums-Sha256:"):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        if line.startswith(" ") or line.startswith("\t"):
+            parts = line.split()
+            if len(parts) == 3:
+                sha, size, fname = parts
+                entries.append((fname, sha, int(size)))
+            continue
+        break
+    return entries
+
+
+# ---------------------------------------------------------------------------
 # fetch_sources: apt-get source --download-only --only-source <src>=<ver>
 # ---------------------------------------------------------------------------
 
@@ -124,11 +188,48 @@ class FetchResult:
     status: str  # "fetched" | "excluded" | "failed"
     dsc_path: Path | None
     reason: str | None
+    # (filename, sha256, size) for the .dsc itself and every file it
+    # declares via Checksums-Sha256 -- populated only for "fetched" results,
+    # after every declared file's presence and checksum have been verified.
+    files: tuple[tuple[str, str, int], ...] = ()
 
 
 def _find_dsc(dest_dir: Path) -> Path | None:
     matches = sorted(dest_dir.glob("*.dsc"))
     return matches[0] if matches else None
+
+
+def _verify_dsc(dsc_path: Path) -> tuple[list[str], list[tuple[str, str, int]]]:
+    """Verify a fetched .dsc's Checksums-Sha256 field against the files
+    actually on disk next to it. Returns (problems, files) -- files is the
+    (filename, sha256, size) list, including the .dsc itself, when problems
+    is empty."""
+    problems: list[str] = []
+    dsc_sha = sha256_file(dsc_path)
+    dsc_size = dsc_path.stat().st_size
+    files: list[tuple[str, str, int]] = [(dsc_path.name, dsc_sha, dsc_size)]
+
+    entries = parse_dsc_checksums_sha256(dsc_path.read_text(encoding="utf-8", errors="replace"))
+    if not entries:
+        problems.append(f"{dsc_path.name}: no Checksums-Sha256 field found")
+        return problems, files
+
+    for fname, expected_sha, expected_size in entries:
+        fpath = dsc_path.parent / fname
+        if not fpath.is_file():
+            problems.append(f"{fname}: declared in Checksums-Sha256 but missing on disk")
+            continue
+        actual_sha = sha256_file(fpath)
+        actual_size = fpath.stat().st_size
+        if actual_sha != expected_sha:
+            problems.append(f"{fname}: sha256 mismatch (expected {expected_sha}, got {actual_sha})")
+            continue
+        if actual_size != expected_size:
+            problems.append(f"{fname}: size mismatch (expected {expected_size}, got {actual_size})")
+            continue
+        files.append((fname, actual_sha, actual_size))
+
+    return problems, files
 
 
 def fetch_sources(
@@ -141,6 +242,11 @@ def fetch_sources(
     out_dir/<source>_<version>/ via `apt-get source --download-only
     --only-source <source>=<version>`, run through the injected `run`
     callable (so this is testable without a real apt-get).
+
+    A successful fetch is not just "zero exit and a .dsc appeared" -- every
+    file the .dsc declares via its Checksums-Sha256 field must be present
+    and hash-match, or the pair counts as failed (a partial/corrupt mirror
+    download must not silently ship broken corresponding source).
 
     Every pair is attempted, even after an earlier one fails -- callers
     decide what to do with the failures (see failed_results /
@@ -158,7 +264,11 @@ def fetch_sources(
         proc = run(["apt-get", "source", "--download-only", "--only-source", f"{source}={version}"], dest)
         dsc_path = _find_dsc(dest)
         if proc.returncode == 0 and dsc_path is not None:
-            results.append(FetchResult(source, version, "fetched", dsc_path, None))
+            problems, files = _verify_dsc(dsc_path)
+            if problems:
+                results.append(FetchResult(source, version, "failed", None, "; ".join(problems)))
+            else:
+                results.append(FetchResult(source, version, "fetched", dsc_path, None, files=tuple(files)))
         else:
             reason = proc.stderr.strip() or f"apt-get source exited {proc.returncode} and produced no .dsc"
             results.append(FetchResult(source, version, "failed", None, reason))
@@ -196,14 +306,43 @@ def write_manifest(
     fetch_results: Iterable[FetchResult],
     skip_corresponding_source: bool,
     pi_missing_copyright: Iterable[str],
+    portal_dists_count: int,
+    portal_dists_without_license_text: Iterable[str],
     portal_third_party_licenses_present: bool,
+    portal_python_runtime_dirs: Iterable[str],
 ) -> None:
-    """Write MANIFEST.txt. Deterministic: fetch_results is sorted by source
-    name regardless of input order, so a re-run over the same inputs
-    produces a byte-identical file (useful for diffing images)."""
-    lines: list[str] = []
+    """Write MANIFEST.txt. Deterministic: the source table is sorted by
+    (source, version, status, filename) regardless of input order, so a
+    re-run over the same inputs produces a byte-identical file (useful for
+    diffing images). Written atomically (tmp file + os.replace) so a reader
+    never observes a partially-written file.
+
+    STATUS is OK unless one of several conditions holds, in which case it
+    is INCOMPLETE and every applicable reason is listed -- each condition
+    means "a human needs to look at this before the image ships"."""
+    dists_without_license_text = sorted(set(portal_dists_without_license_text))
+    python_runtime_dirs = sorted(set(portal_python_runtime_dirs))
+
+    status_reasons: list[str] = []
     if skip_corresponding_source:
-        lines.append("STATUS: INCOMPLETE -- corresponding source was skipped (development build, NOT shippable)")
+        status_reasons.append("corresponding source was skipped (development build, NOT shippable)")
+    if dists_without_license_text:
+        status_reasons.append(
+            "Python dists with no license text present (needs manual review): " + ", ".join(dists_without_license_text)
+        )
+    if not portal_third_party_licenses_present:
+        status_reasons.append("frontend THIRD_PARTY_LICENSES.txt absent (portal tag predates it)")
+    if python_runtime_dirs:
+        status_reasons.append(
+            "uv-managed Python runtime(s) found under .local/share/uv/python (needs a licensing decision): "
+            + ", ".join(python_runtime_dirs)
+        )
+
+    lines: list[str] = []
+    if status_reasons:
+        lines.append(f"STATUS: INCOMPLETE -- {status_reasons[0]}")
+        for reason in status_reasons[1:]:
+            lines.append(f"STATUS reason: {reason}")
         lines.append("")
     else:
         lines.append("STATUS: OK")
@@ -225,26 +364,48 @@ def write_manifest(
         "not trusted to filter by license family."
     )
     lines.append("")
-    lines.append("source\tversion\tstatus\tfile\tsha256")
+    lines.append("source\tversion\tstatus\tfile\tsha256\tsize")
 
-    for result in sorted(fetch_results, key=lambda r: r.source):
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for result in fetch_results:
         if result.status == "fetched":
-            assert result.dsc_path is not None
-            file_field = f"debian/{result.source}_{result.version}/{result.dsc_path.name}"
-            sha_field = sha256_file(result.dsc_path)
+            for fname, sha, size in result.files:
+                rows.append(
+                    (
+                        result.source,
+                        result.version,
+                        result.status,
+                        f"debian/{result.source}_{result.version}/{fname}",
+                        sha,
+                        str(size),
+                    )
+                )
         elif result.status == "excluded":
-            file_field = "-"
-            sha_field = f"excluded: {result.reason}"
+            rows.append((result.source, result.version, result.status, "-", f"excluded: {result.reason}", "-"))
         else:
-            file_field = "-"
-            sha_field = f"FAILED: {result.reason}"
-        lines.append(f"{result.source}\t{result.version}\t{result.status}\t{file_field}\t{sha_field}")
+            rows.append((result.source, result.version, result.status, "-", f"FAILED: {result.reason}", "-"))
+
+    rows.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
+    for row in rows:
+        lines.append("\t".join(row))
 
     lines.append("")
     lines.append("apt package copyright files missing from /usr/share/doc/<package>/copyright:")
-    missing = sorted(pi_missing_copyright)
+    lines.append("(allowed by oss-copyright-missing-allow.txt -- an unallowed miss fails the build)")
+    missing = sorted(set(pi_missing_copyright))
     if missing:
         for name in missing:
+            lines.append(f"  {name}")
+    else:
+        lines.append("  (none)")
+
+    lines.append("")
+    lines.append(f"portal python dists: {portal_dists_count}")
+
+    lines.append("")
+    lines.append("Python dists with no license text (needs manual review):")
+    if dists_without_license_text:
+        for name in dists_without_license_text:
             lines.append(f"  {name}")
     else:
         lines.append("  (none)")
@@ -253,8 +414,19 @@ def write_manifest(
     lines.append("Palmimo Portal THIRD_PARTY_LICENSES.txt (generated npm dependency license file):")
     lines.append("  present" if portal_third_party_licenses_present else "  absent")
 
+    lines.append("")
+    lines.append("Uncovered binaries (needs a decision):")
+    if python_runtime_dirs:
+        lines.append("  uv-managed Python runtime(s) under ~/.local/share/uv/python/:")
+        for name in python_runtime_dirs:
+            lines.append(f"    {name}")
+    else:
+        lines.append("  (none)")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp_path, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +478,10 @@ def copy_pi_licenses(rootfs: Path, out_dir: Path, packages: Iterable[str]) -> Pi
 @dataclasses.dataclass(frozen=True)
 class PortalLicenseReport:
     dists: list[str]
+    dists_without_license_text: list[str]
+    # (dist_name, relative_path) for every License-File: header whose target
+    # did not actually exist in the dist-info directory.
+    missing_license_files: list[tuple[str, str]]
     third_party_notices_present: bool
     third_party_licenses_present: bool
 
@@ -336,13 +512,23 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
     dist-info directory, commonly directly inside it or under a licenses/
     subdirectory) alongside it.
 
+    A dist whose METADATA declares a License-File: that does not actually
+    exist is recorded in `missing_license_files` -- the caller (main())
+    treats this as fatal, since a license file we claim to ship but don't
+    have is worse than not looking. A dist with neither a license header
+    nor a License-File at all gets no LICENSE-METADATA.txt (an empty file
+    would be misleading) and is recorded in `dists_without_license_text`
+    for manual review instead.
+
     Also copies portal_root/THIRD_PARTY_NOTICES.md and, if it exists,
     palmimo_portal/static/THIRD_PARTY_LICENSES.txt (generated by a parallel
-    portal-side PR) -- its absence is only a warning, never a hard failure,
-    since a portal build without it should still produce an image (the
-    manifest is where "absent" gets recorded so it isn't silently lost)."""
+    portal-side PR) -- its absence is only a warning here, never a hard
+    failure of this function (the caller decides what that means for
+    STATUS)."""
     python_out = out_dir / "python"
     dists: list[str] = []
+    dists_without_license_text: list[str] = []
+    missing_license_files: list[tuple[str, str]] = []
 
     if venv_site_packages.is_dir():
         for dist_info in sorted(venv_site_packages.glob("*.dist-info")):
@@ -354,7 +540,19 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
             )
 
             dist_name = dist_info.name.removesuffix(".dist-info")
+            dists.append(dist_name)
             dist_dir = python_out / dist_name
+
+            dist_missing = [relative for relative in license_files if not (dist_info / relative).is_file()]
+            if dist_missing:
+                for relative in dist_missing:
+                    missing_license_files.append((dist_name, relative))
+                continue
+
+            if not header_lines and not license_files:
+                dists_without_license_text.append(dist_name)
+                continue
+
             dist_dir.mkdir(parents=True, exist_ok=True)
             (dist_dir / "LICENSE-METADATA.txt").write_text(
                 "\n".join(header_lines) + ("\n" if header_lines else ""), encoding="utf-8"
@@ -362,13 +560,9 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
 
             for relative in license_files:
                 src = dist_info / relative
-                if not src.is_file():
-                    continue
                 dest = dist_dir / relative
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dest)
-
-            dists.append(dist_name)
 
     notices_src = portal_root / "THIRD_PARTY_NOTICES.md"
     notices_present = notices_src.is_file()
@@ -384,15 +578,83 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
     else:
         sys.stderr.write(
             "WARNING: palmimo_portal/static/THIRD_PARTY_LICENSES.txt not found in the portal "
-            "checkout -- continuing without it (recorded as absent in MANIFEST.txt). This is "
-            "expected until the portal-side generation PR lands.\n"
+            "checkout -- continuing without it (recorded as absent in MANIFEST.txt, which marks "
+            "STATUS INCOMPLETE). This is expected until the portal-side generation PR lands.\n"
         )
 
     return PortalLicenseReport(
         dists=sorted(dists),
+        dists_without_license_text=sorted(dists_without_license_text),
+        missing_license_files=missing_license_files,
         third_party_notices_present=notices_present,
         third_party_licenses_present=licenses_txt_present,
     )
+
+
+# ---------------------------------------------------------------------------
+# find_portal_venv_site_packages: glob, never guess a Python minor version
+# ---------------------------------------------------------------------------
+
+
+def find_portal_venv_site_packages(portal_root: Path) -> Path:
+    """Locate the Portal venv's site-packages directory by globbing
+    <portal_root>/.venv/lib/python*/site-packages -- this script must not
+    hardcode a Python minor version (uv creates the venv matching the
+    portal's own .python-version, which can drift from the chroot's system
+    Python across a Debian release). Raises RuntimeError, naming every
+    path actually looked at, when no candidate directory exists, or when
+    every candidate exists but contains zero *.dist-info directories (an
+    empty/broken venv must fail the build loudly, not silently ship zero
+    Python dependency licenses)."""
+    pattern = str(portal_root / ".venv" / "lib" / "python*" / "site-packages")
+    candidates = sorted(Path(p) for p in glob.glob(pattern))
+    existing = [c for c in candidates if c.is_dir()]
+    if not existing:
+        raise RuntimeError(f"no Portal venv site-packages found; looked for {pattern} (found nothing)")
+
+    for candidate in existing:
+        if any(candidate.glob("*.dist-info")):
+            return candidate
+
+    raise RuntimeError(
+        "Portal venv site-packages found but every candidate has zero *.dist-info directories: "
+        + ", ".join(str(c) for c in existing)
+    )
+
+
+# ---------------------------------------------------------------------------
+# uv-managed Python runtime detection (portal_home/.local/share/uv/python/)
+# ---------------------------------------------------------------------------
+
+
+def find_uv_managed_pythons(portal_home: Path) -> list[Path]:
+    """List directories under <portal_home>/.local/share/uv/python/ -- each
+    one is a python-build-standalone runtime uv downloaded on its own
+    (rather than using the chroot's system Python), which this script has
+    not reviewed for bundled-license implications (e.g. a statically linked
+    GPLv3 readline). Returns [] if the directory does not exist."""
+    uv_python_dir = portal_home / ".local" / "share" / "uv" / "python"
+    if not uv_python_dir.is_dir():
+        return []
+    return sorted(p for p in uv_python_dir.iterdir() if p.is_dir())
+
+
+def copy_uv_python_runtime_licenses(uv_pythons: Iterable[Path], out_dir: Path) -> list[str]:
+    """Copy each uv-managed Python runtime's licenses/ subdirectory (when
+    present) to out_dir/<runtime-dir-name>/licenses/. Returns the names of
+    runtimes actually copied -- a runtime dir with no licenses/ subdir is
+    skipped (and, either way, the caller still records every runtime dir
+    name in MANIFEST.txt under "needs a decision", since a copied license
+    text does not itself resolve whether that runtime is safe to ship)."""
+    copied: list[str] = []
+    for py_dir in uv_pythons:
+        licenses_src = py_dir / "licenses"
+        if not licenses_src.is_dir():
+            continue
+        dest = out_dir / py_dir.name / "licenses"
+        shutil.copytree(licenses_src, dest, dirs_exist_ok=True)
+        copied.append(py_dir.name)
+    return copied
 
 
 # ---------------------------------------------------------------------------
@@ -401,14 +663,10 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
 
 
 def _real_run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """The one subprocess wrapper main() uses -- for apt-get source (with a
+    meaningful cwd) and both dpkg-query calls alike (cwd is irrelevant to
+    dpkg-query but harmless to pass)."""
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
-
-
-def _dpkg_installed_packages(run_query: Callable[[list[str]], subprocess.CompletedProcess[str]]) -> list[str]:
-    proc = run_query(["dpkg-query", "-W", "-f=${Package}\n"])
-    if proc.returncode != 0:
-        raise RuntimeError(f"dpkg-query -W failed: {proc.stderr.strip()}")
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -416,19 +674,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default="/", help="Rootfs root to operate under (default: /, i.e. the chroot).")
     parser.add_argument(
         "--exclude-file",
-        default=None,
-        help="Path to oss-source-exclude.txt (default: <root's mounted image dir is not known here -- "
-        "pass explicitly>).",
+        required=True,
+        help="Path to oss-source-exclude.txt. Required: fails immediately if the path does not exist.",
     )
     parser.add_argument(
-        "--venv-site-packages",
-        default="/home/user/palmimo-portal/.venv/lib/python3.12/site-packages",
-        help="Palmimo Portal venv's site-packages directory.",
+        "--copyright-allow-file",
+        required=True,
+        help="Path to oss-copyright-missing-allow.txt. Required: fails immediately if the path does not exist.",
     )
     parser.add_argument(
         "--portal-root",
         default="/home/user/palmimo-portal",
-        help="Palmimo Portal repository checkout root.",
+        help="Palmimo Portal repository checkout root (its venv is found by globbing "
+        "<portal-root>/.venv/lib/python*/site-packages).",
     )
     parser.add_argument("--img-date", default=None, help="Build date recorded in MANIFEST.txt (default: today).")
     return parser
@@ -438,20 +696,37 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
+    exclude_path = Path(args.exclude_file)
+    if not exclude_path.is_file():
+        print(f"error: --exclude-file does not exist: {exclude_path}", file=sys.stderr)
+        return 1
+    copyright_allow_path = Path(args.copyright_allow_file)
+    if not copyright_allow_path.is_file():
+        print(f"error: --copyright-allow-file does not exist: {copyright_allow_path}", file=sys.stderr)
+        return 1
+
     root = Path(args.root)
+    portal_root = Path(args.portal_root)
     sources_out = root / "usr" / "share" / "palmimo" / "sources"
     licenses_out = root / "boot" / "firmware" / "licenses"
     img_date = args.img_date or datetime.date.today().isoformat()
     skip = os.environ.get("PALMIMO_SKIP_CORRESPONDING_SOURCE", "") == "1"
 
-    exclude: dict[str, str] = {}
-    if args.exclude_file:
-        exclude_path = Path(args.exclude_file)
-        if exclude_path.is_file():
-            exclude = parse_exclude_file(exclude_path.read_text(encoding="utf-8"))
+    exclude = parse_exclude_file(exclude_path.read_text(encoding="utf-8"))
+    copyright_allow = parse_exclude_file(copyright_allow_path.read_text(encoding="utf-8"))
 
-    def run_query(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # A previous interrupted build (or a re-run over the same chroot) must
+    # not leave stale output behind -- every output directory this script
+    # owns is wiped before anything is written.
+    shutil.rmtree(sources_out, ignore_errors=True)
+    shutil.rmtree(licenses_out / "pi", ignore_errors=True)
+    shutil.rmtree(licenses_out / "portal", ignore_errors=True)
+
+    try:
+        venv_site_packages = find_portal_venv_site_packages(portal_root)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     fetch_results: list[FetchResult] = []
     if skip:
@@ -460,7 +735,7 @@ def main(argv: list[str] | None = None) -> int:
             "collected. This is a development build and MUST NOT ship.\n"
         )
     else:
-        dpkg_proc = run_query(["dpkg-query", "-W", "-f=" + DPKG_QUERY_FORMAT])
+        dpkg_proc = _real_run(["dpkg-query", "-W", "-f=" + DPKG_QUERY_SOURCE_FORMAT], root)
         if dpkg_proc.returncode != 0:
             print(f"error: dpkg-query failed: {dpkg_proc.stderr.strip()}", file=sys.stderr)
             return 1
@@ -477,26 +752,56 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {format_failure_report(failures)}", file=sys.stderr)
             return 1
 
-    packages = _dpkg_installed_packages(run_query)
-    pi_report = copy_pi_licenses(root, licenses_out / "pi", packages)
-    for name in pi_report.missing:
-        print(f"WARNING: no /usr/share/doc/{name}/copyright found -- recorded as missing", file=sys.stderr)
+    installed_proc = _real_run(["dpkg-query", "-W", "-f=" + DPKG_QUERY_INSTALLED_FORMAT], root)
+    if installed_proc.returncode != 0:
+        print(f"error: dpkg-query failed: {installed_proc.stderr.strip()}", file=sys.stderr)
+        return 1
+    packages = list_installed_packages(installed_proc.stdout)
 
-    portal_report = copy_portal_licenses(Path(args.venv_site_packages), Path(args.portal_root), licenses_out / "portal")
+    pi_report = copy_pi_licenses(root, licenses_out / "pi", packages)
+    unallowed_missing = sorted(set(pi_report.missing) - set(copyright_allow))
+    if unallowed_missing:
+        print(
+            "error: apt package copyright missing and not in oss-copyright-missing-allow.txt: "
+            + ", ".join(unallowed_missing),
+            file=sys.stderr,
+        )
+        return 1
+    for name in pi_report.missing:
+        print(f"WARNING: no /usr/share/doc/{name}/copyright found -- recorded as missing (allowed)", file=sys.stderr)
+
+    portal_report = copy_portal_licenses(venv_site_packages, portal_root, licenses_out / "portal")
+    if portal_report.missing_license_files:
+        details = ", ".join(f"{dist}: {path}" for dist, path in portal_report.missing_license_files)
+        print(
+            f"error: Portal Python dist(s) declare a License-File that does not exist: {details}",
+            file=sys.stderr,
+        )
+        return 1
     if not portal_report.third_party_notices_present:
         print(
-            f"WARNING: {args.portal_root}/THIRD_PARTY_NOTICES.md not found -- continuing without it",
+            f"WARNING: {portal_root}/THIRD_PARTY_NOTICES.md not found -- continuing without it",
             file=sys.stderr,
         )
 
+    portal_home = portal_root.parent
+    uv_pythons = find_uv_managed_pythons(portal_home)
+    copy_uv_python_runtime_licenses(uv_pythons, licenses_out / "portal" / "python-runtime")
+
+    sources_manifest = sources_out / "MANIFEST.txt"
     write_manifest(
-        sources_out / "MANIFEST.txt",
+        sources_manifest,
         img_date=img_date,
         fetch_results=fetch_results,
         skip_corresponding_source=skip,
         pi_missing_copyright=pi_report.missing,
+        portal_dists_count=len(portal_report.dists),
+        portal_dists_without_license_text=portal_report.dists_without_license_text,
         portal_third_party_licenses_present=portal_report.third_party_licenses_present,
+        portal_python_runtime_dirs=[p.name for p in uv_pythons],
     )
+    licenses_out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(sources_manifest, licenses_out / "MANIFEST.txt")
 
     print("collect_oss_compliance.py: done")
     return 0

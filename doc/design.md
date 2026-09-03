@@ -487,10 +487,11 @@ rootfs の実サイズを `du` で決めるため、pi-gen 側の設定変更は
 
 | ステップ × 失敗 | 残る状態 | テスト | ユーザーに見えるもの | 回復手段 |
 |---|---|---|---|---|
-| ミラーに該当版が無い（`apt-get source` が該当版を出せない） | `apt-get source` は全ペアを試行済みだが該当パッケージだけ `.dsc` 無し。`MANIFEST.txt` は書かれない（コミット前に失敗を検知させるため） | `test_fetch_sources_tries_every_pair_even_after_a_failure` / `test_fetch_sources_fails_when_dsc_is_missing_despite_zero_exit`（ホスト側ユニットテスト。実 apt-get は未検証） | ビルドログに `FAILED to fetch source for <src>=<ver>: ...` が全件分並び、`build-docker.sh` が非ゼロ終了。`make_image.py` はコンテナを残して調査を促す | ミラーのスナップショット違いが疑われる場合は再ビルド（別ミラー選定）か、該当パッケージの版を手動で `/usr/share/palmimo/sources/` に追加してから再ビルド |
+| ミラーに該当版が無い（`apt-get source` が該当版を出せない） | `apt-get source` は全ペアを試行済みだが該当パッケージだけ `.dsc` 無し（またはチェックサム検証失敗）。`MANIFEST.txt` は書かれない（コミット前に失敗を検知させるため） | `test_fetch_sources_tries_every_pair_even_after_a_failure` / `test_fetch_sources_fails_when_dsc_is_missing_despite_zero_exit`（ホスト側ユニットテスト。実 apt-get は未検証） | ビルドログに `error: failed to fetch corresponding source for the following package(s):` に続けて `  <src>=<ver>: <reason>` が全件分並び、`build-docker.sh` が非ゼロ終了。`make_image.py` はコンテナを残して調査を促す | ミラーのスナップショット違いが疑われる場合は再ビルド（別ミラー選定）か、該当パッケージの版を手動で `/usr/share/palmimo/sources/` に追加してから再ビルド |
 | ネットワーク断（deb-src の `apt-get update` 自体が失敗、または個々の `apt-get source` がネットワークエラー） | `apt-get update` は `set -e` の chroot ヒアドキュメントの下で失敗し、ステージ全体が非ゼロ終了 — 部分的な `/usr/share/palmimo/sources/` は残るが `MANIFEST.txt` 無しなので「未完成」と判別できる | 静的検証のみ（`bash -n` / スクリプト構造）。実ネットワーク断は on-device 検証の対象外 | `build-docker.sh` の出力に apt のエラーがそのまま出る | ネットワーク復旧後に再ビルド（`apt-get update` は冪等、コンテナは pi-gen が最初からやり直す） |
-| ディスクフル（`apt-get source` の多数呼び出しが 1.3〜2GB 超を要求） | `apt-get source` が個別に非ゼロ終了 → 上の「ミラーに無い」と同じ失敗パスに合流し、全件試行後に非ゼロ終了 | 同上（fetch_sources のアグリゲーション自体はユニットテスト済み） | ディスク関連のエラーメッセージが `FAILED to fetch source` の理由欄にそのまま入る | ビルドホストの空き容量を確保して再ビルド（`--clean` でワークスペースを畳んでからでも良い） |
-| スキップフラグ付きビルドの誤出荷（`PALMIMO_SKIP_CORRESPONDING_SOURCE=1` のまま `dist/` の画像を配布） | イメージ自体は正常に起動するが `MANIFEST.txt` の先頭が `STATUS: INCOMPLETE` | `test_write_manifest_records_skip_status_first_line` | `make_image.py` の標準出力末尾に警告（ビルド時点）。イメージだけを受け取った場合は `/usr/share/palmimo/sources/MANIFEST.txt` を見るまで気づけない | 出荷前チェックリストに「`MANIFEST.txt` の `STATUS: OK` を確認」を追加する運用でカバー（自動ゲートは未実装 — 今後の課題） |
+| ディスクフル（`apt-get source` の多数呼び出しが 1.3〜2GB 超を要求） | `apt-get source` が個別に非ゼロ終了 → 上の「ミラーに無い」と同じ失敗パスに合流し、全件試行後に非ゼロ終了 | 同上（fetch_sources のアグリゲーション自体はユニットテスト済み） | ディスク関連のエラーメッセージが `error: failed to fetch corresponding source ...` の理由欄にそのまま入る | ビルドホストの空き容量を確保して再ビルド（`--clean` でワークスペースを畳んでからでも良い） |
+| スキップフラグ付きビルドの誤出荷（`PALMIMO_SKIP_CORRESPONDING_SOURCE=1` のまま `dist/` の画像を配布） | イメージ自体は正常に起動するが `MANIFEST.txt` の先頭が `STATUS: INCOMPLETE -- corresponding source was skipped ...` | `test_write_manifest_records_skip_status_first_line` | `make_image.py` の標準出力末尾に警告（ビルド時点）。イメージだけを受け取った場合は `/usr/share/palmimo/sources/MANIFEST.txt`（と、PC からも読める `/boot/firmware/licenses/MANIFEST.txt` のコピー）を見るまで気づけない | 出荷前チェックリストに「`MANIFEST.txt` の `STATUS: OK` を確認」を追加する運用でカバー（自動ゲートは未実装 — 今後の課題） |
+| 途中でプロセス死（ステージ実行中に chroot ごとホスト/コンテナが kill される、電源断、ビルドホストの OOM killer など） | `04-oss-compliance/00-run.sh` は 5. の対策で毎回の実行冒頭に出力ディレクトリ（`sources_out`、`licenses_out/pi`、`licenses_out/portal`）を `shutil.rmtree` するため、前回の中断ビルドの半端な成果物が次回ビルドに混入することはない。7. の対策で `MANIFEST.txt` は一時ファイル書き込み + `os.replace` によるアトミック置換なので、書き込み中に死んでも壊れた/半端な `MANIFEST.txt` が残ることはない（tmp ファイルが残るだけで、正規のパスには古い内容か何も無いかのどちらか）。11. の対策で deb-src の一時 sources ファイルとスクリプトのコピーは `trap cleanup EXIT` で削除されるため、シェルスクリプト自体が `kill -9` される最悪ケース以外は残留しない | `test_main_cleans_previous_build_output_directories_first`（5.）、`test_write_manifest_is_written_atomically_via_tmp_and_replace`（7.）、`test_oss_compliance_stage_cleans_up_via_trap_unconditionally`（11.） | 次回ビルドのログに前回の中断を示す痕跡は出ないが、`MANIFEST.txt` の `STATUS` は必ず今回の実行結果だけを反映する | 中断されたビルドは単純に再実行すればよい — 出力ディレクトリの毎回クリア・MANIFEST のアトミック書き込み・trap クリーンアップの三点で、途中状態が次回実行の判断を汚さないことが保証されている |
 
 ## 識別ファイル仕様 v2（2026-08-21 決定）
 
@@ -527,3 +528,12 @@ rootfs の実サイズを `du` で決めるため、pi-gen 側の設定変更は
 
 - polkit の comitup 許可が実際に必要か（T9 では user 権限で D-Bus 呼び出しが
   通っている — バスポリシー次第）。実機で確認し、不要なら書かない
+- 03-portal で `UV_PYTHON_DOWNLOADS=never` + システム Python を使うか、
+  python-build-standalone（PBS）の `licenses/` をそのまま採るかを決める。
+  portal の `.python-version` は 3.12、trixie のシステム Python は 3.13
+  なので uv がその場で PBS ランタイムをダウンロードし得る
+  （`~/.local/share/uv/python/` 配下）。readline(GPLv3) が静的リンクされて
+  いる可能性があり、`collect_oss_compliance.py` は現状これを検出して
+  `MANIFEST.txt` の「Uncovered binaries (needs a decision)」に列挙し
+  `STATUS: INCOMPLETE` にするだけ — ライセンス上出荷可能かどうかの判断は
+  人間が行う

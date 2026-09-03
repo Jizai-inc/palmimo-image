@@ -81,9 +81,11 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
 - `04-oss-compliance/` — `03-portal` の後（venv が出来てから）に走る。
   一時的に deb-src を有効化 (`files/palmimo-src.sources`) して
   `apt-get update` → `lib/collect_oss_compliance.py` をチェックインコピー
-  を作らず `$PALMIMO_IMAGE_DIR` からチロートの `/tmp` へコピーして
-  `on_chroot` で実行 → 削除 → deb-src を無効化して再度
-  `apt-get update`（出荷イメージは deb-src を持たない）。chroot に実際に
+  を作らず `$PALMIMO_IMAGE_DIR` から chroot の `/tmp` へコピーして
+  `on_chroot` で実行 → 削除 → deb-src を無効化（`trap` による無条件
+  クリーンアップ。`apt-get update` を再度打ち直すのではなく
+  `/var/lib/apt/lists/` の Sources インデックスだけを削除して、出荷
+  イメージは deb-src を持たない状態にする）。chroot に実際に
   入っているパッケージの版と同じ対応ソースを
   `/usr/share/palmimo/sources/` に集め、apt の copyright と Portal の
   Python 依存ライセンスを `/boot/firmware/licenses/{pi,portal}/` に写す
