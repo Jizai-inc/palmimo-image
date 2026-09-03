@@ -211,24 +211,14 @@ modified software, so there is no Installation Information to withhold.
 
 ### `/boot/firmware/licenses/`
 
-MIT, BSD, Apache-2.0, and OFL all require attaching copyright notices and
-license text to binary distributions — and the SD card is this product's
-only bundled storage medium, so that's where they go. `files/boot/firmware/`
-places a `licenses/` directory on the boot (FAT32) partition, readable from
-any PC without booting the device, with one subdirectory per source of
-static third-party software:
+MIT, BSD, Apache-2.0, and OFL require attaching copyright notices and license
+text to binary distributions. `files/boot/firmware/` places a `licenses/`
+directory on the boot (FAT32) partition, readable from any PC, with one
+subdirectory per source of static third-party software:
 
-- `display-firmware/` — the RP2350 face-display firmware's third-party
-  notices (Waveshare BSD/Apache code, STMicroelectronics fonts, Noto Emoji
-  artwork, the Raspberry Pi Pico SDK, and TinyUSB). `NOTICE` here is meant
-  to become the **canonical** copy: a follow-up pull request against the
-  monorepo replaces `firmware/display/NOTICE` (in that private monorepo,
-  not published) with a symlink to this file. Until that PR lands the two
-  copies can diverge, since nothing enforces they stay in sync today. See
-  `files/boot/firmware/licenses/display-firmware/NOTICE`.
+- `display-firmware/` — the RP2350 face-display firmware's third-party notices; see `NOTICE` there.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
-- `pi/`, `portal/` — apt package and Palmimo Portal dependency license
-  trees, generated at build time (not part of this PR; see above).
+- `pi/`, `portal/` — apt package and Palmimo Portal dependency license trees, generated at build time (not part of this PR; see above).
 
 See `files/boot/firmware/licenses/README.txt` for the full layout
 explanation, written for whoever is holding the SD card.

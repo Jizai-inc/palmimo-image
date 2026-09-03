@@ -1,10 +1,6 @@
 Palmimo face display firmware (RP2350) -- third-party notices. This file is
 the canonical copy; the firmware source tree links to it.
 
-The firmware in question is the RP2350 face-display firmware (the `.uf2`
-flashed onto Palmimo's Waveshare RP2350-Touch-LCD-2.8C display board),
-which drives the device's procedural face and emoji expressions.
-
 palmimo devkit -- RP2350 face display firmware
 =============================================
 
@@ -133,19 +129,9 @@ faithful so upstream diffs stay readable):
                      (CMakeLists.txt in that directory is Waveshare's build
                      glue and belongs to §1, not here)
 
-Copyright (c) 2014 STMicroelectronics. Redistributed by Waveshare in the demo
-above and vendored here unmodified. Each of the font files listed above
-(vendor/Fonts/font8.c, font12.c, font16.c, font20.c, font24.c, font12CN.c,
-font24CN.c) carries this same license text in its own header, so no
-per-file notice is needed — but binary distribution (this SD image) does
-not ship the source headers, so the full text is reproduced verbatim,
-copyright line included, in licenses/BSD-3-Clause-STMicroelectronics.txt.
-That file is extracted verbatim from the font12.c header (the text is
-identical across all seven font files) and, per the "verbatim" claim
-above, carries only the copyright line and the license body -- no
-provenance prose of our own, which is why that explanation lives here
-instead. The CN fonts are unused by this firmware but kept so the tree
-matches upstream.
+Copyright (c) 2014 STMicroelectronics. Redistributed by Waveshare, vendored
+here unmodified; the full license text is reproduced verbatim (extracted
+from the font12.c header) in licenses/BSD-3-Clause-STMicroelectronics.txt.
 
 
 3. Raspberry Pi board header and SDK import (BSD-3-Clause)
@@ -290,19 +276,12 @@ linked directly into the shipped `.uf2` binary, so their notices belong
 here just as much as the vendored code above.
 
   - Raspberry Pi Pico SDK (pico-sdk, tag 2.1.1)
-      Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
-      License: BSD-3-Clause
-      Full text: licenses/BSD-3-Clause.txt (the same file §3 uses — this is
-      the SDK's own LICENSE.TXT, which boards/*.h and pico_sdk_import.cmake
-      above are copied from).
+      Copyright (c) 2020 Raspberry Pi (Trading) Ltd. License: BSD-3-Clause
+      Full text: licenses/BSD-3-Clause.txt (§3's file — the SDK's own LICENSE.TXT)
 
-  - TinyUSB (bundled inside pico-sdk 2.1.1 at lib/tinyusb; linked into this
-    firmware via pico_enable_stdio_usb(), which the build enables for the
-    firmware's USB-serial control channel)
-      Copyright (c) 2018, hathach (tinyusb.org)
-      License: MIT
-      Full text: licenses/MIT-TinyUSB.txt (pico-sdk 2.1.1's bundled copy of
-      TinyUSB's own LICENSE file)
+  - TinyUSB (bundled inside pico-sdk 2.1.1 at lib/tinyusb, linked in via
+      pico_enable_stdio_usb()). Copyright (c) 2018, hathach (tinyusb.org). License: MIT
+      Full text: licenses/MIT-TinyUSB.txt (pico-sdk's bundled copy of TinyUSB's LICENSE)
 
   - Prebuilt pioasm / picotool — build-time-only tools invoked by the CMake
     build to generate PIO headers and produce the final `.uf2`; neither

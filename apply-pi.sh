@@ -136,30 +136,16 @@ echo "==> [6/9] files/ -> / (sudo rsync)"
 # adds/overwrites known paths, never deletes files a hand-applied Pi might
 # have added under the same directories for other reasons.
 #
-# --exclude /boot: on a real device /boot/firmware is vfat (FAT32), which
-# has no concept of Unix ownership or permission bits. -a's chown/chmod on
-# files under it fails there, rsync returns 23 (partial transfer), and
-# `set -e` aborts the whole script. Excluding only boot/firmware is not
-# enough: rsync -a still applies the local uid/gid/mode to the /boot
-# directory entry itself while descending into it, even though its
-# contents (boot/firmware) are excluded. Excluding /boot entirely keeps -a
-# away from that directory entry too. files/boot/firmware/ (the third-party
-# licenses tree, see README.md "Licenses and corresponding source") is sent
-# separately below, without -a, so it never hits that failure mode.
+# --exclude /boot: vfat /boot/firmware can't hold Unix modes, and -a
+# stamps them onto the /boot entry itself, not just its contents.
 rsync -az \
   --rsync-path='sudo rsync' \
   --exclude /boot \
   -e 'ssh -o BatchMode=yes' \
   "$FILES_SRC" "${PI_HOST}:/"
 
-# files/boot/firmware/ -> /boot/firmware/ (vfat: no ownership/permission
-# bits, ~2s mtime granularity)
-# --no-perms --no-owner --no-group: vfat cannot represent Unix modes/uid/gid,
-# and asking rsync to apply them (as -a implies) is exactly what --exclude
-# /boot above avoids. -rt replaces -a's recursion plus mtime preservation,
-# without also requesting the ownership/mode preservation vfat can't honor.
-# --modify-window=2 tolerates vfat's 2-second mtime rounding, so re-running
-# this script does not treat every file as changed and resend it.
+# files/boot/firmware/ -> /boot/firmware/: sent separately, without -a,
+# since vfat can't hold Unix modes; --modify-window=2 tolerates its ~2s mtime rounding.
 rsync -rtz \
   --modify-window=2 \
   --no-perms --no-owner --no-group \

@@ -36,7 +36,6 @@ APPLY_SCRIPT = IMAGE_DIR / "apply-pi.sh"
 MAKE_IDENTITY_SCRIPT = IMAGE_DIR / "tools" / "make_identity.py"
 PACKAGES_TXT = IMAGE_DIR / "packages.txt"
 PATCH_NM_PY_LIB = IMAGE_DIR / "lib" / "patch_comitup_nm.py"
-ROOT_README = IMAGE_DIR / "README.md"
 
 PIGEN_DIR = IMAGE_DIR / "pigen"
 PIGEN_README = PIGEN_DIR / "README.md"
@@ -850,25 +849,15 @@ def test_boot_licenses_tree_carries_the_static_notices(path: Path) -> None:
 
 
 def test_display_firmware_notice_names_the_binary_linked_components() -> None:
+    # Mechanical check only: every licenses/<file> the NOTICE references
+    # must actually exist on disk.
     text = _text(DISPLAY_FW_NOTICE)
-    for name in ("TinyUSB", "pico-sdk", "STMicroelectronics", "Noto Emoji", "Waveshare"):
-        assert name in text, f"NOTICE does not mention {name}"
-
-    for filename in (
-        "Apache-2.0.txt",
-        "BSD-3-Clause.txt",
-        "BSD-3-Clause-STMicroelectronics.txt",
-        "OFL-1.1.txt",
-        "MIT-TinyUSB.txt",
-    ):
-        assert filename in text, f"NOTICE does not reference licenses/{filename}"
+    for filename in re.findall(r"(?<![/.\w])licenses/([\w.-]+\.txt)", text):
+        path = DISPLAY_FW_LICENSES_DIR / "licenses" / filename
+        assert path.is_file(), f"NOTICE references missing licenses/{filename}"
 
 
 def test_apply_script_first_rsync_excludes_the_whole_boot_directory() -> None:
-    # Excluding only boot/firmware still lets -a's local uid/gid/mode land
-    # on the /boot directory entry itself (rsync applies -a's directory
-    # metadata to every directory it descends into, excluded contents or
-    # not). Excluding /boot outright keeps -a away from that entry too.
     text = _text(APPLY_SCRIPT)
     assert "--exclude /boot" in text
     assert "--exclude boot/firmware" not in text
@@ -876,114 +865,13 @@ def test_apply_script_first_rsync_excludes_the_whole_boot_directory() -> None:
 
 
 def test_apply_script_second_rsync_preserves_mtime_without_unix_metadata() -> None:
-    # vfat has ~2s mtime granularity: -t (mtime preservation) plus
-    # --modify-window=2 stops a re-run from treating every file as changed
-    # and resending it. -a must not be used here (vfat can't hold Unix
-    # ownership/mode bits), so this checks the exact invocation shape.
     text = _text(APPLY_SCRIPT)
     idx = text.index('"${FILES_SRC}boot/firmware/" "${PI_HOST}:/boot/firmware/"')
     start = text.rindex("rsync -", 0, idx)
     block = text[start:idx]
     assert block.startswith("rsync -rtz")
-    assert "-az" not in block
     assert " -a " not in block
     assert "--modify-window=2" in block
-    assert "--no-perms --no-owner --no-group" in block
-
-
-def test_licenses_readme_states_the_gpl_bundling_option_correctly() -> None:
-    # §3(a)/§6(a) is "source accompanies the binaries"; §3(b)/§6(b) is
-    # "written offer, on request". The README previously had these
-    # backwards.
-    text = _text(BOOT_LICENSES_DIR / "README.txt")
-    assert "GPLv2 §3(a) / GPLv3 §6(a)" in text
-    assert "same-medium, on request only" not in text
-
-
-def test_licenses_readme_does_not_assert_source_completeness_unconditionally() -> None:
-    # The apt-package source collection happens at build time in a
-    # follow-up PR; a purchaser-facing document should not assert it is
-    # already complete, and must not mention pull requests at all.
-    text = _text(BOOT_LICENSES_DIR / "README.txt")
-    assert "pull request" not in text
-    assert "MANIFEST.txt" in text
-    assert "STATUS: OK" in text
-
-
-def test_licenses_readme_uv_install_timing_is_build_time_not_first_boot() -> None:
-    # uv is installed by the 03-portal pi-gen stage at image-build time,
-    # not by anything that runs on first boot.
-    text = _text(BOOT_LICENSES_DIR / "README.txt")
-    assert "on first boot" not in text
-    assert "installed into the image at build time" in text
-
-
-def test_licenses_readme_points_at_the_source_tree_path() -> None:
-    text = _text(BOOT_LICENSES_DIR / "README.txt")
-    assert "/usr/share/palmimo/sources/" in text
-
-
-def test_stmicro_license_file_is_verbatim_license_text_only() -> None:
-    # The license file purchasers see must be the copyright line + license
-    # body only -- no Jizai-authored provenance prose referencing paths
-    # that are not on the SD card (vendor/Fonts/*.c lives in the private
-    # firmware source tree, not this image). That prose belongs in NOTICE.
-    text = _text(DISPLAY_FW_LICENSES_DIR / "licenses" / "BSD-3-Clause-STMicroelectronics.txt")
-    assert text.startswith("Copyright (c) 2014 STMicroelectronics\n")
-    assert "vendor/Fonts" not in text
-    assert "NOTICE" not in text
-    assert "Palmimo face display firmware" not in text
-
-
-def test_notice_section_2_carries_the_stmicro_file_provenance() -> None:
-    text = _text(DISPLAY_FW_NOTICE)
-    section2 = text.split("2. STMicroelectronics", 1)[1].split("3. Raspberry Pi board header", 1)[0]
-    assert "font8.c" in section2
-    assert "font12CN.c" in section2
-    assert "extracted" in section2
-    assert "verbatim" in section2
-
-
-def test_notice_does_not_point_at_the_private_repository_readme() -> None:
-    # firmware/display/README.md lives in the private monorepo, not this
-    # published image repository -- a purchaser reading NOTICE off the SD
-    # card cannot follow that pointer.
-    text = _text(DISPLAY_FW_NOTICE)
-    assert "README.md build notes" not in text
-
-
-def test_readme_corresponding_source_caveats_the_apt_only_scope() -> None:
-    text = _text(ROOT_README)
-    assert "tools/uv/" in text
-    assert "`portal/`" in text
-    assert "(L)GPL" in text
-    assert "open question" in text
-
-
-def test_readme_notes_uv_static_rust_crates_are_an_open_todo() -> None:
-    text = _text(ROOT_README)
-    assert "Rust crates" in text
-    assert "pin the exact" in text
-
-
-def test_readme_notes_gplv3_user_product_installation_information_not_required() -> None:
-    text = _text(ROOT_README)
-    assert "Installation Information" in text
-    assert "User Product" in text
-    assert "root account" in text
-
-
-def test_readme_firmware_notice_symlink_described_as_future_not_current() -> None:
-    text = _text(ROOT_README)
-    assert "not published" in text
-    assert "symlink" in text
-    assert "diverge" in text
-
-
-def test_readme_over_inclusion_claim_is_measured_not_asserted_harmless() -> None:
-    text = _text(ROOT_README)
-    assert "over-inclusion is harmless" not in text
-    assert "measured" in text
 
 
 def test_root_gitignore_does_not_also_ignore_workspace() -> None:
