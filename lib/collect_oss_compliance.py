@@ -414,6 +414,15 @@ def _extract_license_metadata(metadata_text: str) -> tuple[list[str], list[str]]
     return header_lines, license_files
 
 
+def _resolve_license_file(dist_info: Path, relative: str) -> Path | None:
+    """Wheels store License-File targets under dist-info/licenses/ (PEP 639);
+    older ones put them at the dist-info root."""
+    for candidate in (dist_info / "licenses" / relative, dist_info / relative):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: Path) -> PortalLicenseReport:
     """For every *.dist-info/ in venv_site_packages, extract METADATA's
     license header lines into LICENSE-METADATA.txt and copy each
@@ -440,7 +449,8 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
             dists.append(dist_name)
             dist_dir = python_out / dist_name
 
-            dist_missing = [relative for relative in license_files if not (dist_info / relative).is_file()]
+            resolved = {relative: _resolve_license_file(dist_info, relative) for relative in license_files}
+            dist_missing = [relative for relative, src in resolved.items() if src is None]
             if dist_missing:
                 for relative in dist_missing:
                     missing_license_files.append((dist_name, relative))
@@ -455,8 +465,8 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
                 "\n".join(header_lines) + ("\n" if header_lines else ""), encoding="utf-8"
             )
 
-            for relative in license_files:
-                src = dist_info / relative
+            for relative, src in resolved.items():
+                assert src is not None
                 dest = dist_dir / relative
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dest)

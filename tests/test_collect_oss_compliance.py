@@ -416,16 +416,16 @@ def _make_fake_venv(tmp_path: Path, python_minor: str = "python3.12") -> Path:
         "License-Expression: MIT\n"
         "Classifier: License :: OSI Approved :: MIT License\n"
         "License-File: LICENSE\n"
-        "License-File: licenses/AUTHORS.md\n"
+        "License-File: COPYING\n"
         "\n"
         "Long description body, not a header.\n"
         "License: this line is body text, not a header, must not leak in\n",
         encoding="utf-8",
     )
-    (dist_info / "LICENSE").write_text("MIT license text\n", encoding="utf-8")
-    licenses_dir = dist_info / "licenses"
-    licenses_dir.mkdir()
-    (licenses_dir / "AUTHORS.md").write_text("Author list\n", encoding="utf-8")
+    # PEP 639 wheels put License-File targets under licenses/; older wheels at the root.
+    (dist_info / "licenses").mkdir()
+    (dist_info / "licenses" / "LICENSE").write_text("MIT license text\n", encoding="utf-8")
+    (dist_info / "COPYING").write_text("legacy layout\n", encoding="utf-8")
     return site_packages
 
 
@@ -440,7 +440,7 @@ def test_copy_portal_licenses_writes_license_metadata_txt_and_copies_license_fil
     assert "Classifier: License :: OSI Approved :: MIT License" in meta
     assert "this line is body text" not in meta
     assert (dist_out / "LICENSE").read_text(encoding="utf-8") == "MIT license text\n"
-    assert (dist_out / "licenses" / "AUTHORS.md").read_text(encoding="utf-8") == "Author list\n"
+    assert (dist_out / "COPYING").read_text(encoding="utf-8") == "legacy layout\n"
 
 
 def test_copy_portal_licenses_fails_when_license_file_declared_but_missing(tmp_path: Path) -> None:

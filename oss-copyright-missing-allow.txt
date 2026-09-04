@@ -3,8 +3,6 @@
 # oss-source-exclude.txt. Any missing-copyright package NOT listed here
 # fails the build.
 
-# Empty by design: nothing has been hand-reviewed and approved yet. Add an
-# entry only after confirming by hand it's not a packaging bug upstream.
 
 # Raspberry Pi config-only package (NM conf + profile.d script); ships no
 # copyright file upstream. Only package on the image without one (2026-09-04).
