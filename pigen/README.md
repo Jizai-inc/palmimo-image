@@ -62,7 +62,7 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
 ## ステージ構成
 
 `stage-palmimo/` は pi-gen 標準の `stage2`（Raspberry Pi OS Lite）の後に
-走る。サブステージ 4 つ:
+走る。サブステージ 5 つ:
 
 - `00-packages/` — `00-packages` はチェックインしない。`prerun.sh` が
   ビルド時に `packages.txt` から生成する。ドリフトするものをここに
@@ -78,6 +78,9 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
   ゼロから作るため。
 - `03-portal/` — uv 導入・`palmimo-portal` のタグ clone・
   `uv sync --frozen --no-dev`・`fetch_static`（Updater と同一コードパス）。
+- `04-oss-compliance/` — `03-portal` の後、`lib/collect_oss_compliance.py`
+  を chroot にコピーして実行・削除。対応ソース（GPLv2 §3(a) / GPLv3
+  §6(a)）と apt/Portal のライセンスを集める。詳細は `../doc/design.md`。
 
 `EXPORT_IMAGE` がこのステージを最終 `.img` の export 対象として指す。
 `.workspace/` は `make_image.py` の作業場（gitignored・消して良い）。

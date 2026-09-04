@@ -1,0 +1,15 @@
+# Source packages excluded from /usr/share/palmimo/sources/ (see
+# lib/collect_oss_compliance.py and README.md). One name per line, `#` for
+# comments/reasons. Every other apt source package IS collected.
+
+# firmware-brcm80211, firmware-atheros, etc. are all built from this source.
+firmware-nonfree
+
+# Raspberry Pi boot firmware -- binary blobs, no GPL/LGPL component inside.
+raspi-firmware
+
+# Bluetooth controller firmware blobs -- binary-only, same as firmware-nonfree.
+bluez-firmware
+
+# Raspberry Pi Connect client: proprietary, no source package is published.
+rpi-connect-lite

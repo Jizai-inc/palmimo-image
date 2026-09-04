@@ -12,50 +12,34 @@ Subdirectories
 ---------------
 
   display-firmware/
-      Third-party notices for the RP2350 face-display firmware (the
-      `.uf2` flashed onto the display board). NOTICE is the canonical
-      attribution file; licenses/ holds the full texts it points to.
+      Third-party notices for the RP2350 face-display firmware. NOTICE is
+      the canonical attribution file; licenses/ holds the full texts.
 
   tools/uv/
-      License texts for `uv`, the Python package manager binary
-      installed into the image at build time (see apply-pi.sh / the
-      pi-gen stage). uv is dual-licensed Apache-2.0 OR MIT; both texts
-      are included.
+      License texts for `uv`, the Python package manager binary installed
+      into the image at build time. Dual-licensed Apache-2.0 OR MIT.
 
   pi/
-      Copyright files for the Raspberry Pi OS apt packages this image
-      installs (comitup, avahi-daemon, git, dnsmasq, and their
-      dependencies). Generated at image-build time from each package's
-      /usr/share/doc/<package>/copyright, plus common-licenses/ for the
-      licenses those copyright files refer to by pointer (e.g. GPL-2,
-      GPL-3, LGPL-2.1) rather than by inline text.
+      Copyright files for every apt package installed on this image (not
+      a fixed list), generated at build time, plus common-licenses/.
 
   portal/
-      License texts for Palmimo Portal's own Python and npm dependencies.
-      Generated at image-build time from the pinned lockfiles.
+      License texts for Palmimo Portal's Python dependencies and, if
+      generated, its npm THIRD_PARTY_LICENSES.txt. Built at image time.
 
 Corresponding source (GPL / LGPL)
 -----------------------------------
 
-Palmimo DevKit is sold, not merely distributed at no charge. We use
-GPLv2 §3(a) / GPLv3 §6(a): the corresponding source accompanies the
-binaries on this SD card, rather than only being available on written
-request (the §3(b) / §6(b) option). Corresponding source for the apt
-packages on this image is collected at image build time into:
+By GPLv2 §3(a) / GPLv3 §6(a), corresponding source for every apt source
+package on this image is collected at build time into
+/usr/share/palmimo/sources/ -- on the root filesystem (ext4), not this FAT
+partition, so read it from the device itself or over SSH/SCP.
 
-    /usr/share/palmimo/sources/
-
-Check the STATUS line at the top of MANIFEST.txt in this directory: only
-STATUS: OK means the collection is complete.
-
-That path is on the root filesystem (ext4), not this FAT boot partition,
-so it cannot be read directly by inserting the card into a PC's SD slot --
-read it from the device itself (a terminal on the Pi) or over SSH/SCP from
-another machine on the network. This mirrors comitup's own modified
-nm.py, which Jizai Inc. patches for WPA2/PMF hotspot security and ships as
-plain, unstripped Python source under GPLv2 §2(a) (see this repository's
-README.md, "Licenses and corresponding source", for the details of that
-patch).
+Check the STATUS line at the top of MANIFEST.txt (here and at
+/usr/share/palmimo/sources/MANIFEST.txt): only STATUS: OK means this card
+is fit to ship as-is. STATUS: INCOMPLETE lists the reason(s) -- a skipped
+dev build, a license needing manual review, or an uncovered binary needing
+a decision.
 
 apt package copyright files
 -----------------------------

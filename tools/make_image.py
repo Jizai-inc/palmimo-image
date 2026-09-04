@@ -127,10 +127,12 @@ def decide_container_action(ps_status_output: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def assemble_docker_opts(repo_root: Path, portal_tag: str | None) -> str:
+def assemble_docker_opts(repo_root: Path, portal_tag: str | None, *, skip_corresponding_source: bool = False) -> str:
     opts = f"--volume {repo_root}:/palmimo-image:ro"
     if portal_tag:
         opts += f" -e PALMIMO_PORTAL_TAG={portal_tag}"
+    if skip_corresponding_source:
+        opts += " -e PALMIMO_SKIP_CORRESPONDING_SOURCE=1"
     return opts
 
 
@@ -165,21 +167,36 @@ class Plan:
         repo_root: Path,
         pigen_ref: str,
         portal_tag: str | None,
+        skip_corresponding_source: bool = False,
     ) -> None:
         self.repo_root = repo_root
         self.pigen_ref = pigen_ref
         self.portal_tag = portal_tag
+        self.skip_corresponding_source = skip_corresponding_source
         self.image_dir = image_dir(repo_root)
         self.pigen_source_dir = pigen_source_dir(repo_root)
         self.workspace_dir = workspace_dir(repo_root)
         self.pigen_checkout_dir = pigen_checkout_dir(repo_root)
         self.build_log_path = build_log_path(repo_root)
         self.dist_dir = dist_dir(repo_root)
-        self.docker_opts = assemble_docker_opts(repo_root, portal_tag)
+        self.docker_opts = assemble_docker_opts(
+            repo_root, portal_tag, skip_corresponding_source=skip_corresponding_source
+        )
 
 
-def build_plan(repo_root: Path, *, pigen_ref: str, portal_tag: str | None) -> Plan:
-    return Plan(repo_root=repo_root, pigen_ref=pigen_ref, portal_tag=portal_tag)
+def build_plan(
+    repo_root: Path,
+    *,
+    pigen_ref: str,
+    portal_tag: str | None,
+    skip_corresponding_source: bool = False,
+) -> Plan:
+    return Plan(
+        repo_root=repo_root,
+        pigen_ref=pigen_ref,
+        portal_tag=portal_tag,
+        skip_corresponding_source=skip_corresponding_source,
+    )
 
 
 def render_plan(plan: Plan) -> str:
@@ -191,6 +208,7 @@ def render_plan(plan: Plan) -> str:
         f"  pi-gen checkout:  {plan.pigen_checkout_dir}",
         f"  pigen ref:        {plan.pigen_ref}",
         f"  portal tag:       {plan.portal_tag or '<pi-gen config default>'}",
+        f"  skip corresponding source: {plan.skip_corresponding_source}",
         f"  PIGEN_DOCKER_OPTS: {plan.docker_opts}",
         f"  build log:        {plan.build_log_path}",
         f"  dist dir:         {plan.dist_dir}",
@@ -391,6 +409,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"pi-gen ref (SHA/branch/tag) to build from (default: pinned {PIGEN_REF}).",
     )
     parser.add_argument(
+        "--skip-corresponding-source",
+        action="store_true",
+        help="Skip collecting GPL/LGPL corresponding source (dev only; the result is not shippable).",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="Remove everything under .workspace/ except .gitignore, then exit.",
@@ -413,7 +436,12 @@ def main(argv: list[str] | None = None) -> int:
         clean_workspace(workspace_dir(repo_root))
         return 0
 
-    plan = build_plan(repo_root, pigen_ref=args.pigen_ref or PIGEN_REF, portal_tag=args.portal_tag)
+    plan = build_plan(
+        repo_root,
+        pigen_ref=args.pigen_ref or PIGEN_REF,
+        portal_tag=args.portal_tag,
+        skip_corresponding_source=args.skip_corresponding_source,
+    )
 
     if args.dry_run:
         print(render_plan(plan))
@@ -432,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
         print("Build complete.")
         print(f"  image:  {dest}")
         print(f"  sha256: {digest}")
+        if plan.skip_corresponding_source:
+            print()
+            print("WARNING: built with --skip-corresponding-source -- this image is")
+            print("         NOT SHIPPABLE. GPL/LGPL corresponding source was not collected;")
+            print("         MANIFEST.txt on the image is stamped STATUS: INCOMPLETE.")
         print("=" * 60)
         return 0
     except MakeImageError as exc:

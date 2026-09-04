@@ -1,15 +1,6 @@
-"""Contracts for tools/make_image.py -- the one-shot pi-gen
-build script.
-
-This module pins the parts a static/unit check can verify without a Docker
-daemon or a real pi-gen checkout: repo-root resolution from the script's own
-path, the container-state decision matrix parsed from `docker ps` output
-shape, PIGEN_DOCKER_OPTS assembly with and without --portal-tag, deploy-image
-selection (newest wins, empty errors loud), and --dry-run producing a plan
-with zero side effects. Anything that actually calls docker/git/build-docker.sh
-is out of scope here by design -- --dry-run never calls those, which is
-exactly what lets this module test it.
-"""
+"""Contracts for tools/make_image.py verifiable without Docker or a real
+pi-gen checkout: repo-root resolution, container-state decisions, docker-opts
+assembly, deploy-image selection, and --dry-run (zero side effects)."""
 
 from __future__ import annotations
 
@@ -40,11 +31,7 @@ def _load_module() -> ModuleType:
 make_image = _load_module()
 
 
-# ---------------------------------------------------------------------------
 # Repo-root resolution
-# ---------------------------------------------------------------------------
-
-
 def test_resolve_repo_root_from_the_real_script_path() -> None:
     assert make_image.resolve_repo_root(MAKE_IMAGE_SCRIPT) == REPO_ROOT
 
@@ -57,11 +44,7 @@ def test_resolve_repo_root_is_independent_of_cwd(tmp_path: Path) -> None:
     assert make_image.resolve_repo_root(fake_script) == tmp_path / "some-repo"
 
 
-# ---------------------------------------------------------------------------
 # Container-state decision matrix
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("ps_output", "expected"),
     [
@@ -78,11 +61,7 @@ def test_decide_container_action(ps_output: str, expected: str) -> None:
     assert make_image.decide_container_action(ps_output) == expected
 
 
-# ---------------------------------------------------------------------------
 # PIGEN_DOCKER_OPTS assembly
-# ---------------------------------------------------------------------------
-
-
 def test_assemble_docker_opts_without_portal_tag(tmp_path: Path) -> None:
     opts = make_image.assemble_docker_opts(tmp_path, None)
     assert opts == f"--volume {tmp_path}:/palmimo-image:ro"
@@ -94,11 +73,25 @@ def test_assemble_docker_opts_with_portal_tag(tmp_path: Path) -> None:
     assert opts == f"--volume {tmp_path}:/palmimo-image:ro -e PALMIMO_PORTAL_TAG=v0.1.0-rc1"
 
 
-# ---------------------------------------------------------------------------
+def test_cli_skip_corresponding_source_flag_reaches_docker_opts(tmp_path: Path) -> None:
+    def run(*args: str) -> str:
+        result = subprocess.run(
+            [sys.executable, str(MAKE_IMAGE_SCRIPT), "--dry-run", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(tmp_path),
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE" not in run()
+    with_flag = run("--skip-corresponding-source")
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE=1" in with_flag
+    assert "skip corresponding source: True" in with_flag
+
+
 # Deploy-image selection
-# ---------------------------------------------------------------------------
-
-
 def test_select_newest_deploy_image_picks_the_newest(tmp_path: Path) -> None:
     older = tmp_path / "image_2026-01-01-palmimo.img.xz"
     newer = tmp_path / "image_2026-02-01-palmimo.img.xz"
@@ -130,11 +123,7 @@ def test_find_deploy_images_on_missing_dir_returns_empty(tmp_path: Path) -> None
     assert make_image.find_deploy_images(tmp_path / "does-not-exist") == []
 
 
-# ---------------------------------------------------------------------------
 # --dry-run: plan output, zero side effects
-# ---------------------------------------------------------------------------
-
-
 def test_dry_run_prints_a_plan_and_touches_nothing(tmp_path: Path) -> None:
     fake_repo = tmp_path / "fake-repo"
     fake_script = fake_repo / "tools" / "make_image.py"
@@ -177,11 +166,7 @@ def test_dry_run_cli_invocation_produces_a_plan_and_makes_no_docker_calls(tmp_pa
     assert {p.name for p in workspace.iterdir()} == before
 
 
-# ---------------------------------------------------------------------------
 # --clean
-# ---------------------------------------------------------------------------
-
-
 def test_clean_workspace_removes_everything_but_gitignore(tmp_path: Path) -> None:
     workspace = tmp_path / ".workspace"
     workspace.mkdir()

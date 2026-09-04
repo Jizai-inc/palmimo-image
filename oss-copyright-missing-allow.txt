@@ -1,0 +1,9 @@
+# apt packages allowed to have no /usr/share/doc/<package>/copyright file
+# (see lib/collect_oss_compliance.py and README.md). Same format as
+# oss-source-exclude.txt. Any missing-copyright package NOT listed here
+# fails the build.
+
+
+# Raspberry Pi config-only package (NM conf + profile.d script); ships no
+# copyright file upstream. Only package on the image without one (2026-09-04).
+raspberrypi-net-mods

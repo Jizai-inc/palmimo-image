@@ -48,8 +48,13 @@ STAGE_ACCOUNT_RUN = STAGE_DIR / "02-account-ssh" / "00-run.sh"
 STAGE_SUDOERS_FILE = STAGE_DIR / "02-account-ssh" / "files" / "010-palmimo-user"
 STAGE_SSHD_DROPIN = STAGE_DIR / "02-account-ssh" / "files" / "50-palmimo-key-only.conf"
 STAGE_PORTAL_RUN = STAGE_DIR / "03-portal" / "00-run.sh"
+STAGE_OSS_RUN = STAGE_DIR / "04-oss-compliance" / "00-run.sh"
+STAGE_OSS_SOURCES_FILE = STAGE_DIR / "04-oss-compliance" / "files" / "palmimo-src.sources"
+COLLECT_OSS_COMPLIANCE_LIB = IMAGE_DIR / "lib" / "collect_oss_compliance.py"
+OSS_SOURCE_EXCLUDE_FILE = IMAGE_DIR / "oss-source-exclude.txt"
+OSS_COPYRIGHT_MISSING_ALLOW_FILE = IMAGE_DIR / "oss-copyright-missing-allow.txt"
 
-PIGEN_SHELL_SCRIPTS = [STAGE_PRERUN, STAGE_CORE_RUN, STAGE_ACCOUNT_RUN, STAGE_PORTAL_RUN]
+PIGEN_SHELL_SCRIPTS = [STAGE_PRERUN, STAGE_CORE_RUN, STAGE_ACCOUNT_RUN, STAGE_PORTAL_RUN, STAGE_OSS_RUN]
 
 
 def _text(path: Path) -> str:
@@ -726,6 +731,53 @@ def test_pigen_portal_step_matches_apply_pi_sh_fetch_static_invocation() -> None
     assert 'PORTAL_DEST="${PORTAL_HOME}/palmimo-portal"' in text
 
 
+def test_oss_compliance_stage_references_the_collector_and_exclude_list() -> None:
+    text = _text(STAGE_OSS_RUN)
+    assert "collect_oss_compliance.py" in text
+    assert "oss-source-exclude.txt" in text
+    assert "oss-copyright-missing-allow.txt" in text
+    assert "--copyright-allow-file" in text
+    assert COLLECT_OSS_COMPLIANCE_LIB.is_file()
+    assert OSS_SOURCE_EXCLUDE_FILE.is_file()
+    assert OSS_COPYRIGHT_MISSING_ALLOW_FILE.is_file()
+
+
+def test_oss_compliance_stage_enables_then_removes_deb_src() -> None:
+    text = _text(STAGE_OSS_RUN)
+    assert "palmimo-src.sources" in text
+    assert "rm -f" in text
+    # Only one `apt-get update` in the whole script -- no redundant re-run
+    # after removing the deb-src entry; just its Sources indexes are deleted.
+    assert text.count("apt-get update") == 1
+    assert "/var/lib/apt/lists/" in text
+    assert "_Sources" in text
+
+    sources_text = _text(STAGE_OSS_SOURCES_FILE)
+    assert "Types: deb-src" in sources_text
+    assert "RELEASE" in sources_text
+
+
+def test_oss_compliance_stage_cleans_up_via_trap_unconditionally() -> None:
+    # `trap ... EXIT` is the only construct that fires on success, failure,
+    # and a PALMIMO_SKIP_CORRESPONDING_SOURCE=1 skip alike.
+    text = _text(STAGE_OSS_RUN)
+    assert re.search(r"^trap cleanup EXIT$", text, re.MULTILINE), text
+    assert re.search(r"^cleanup\(\)\s*\{", text, re.MULTILINE), text
+
+    # Both the pre-emptive cleanup call and the cleanup() definition must
+    # sit outside (before) the first `if`, not nested inside one.
+    first_if_idx = text.index('if [ "${PALMIMO_SKIP_CORRESPONDING_SOURCE:-}" != "1" ]; then')
+    cleanup_call_idx = text.index("\ncleanup\n")
+    cleanup_def_idx = text.index("cleanup() {")
+    assert cleanup_call_idx < first_if_idx
+    assert cleanup_def_idx < first_if_idx
+
+
+def test_skip_corresponding_source_flag_is_wired_through_stage_and_config() -> None:
+    assert "PALMIMO_SKIP_CORRESPONDING_SOURCE" in _text(STAGE_OSS_RUN)
+    assert re.search(r"^export PALMIMO_SKIP_CORRESPONDING_SOURCE=", _text(PIGEN_CONFIG), re.MULTILINE)
+
+
 def test_account_stage_sets_a_real_shell_before_locking() -> None:
     # pi-gen leaves the passwordless first user on /usr/sbin/nologin
     # (stage1 only sets bash when FIRST_USER_PASS is set) -- without this
@@ -858,6 +910,8 @@ def test_display_firmware_notice_names_the_binary_linked_components() -> None:
 
 
 def test_apply_script_first_rsync_excludes_the_whole_boot_directory() -> None:
+    # Excluding only boot/firmware still lets -a's directory metadata land
+    # on /boot itself; excluding /boot outright avoids that.
     text = _text(APPLY_SCRIPT)
     assert "--exclude /boot" in text
     assert "--exclude boot/firmware" not in text
@@ -865,6 +919,7 @@ def test_apply_script_first_rsync_excludes_the_whole_boot_directory() -> None:
 
 
 def test_apply_script_second_rsync_preserves_mtime_without_unix_metadata() -> None:
+    # vfat can't hold Unix ownership/mode bits, so -a must not be used here.
     text = _text(APPLY_SCRIPT)
     idx = text.index('"${FILES_SRC}boot/firmware/" "${PI_HOST}:/boot/firmware/"')
     start = text.rindex("rsync -", 0, idx)
@@ -872,6 +927,7 @@ def test_apply_script_second_rsync_preserves_mtime_without_unix_metadata() -> No
     assert block.startswith("rsync -rtz")
     assert " -a " not in block
     assert "--modify-window=2" in block
+    assert "--no-perms --no-owner --no-group" in block
 
 
 def test_root_gitignore_does_not_also_ignore_workspace() -> None:

@@ -40,4 +40,9 @@ export PALMIMO_IMAGE_DIR=/palmimo-image
 # Overridable on the command line: `PALMIMO_PORTAL_TAG=v0.1.0-rc1 ./build-docker.sh`.
 export PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.0}"
 
+# Dev-loop escape hatch: "1" skips 04-oss-compliance's slow source
+# download. MANIFEST.txt is stamped STATUS: INCOMPLETE either way. See
+# README.md and tools/make_image.py --skip-corresponding-source.
+export PALMIMO_SKIP_CORRESPONDING_SOURCE="${PALMIMO_SKIP_CORRESPONDING_SOURCE:-}"
+
 STAGE_LIST="stage0 stage1 stage2 stage-palmimo"

@@ -380,6 +380,7 @@ stage2（Raspberry Pi OS Lite）の後に続く 4 サブステージ:
 4. `03-portal/` — uv インストール・palmimo-portal のタグ clone・
    frozen 同期（`--no-dev`）・`fetch_static`（apply-pi.sh と同一コード
    パス）
+5. `04-oss-compliance/` — 対応ソースとライセンスの同梱（次々項）
 
 ### アカウント/SSH ポリシーとその理由
 
@@ -426,6 +427,42 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 `palmimo-identity.json` を書く」だけを担う。FAT なので macOS からも書ける。
 個体化はすべて firstboot が担うため、CLI は識別ファイル以外に触らない。
 
+## 対応ソースとライセンス全文の同梱（実装済み、2026-09-02）
+
+`04-oss-compliance/` ステージ（`03-portal` の後）が
+`lib/collect_oss_compliance.py`（`patch_comitup_nm.py` と同じ「コピーして
+実行して消す」契約）を通じて 3 つを行う:
+
+1. **対応ソースの収集**（GPLv2 §3(a) / GPLv3 §6(a)）: `dpkg-query -W` で
+   chroot に実際にインストールされている `(source, version)` を列挙し、
+   一時的に有効化した deb-src から `apt-get source` で
+   `/usr/share/palmimo/sources/debian/<src>_<ver>/` に取得（`.dsc` +
+   tarball、展開しない）。`oss-source-exclude.txt` の 3 件（非フリー
+   ファームウェアブロブ）だけを除く全パッケージが対象。取得後 deb-src は
+   削除する。
+2. **apt パッケージの copyright**: `/usr/share/common-licenses/` と各
+   パッケージの `/usr/share/doc/<pkg>/copyright` を
+   `/boot/firmware/licenses/pi/` に複製。
+3. **Portal の Python 依存ライセンス**: `*.dist-info/METADATA` から
+   ライセンス行を抜き出し `/boot/firmware/licenses/portal/python/` に、
+   `THIRD_PARTY_NOTICES.md` / `THIRD_PARTY_LICENSES.txt` も
+   `/boot/firmware/licenses/portal/` に写す。
+
+収集結果は `/usr/share/palmimo/sources/MANIFEST.txt` に記録する。
+`PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`--skip-corresponding-source` から
+も渡せる）は 1. だけを飛ばす開発用エスケープハッチで、`MANIFEST.txt` は
+`STATUS: INCOMPLETE` になる。`.img.xz` の増分見込みは未実測。
+
+### 失敗マトリクス
+
+| ステップ × 失敗 | 残る状態 | テスト | ユーザーに見えるもの | 回復手段 |
+|---|---|---|---|---|
+| ミラーに該当版が無い（`apt-get source` が該当版を出せない） | `apt-get source` は全ペアを試行済みだが該当パッケージだけ `.dsc` 無し（またはチェックサム検証失敗）。`MANIFEST.txt` は書かれない（コミット前に失敗を検知させるため） | `test_fetch_sources_tries_every_pair_even_after_a_failure` / `test_fetch_sources_fails_when_dsc_is_missing_despite_zero_exit`（ホスト側ユニットテスト。実 apt-get は未検証） | ビルドログに `error: failed to fetch corresponding source for the following package(s):` に続けて `  <src>=<ver>: <reason>` が全件分並び、`build-docker.sh` が非ゼロ終了。`make_image.py` はコンテナを残して調査を促す | ミラーのスナップショット違いが疑われる場合は再ビルド（別ミラー選定）か、該当パッケージの版を手動で `/usr/share/palmimo/sources/` に追加してから再ビルド |
+| ネットワーク断（deb-src の `apt-get update` 自体が失敗、または個々の `apt-get source` がネットワークエラー） | `apt-get update` は `set -e` の chroot ヒアドキュメントの下で失敗し、ステージ全体が非ゼロ終了 — 部分的な `/usr/share/palmimo/sources/` は残るが `MANIFEST.txt` 無しなので「未完成」と判別できる | 静的検証のみ（`bash -n` / スクリプト構造）。実ネットワーク断は on-device 検証の対象外 | `build-docker.sh` の出力に apt のエラーがそのまま出る | ネットワーク復旧後に再ビルド（`apt-get update` は冪等、コンテナは pi-gen が最初からやり直す） |
+| ディスクフル（`apt-get source` の多数呼び出しが 1.3〜2GB 超を要求） | `apt-get source` が個別に非ゼロ終了 → 上の「ミラーに無い」と同じ失敗パスに合流し、全件試行後に非ゼロ終了 | 同上（fetch_sources のアグリゲーション自体はユニットテスト済み） | ディスク関連のエラーメッセージが `error: failed to fetch corresponding source ...` の理由欄にそのまま入る | ビルドホストの空き容量を確保して再ビルド（`--clean` でワークスペースを畳んでからでも良い） |
+| スキップフラグ付きビルドの誤出荷（`PALMIMO_SKIP_CORRESPONDING_SOURCE=1` のまま `dist/` の画像を配布） | イメージ自体は正常に起動するが `MANIFEST.txt` の先頭が `STATUS: INCOMPLETE -- corresponding source was skipped ...` | `test_write_manifest_records_skip_status_first_line` | `make_image.py` の標準出力末尾に警告（ビルド時点）。イメージだけを受け取った場合は `/usr/share/palmimo/sources/MANIFEST.txt`（と、PC からも読める `/boot/firmware/licenses/MANIFEST.txt` のコピー）を見るまで気づけない | 出荷前チェックリストに「`MANIFEST.txt` の `STATUS: OK` を確認」を追加する運用でカバー（自動ゲートは未実装 — 今後の課題） |
+| 途中でプロセス死（ステージ実行中に chroot ごとホスト/コンテナが kill される、電源断、ビルドホストの OOM killer など） | 出力ディレクトリは毎回実行冒頭で `shutil.rmtree` される（前回の中断成果物が混入しない）。`MANIFEST.txt` は一時ファイル + `os.replace` のアトミック置換。deb-src の一時ファイルは `trap cleanup EXIT` で削除される | `test_main_cleans_previous_build_output_directories_first`、`test_oss_compliance_stage_cleans_up_via_trap_unconditionally` | 次回ビルドのログに前回の中断を示す痕跡は出ないが、`MANIFEST.txt` の `STATUS` は必ず今回の実行結果だけを反映する | 中断されたビルドは単純に再実行すればよい |
+
 ## 識別ファイル仕様 v2（2026-08-21 決定）
 
 ```json
@@ -461,3 +498,7 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 
 - polkit の comitup 許可が実際に必要か（T9 では user 権限で D-Bus 呼び出しが
   通っている — バスポリシー次第）。実機で確認し、不要なら書かない
+- 03-portal で `UV_PYTHON_DOWNLOADS=never` + システム Python を使うか、
+  python-build-standalone の `licenses/` をそのまま採るかを決める
+  （`collect_oss_compliance.py` は現状検出して `STATUS: INCOMPLETE` にする
+  だけ — readline(GPLv3) 静的リンクの出荷可否は人間が判断）
