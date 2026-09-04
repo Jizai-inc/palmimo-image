@@ -28,8 +28,8 @@ EOF
 # 3. files/ -> / : identical tree, identical destination, as apply-pi.sh's
 #    `rsync -az ... "$FILES_SRC" "${PI_HOST}:/"` step (units, polkit rule,
 #    comitup.conf, the NM avahi dispatcher hook, firstboot.sh, the
-#    comitup-web no-op replacement unit). -a preserves the modes files/ was
-#    checked in with.
+#    comitup-web no-op replacement unit, and files/boot/firmware/licenses/).
+#    -a preserves the modes files/ was checked in with.
 rsync -a "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"
 
 # 4. dnsmasq: comitup spawns its own dnsmasq instance for hotspot DHCP/DNS

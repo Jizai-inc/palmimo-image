@@ -135,10 +135,23 @@ echo "==> [6/9] files/ -> / (sudo rsync)"
 # tests/test_image_contracts.py). No --delete: this tree only ever
 # adds/overwrites known paths, never deletes files a hand-applied Pi might
 # have added under the same directories for other reasons.
+#
+# --exclude /boot: vfat /boot/firmware can't hold Unix modes, and -a
+# stamps them onto the /boot entry itself, not just its contents.
 rsync -az \
   --rsync-path='sudo rsync' \
+  --exclude /boot \
   -e 'ssh -o BatchMode=yes' \
   "$FILES_SRC" "${PI_HOST}:/"
+
+# files/boot/firmware/ -> /boot/firmware/: sent separately, without -a,
+# since vfat can't hold Unix modes; --modify-window=2 tolerates its ~2s mtime rounding.
+rsync -rtz \
+  --modify-window=2 \
+  --no-perms --no-owner --no-group \
+  --rsync-path='sudo rsync' \
+  -e 'ssh -o BatchMode=yes' \
+  "${FILES_SRC}boot/firmware/" "${PI_HOST}:/boot/firmware/"
 
 echo "==> [7/9] systemd: daemon-reload, enable units"
 # comitup-web is intentionally NOT masked or enabled here: files/ just placed

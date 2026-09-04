@@ -31,6 +31,8 @@ files/                  -> files placed at the same absolute path on the device
   etc/comitup.conf
   etc/NetworkManager/dispatcher.d/50-palmimo-avahi
   usr/local/lib/palmimo/firstboot.sh
+  boot/firmware/licenses/         -> third-party license texts and notices (see
+                                      "Licenses and corresponding source" below)
 tools/
   make_image.py          -> build the shipped .img.xz (pi-gen, Docker)
   provision_sd.py        -> flash an SD card + inject the identity file
@@ -133,7 +135,9 @@ Raspberry Pi Imager default). Each step is idempotent; a failed step stops
 the script without touching later steps, and running from the start always
 converges.
 
-## comitup and the GPL
+## Licenses and corresponding source
+
+### comitup's modified nm.py (GPLv2 §2(a))
 
 comitup 1.43's hotspot code (`/usr/share/comitup/comitup/nm.py`, GPL-2.0)
 only sets `key-mgmt`/`psk` on the setup AP, which leaves NetworkManager free
@@ -155,15 +159,69 @@ requirement. The idempotency key is that notice marker itself, not just the
 presence of the new keys, so re-running the patch is always a safe no-op.
 The modified `nm.py` stays on the image as plain Python source (never
 compiled or stripped) — that covers the source-availability side for this
-modification. The rest of comitup and the underlying OS ship unmodified, as
-stock Debian / Raspberry Pi OS packages; the corresponding source for those
-is available from those projects' own archives, and Jizai does not claim
-more than that here. `lib/patch_comitup_nm.py` itself — the script that
-performs the patch — is Jizai Inc.'s own work and is licensed under this
+modification. `lib/patch_comitup_nm.py` itself — the script that performs
+the patch — is Jizai Inc.'s own work and is licensed under this
 repository's Apache-2.0 license. It necessarily quotes the two anchor lines
 it searches for in `nm.py`, a de-minimis excerpt used only to locate the
 insertion point; the lines it inserts become part of the GPL-2.0 file once
 applied.
+
+### Corresponding source for the rest of the image (GPLv2 §3(a) / GPLv3 §6(a))
+
+Palmimo DevKit is sold, so the "tell them where to get it" option (GPLv2
+§3(c)) is unavailable: that clause is limited to noncommercial distribution.
+Of the two remaining options — bundle the source (§3(a) / GPLv3 §6(a)) or
+ship a written offer valid for three years (§3(b) / §6(b)) — we bundle,
+because a bundled copy needs no request-handling process and the SD card is
+already the medium every unit ships on. So we ship the corresponding source
+for the apt packages on the image alongside the binaries, on that same
+medium: at build time, the pi-gen stage collects every apt package's
+source (not just the GPL/LGPL ones — license detection is not something to
+trust blindly; the size cost of that over-inclusion will be measured
+against a real build once this step is implemented) into
+`/usr/share/palmimo/sources/` on the rootfs. That
+step is not implemented in this pull request — it lands in a follow-up PR
+that also generates the apt and Portal license trees below at build time,
+since both need the same package/dependency enumeration machinery. This
+repository does not otherwise claim more than passing along stock Debian /
+Raspberry Pi OS package sources unmodified (`lib/patch_comitup_nm.py` above
+is the one exception).
+
+This apt-package collection does not cover everything on the image, though.
+`uv` (installed as a prebuilt binary, not an apt package) and Palmimo
+Portal (its own Python venv plus a prebuilt static frontend bundle, neither
+apt either) sit outside that machinery entirely. Their license *display*
+lives at `tools/uv/` and `portal/` respectively (see below), but whether
+either actually carries a (L)GPL component that would itself require
+corresponding source is an open question this repository has not yet
+resolved. A further, narrower gap even within `tools/uv/`: `uv`'s binary
+statically links a set of Rust crates, and `tools/uv/`'s two files (its own
+dual Apache-2.0/MIT license) do not cover per-crate attribution for
+everything linked into it. The plan, not yet done, is to pin the exact
+`uv` version we ship and pull that version's own crate-attribution bundle
+rather than hand-assembling one.
+
+GPLv3 §6 also has a User Product / Installation Information clause: for a
+"User Product" it would require giving the owner a way to install a
+modified version of the GPLv3'd binaries that the device accepts as
+authentic. That does not apply here — the owner already has an
+unrestricted root account on their own device, with no signature
+verification or key requirement standing between them and installing
+modified software, so there is no Installation Information to withhold.
+
+### `/boot/firmware/licenses/`
+
+MIT, BSD, Apache-2.0, and OFL require attaching copyright notices and license
+text to binary distributions. `files/boot/firmware/` places a `licenses/`
+directory on the boot (FAT32) partition, readable from any PC, with one
+subdirectory per source of static third-party software:
+
+- `display-firmware/` — the RP2350 face-display firmware's third-party notices; see `NOTICE` there.
+- `tools/uv/` — license texts for the `uv` binary this image installs.
+- `pi/`, `portal/` — apt package and Palmimo Portal dependency license trees, generated at build time (not part of this PR; see above).
+
+See `files/boot/firmware/licenses/README.txt` for the full layout
+explanation, written for whoever is holding the SD card.
 
 ## Security model
 
