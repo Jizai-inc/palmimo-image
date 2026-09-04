@@ -275,8 +275,8 @@ def write_manifest(
     lines.append(
         "Policy: GPLv2 section 3(a) / GPLv3 section 6(a) -- corresponding source for every "
         "apt source package shipped on this image is collected at build time and included "
-        "on the same medium (Palmimo DevKit is sold, not distributed at no charge, so the "
-        "written-offer fallback in GPLv2 3(b) / GPLv3 6(b) is not used)."
+        "on the same medium. Palmimo DevKit is sold, so GPLv2 3(c) (noncommercial only) does not "
+        "apply; bundling was chosen over the written offer of GPLv2 3(b) / GPLv3 6(b)."
     )
     lines.append(
         "Exclusion policy: source packages listed in oss-source-exclude.txt are excluded -- "
@@ -528,7 +528,10 @@ def find_uv_managed_pythons(portal_home: Path) -> list[Path]:
     uv_python_dir = portal_home / ".local" / "share" / "uv" / "python"
     if not uv_python_dir.is_dir():
         return []
-    return sorted(p for p in uv_python_dir.iterdir() if p.is_dir())
+    # Skip uv's own .temp/.lock and the unversioned alias symlink.
+    return sorted(
+        p for p in uv_python_dir.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
+    )
 
 
 def copy_uv_python_runtime_licenses(uv_pythons: Iterable[Path], out_dir: Path) -> list[str]:

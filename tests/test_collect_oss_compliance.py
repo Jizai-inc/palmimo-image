@@ -544,6 +544,8 @@ def test_find_uv_managed_pythons_lists_subdirectories(tmp_path: Path) -> None:
     uv_python = home / ".local" / "share" / "uv" / "python"
     (uv_python / "cpython-3.13.0-linux-aarch64-gnu").mkdir(parents=True)
     (uv_python / "cpython-3.12.0-linux-aarch64-gnu").mkdir(parents=True)
+    (uv_python / ".temp").mkdir()
+    (uv_python / "cpython-3.12-linux-aarch64-gnu").symlink_to("cpython-3.12.0-linux-aarch64-gnu")
     found = coc.find_uv_managed_pythons(home)
     assert [p.name for p in found] == ["cpython-3.12.0-linux-aarch64-gnu", "cpython-3.13.0-linux-aarch64-gnu"]
 
