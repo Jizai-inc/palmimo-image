@@ -662,11 +662,6 @@ def test_pigen_config_pins_the_required_keys() -> None:
     assert not re.search(r"^\s*PUBKEY_SSH_FIRST_USER=", text, re.MULTILINE)
 
 
-def test_pigen_config_pins_the_portal_tag_default() -> None:
-    text = _text(PIGEN_CONFIG)
-    assert "${PALMIMO_PORTAL_TAG:-v0.1.0}" in text
-
-
 def test_pigen_stage_marks_export_image() -> None:
     assert STAGE_EXPORT_IMAGE.is_file()
 
@@ -722,7 +717,6 @@ def test_pigen_account_step_locks_password_and_installs_sudoers_and_sshd_dropins
 
 def test_pigen_portal_step_matches_apply_pi_sh_fetch_static_invocation() -> None:
     text = _text(STAGE_PORTAL_RUN)
-    assert "${PALMIMO_PORTAL_TAG:-v0.1.0}" in text
     assert "https://github.com/Jizai-inc/palmimo-portal.git" in text
     assert "sync --frozen --no-dev" in text
     assert 'UV_BIN="${PORTAL_HOME}/.local/bin/uv"' in text

@@ -4,7 +4,7 @@
 # unit contract this venv/repo layout satisfies (palmimo-portal.service's
 # ExecStart is /home/user/palmimo-portal/.venv/bin/python -m palmimo_portal).
 
-PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.0}"
+: "${PALMIMO_PORTAL_TAG:?PALMIMO_PORTAL_TAG is unset -- pigen/config exports the default}"
 if ! [[ "$PALMIMO_PORTAL_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "PALMIMO_PORTAL_TAG に使用できない文字が含まれています（許可: [A-Za-z0-9._-]）: ${PALMIMO_PORTAL_TAG}" >&2
   exit 1

@@ -38,7 +38,7 @@ ENABLE_SSH=1
 export PALMIMO_IMAGE_DIR=/palmimo-image
 
 # Overridable on the command line: `PALMIMO_PORTAL_TAG=v0.1.0-rc1 ./build-docker.sh`.
-export PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.0}"
+export PALMIMO_PORTAL_TAG="${PALMIMO_PORTAL_TAG:-v0.1.4}"
 
 # Dev-loop escape hatch: "1" skips 04-oss-compliance's slow source
 # download. MANIFEST.txt is stamped STATUS: INCOMPLETE either way. See
