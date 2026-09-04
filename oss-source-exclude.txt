@@ -10,3 +10,6 @@ raspi-firmware
 
 # Bluetooth controller firmware blobs -- binary-only, same as firmware-nonfree.
 bluez-firmware
+
+# Raspberry Pi Connect client: proprietary, no source package is published.
+rpi-connect-lite
