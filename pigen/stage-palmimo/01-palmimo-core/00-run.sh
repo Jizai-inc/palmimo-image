@@ -29,8 +29,16 @@ EOF
 #    `rsync -az ... "$FILES_SRC" "${PI_HOST}:/"` step (units, polkit rule,
 #    comitup.conf, the NM avahi dispatcher hook, firstboot.sh, the
 #    comitup-web no-op replacement unit, and files/boot/firmware/licenses/).
-#    -a preserves the modes files/ was checked in with.
-rsync -a "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"
+#    Ownership and mode are forced here, not inherited: git carries only the
+#    executable bit, so everything else would come from whoever cloned this
+#    checkout -- their uid, their umask. A plain `rsync -a` therefore ships
+#    /etc and /usr/local owned by the build host's user with group-writable
+#    modes, and NetworkManager then refuses to run
+#    dispatcher.d/50-palmimo-avahi ("not owned by root", and once that alone
+#    is fixed, "writable by group or other"): the #683 mitigation is present
+#    in the image but never executes. --chmod strips only group/other write,
+#    so the executable bit files/ carries survives.
+rsync -a --chown=root:root --chmod=g-w,o-w "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"
 
 # 4. dnsmasq: comitup spawns its own dnsmasq instance for hotspot DHCP/DNS
 #    (cdns.py) but only needs the binary -- installed via 00-packages. The

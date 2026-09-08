@@ -20,6 +20,11 @@ DISABLE_FIRST_BOOT_USER_RENAME=1
 # domain into the image at build time instead.
 WPA_COUNTRY=JP
 
+# The kit is built and shipped in Japan. Left unset, pi-gen bakes its own
+# default (Europe/London), so every journal timestamp on a shipped unit is
+# 8-9 hours off for the owner reading it.
+TIMEZONE_DEFAULT=Asia/Tokyo
+
 # SSH is enabled by pi-gen's stock stage2 script when ENABLE_SSH=1
 # (`systemctl enable ssh`). Key-only enforcement (PasswordAuthentication no
 # + KbdInteractiveAuthentication no) is our own sshd_config.d drop-in in
