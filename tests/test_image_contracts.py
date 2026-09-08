@@ -649,6 +649,8 @@ def test_pigen_config_pins_the_required_keys() -> None:
     assert "FIRST_USER_NAME=user" in text
     assert "ENABLE_SSH=1" in text
     assert "WPA_COUNTRY=JP" in text
+    # Left unset, pi-gen defaults to Europe/London on a unit sold in Japan.
+    assert re.search(r"^TIMEZONE_DEFAULT=Asia/Tokyo$", text, re.MULTILINE)
     assert "PALMIMO_IMAGE_DIR=" in text
     stage_list_match = re.search(r'^STAGE_LIST="(?P<value>.+)"\s*$', text, re.MULTILINE)
     assert stage_list_match is not None, 'no STAGE_LIST="..." line in pigen/config'
@@ -677,7 +679,21 @@ def test_pigen_prerun_generates_00_packages_from_the_shared_list() -> None:
 def test_pigen_core_step_references_the_shared_patch_script_and_files_tree() -> None:
     text = _text(STAGE_CORE_RUN)
     assert "patch_comitup_nm.py" in text
-    assert 'rsync -a "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"' in text
+    expected_rsync = 'rsync -a --chown=root:root --chmod=g-w,o-w "${PALMIMO_IMAGE_DIR}/files/" "${ROOTFS_DIR}/"'
+    assert expected_rsync in text
+
+
+def test_pigen_core_step_forces_root_ownership_and_non_group_writable_modes() -> None:
+    """git carries only the executable bit, so a plain `rsync -a` hands the
+    shipped /etc the build host's uid and umask. NetworkManager skips any
+    dispatcher script that is not root-owned or is group/other-writable, which
+    silently disables the #683 avahi hook -- observed on a shipped image on
+    2026-09-08 (18 paths under /etc and /usr/local owned by uid 1000, mode 775,
+    `nm-dispatcher: Cannot execute ...`)."""
+    line = re.search(r"^rsync .*\$\{PALMIMO_IMAGE_DIR\}/files/.*$", _text(STAGE_CORE_RUN), re.MULTILINE)
+    assert line is not None, "no rsync line for the files/ tree in the pi-gen core step"
+    assert "--chown=root:root" in line.group(0)
+    assert "--chmod=g-w,o-w" in line.group(0)
 
 
 def test_pigen_core_step_enables_exactly_the_four_units_and_never_touches_comitup_web_state() -> None:
