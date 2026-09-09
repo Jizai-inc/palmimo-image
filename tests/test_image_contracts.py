@@ -31,6 +31,7 @@ FIRSTBOOT_UNIT = FILES_DIR / "etc" / "systemd" / "system" / "palmimo-firstboot.s
 POLKIT_RULES = FILES_DIR / "etc" / "polkit-1" / "rules.d" / "50-palmimo-portal.rules"
 COMITUP_CONF = FILES_DIR / "etc" / "comitup.conf"
 COMITUP_WEB_UNIT = FILES_DIR / "etc" / "systemd" / "system" / "comitup-web.service"
+ASOUND_CONF = FILES_DIR / "etc" / "asound.conf"
 FIRSTBOOT_SCRIPT = FILES_DIR / "usr" / "local" / "lib" / "palmimo" / "firstboot.sh"
 APPLY_SCRIPT = IMAGE_DIR / "apply-pi.sh"
 MAKE_IDENTITY_SCRIPT = IMAGE_DIR / "tools" / "make_identity.py"
@@ -310,6 +311,45 @@ def test_comitup_conf_has_hostname_placeholder_and_nuke_enabled() -> None:
     # firstboot sets it per device from the identity file (identity file spec
     # v2). Only the explanatory comment may mention the key name.
     assert not re.search(r"^\s*ap_password\s*:", text, re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# asound.conf: the ALSA default, pinned by card name (#9)
+# ---------------------------------------------------------------------------
+
+
+def test_asound_conf_pins_the_alsa_default_to_the_respeaker_by_card_name() -> None:
+    text = _text(ASOUND_CONF)
+    assert re.search(r'^\s*pcm\.!default\s+"sysdefault:CARD=ArrayUAC10"\s*$', text, re.MULTILINE)
+    assert re.search(r"^\s*ctl\.!default\s*\{", text, re.MULTILINE)
+    assert re.search(r"^\s*card\s+ArrayUAC10\s*$", text, re.MULTILINE)
+
+
+def test_asound_conf_does_not_use_defaults_pcm_card() -> None:
+    # `defaults.pcm.card` takes an integer only: handed a card name, alsa-lib
+    # discards the whole file ("card is not a string" -> "may be old or
+    # corrupted"), measured on 2609-0001. An index there would parse and then
+    # lose to the next boot's enumeration order, which is the bug this file
+    # exists to fix -- so neither spelling of that key may come back.
+    text = _text(ASOUND_CONF)
+    offenders = [
+        line for line in text.splitlines() if not line.lstrip().startswith("#") and "defaults.pcm.card" in line
+    ]
+    assert offenders == []
+
+
+def test_asound_conf_never_pins_a_card_by_index() -> None:
+    # The ReSpeaker enumerates against the two HDMI devices in a different
+    # order on different boots -- observed as card 2 on one boot and card 0
+    # on the next of the same unit. Any numeric card here would be right only
+    # until the next reboot, so no directive may carry one.
+    text = _text(ASOUND_CONF)
+    offenders = [
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#") and re.search(r"\b(card|CARD=?)\s*[0-9]", line)
+    ]
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------

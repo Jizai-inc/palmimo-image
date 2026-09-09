@@ -30,6 +30,7 @@ files/                  -> files placed at the same absolute path on the device
   etc/polkit-1/rules.d/50-palmimo-portal.rules
   etc/comitup.conf
   etc/NetworkManager/dispatcher.d/50-palmimo-avahi
+  etc/asound.conf                          -> ALSA default pinned to the ReSpeaker by card name
   usr/local/lib/palmimo/firstboot.sh
   boot/firmware/licenses/         -> third-party license texts and notices (see
                                       "Licenses and corresponding source" below)
