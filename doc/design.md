@@ -31,6 +31,7 @@ palmimo-image/ (このリポジトリ)     -> 出荷イメージビルドの入�
     etc/polkit-1/rules.d/50-palmimo-portal.rules
     etc/comitup.conf
     etc/NetworkManager/dispatcher.d/50-palmimo-avahi  -> AP->STA 切替後の avahi 再登録（#683）
+    etc/asound.conf                  -> ALSA 既定を ReSpeaker にカード名で固定（#9）
     usr/local/lib/palmimo/firstboot.sh
   tools/
     make_identity.py               -> テスト用ダミー識別ファイル生成（uv script）
@@ -151,6 +152,81 @@ enable_nuke: true
 - Wi-Fi 国コード `JP`（`raspi-config nonint do_wifi_country JP` 相当）。
   出荷後の変更手段は P2 の Portal 機能（テンプレート unit）で提供予定
 
+## ALSA 既定デバイス（#9）
+
+`/etc/asound.conf`:
+
+```
+pcm.!default "sysdefault:CARD=ArrayUAC10"
+
+ctl.!default {
+    type hw
+    card ArrayUAC10
+}
+```
+
+- 素の既定は card 0。SDK は `-D` を付けずに既定へ再生するので、HDMI が
+  card 0 に来た起動では**配線が正しくてもスピーカーからは何も出ない**。
+  出方は表示器の有無で変わる —— 繋がっていれば音は HDMI へ流れて無音、
+  繋がっていなければ再生がそもそも開けずに失敗する（実測は後者）。
+  2026-09-09 に `image_2026-09-08-palmimo.img.xz` から起動した 2609-0001 で
+  実測し、`~/.asoundrc` も `/etc/asound.conf` も存在しないこと、`plughw` で
+  ReSpeaker を明示すれば鳴ることを確認した
+- **番号ではなくカード名で固定する。** ReSpeaker は 2 枚の HDMI に対する
+  列挙順が起動ごとに変わり、同一個体で card 0 / card 1 / card 2 の三通りを
+  実測した。番号を書くと次の再起動までしか正しくない
+- 行き先を `sysdefault` にしているのは、ALSA 自身のカード別既定チェーン
+  （plug / dmix / USB-Audio の定義）をそのままこのカードへ移すため。
+  `hw` や `plughw` を直接指すとミキシングが外れ、2 本目の再生が EBUSY で
+  落ちる。実測では既定への同時再生 2 本がどちらも成功している
+- ★**`defaults.pcm.card` では書けない。** あのキーは整数しか受け付けず、
+  カード名を渡すと alsa-lib が設定ファイルごと捨てる
+  （`card is not a string` → `may be old or corrupted`）。番号を書けば通るが、
+  それでは起動ごとの列挙順に負ける — この節が直そうとしているバグそのもの
+- 置き場所は `~/.asoundrc` ではなく `/etc/asound.conf`。`files/` 経由なので
+  所有者は root:root に固定され（pi-gen ステージの `rsync --chown`）、
+  「`/etc` と `/usr/local` の配下に root 以外が所有するファイルが 0 件」
+  という出荷検査項目と構造的に両立する。ホーム配下に置くと、この項目を
+  適用ごとに人手で守ることになる
+- **ReSpeaker が無い個体**では、既定への再生は HDMI へ黙って流れる代わりに
+  オープンに失敗する。起動時に既定を開くものは無く、デバイスを明示する
+  経路（`plughw:CARD=...` — palmimo-devkit の `resolve_alsa_device` が
+  解決するもの）は影響を受けない
+- 再生の確認は耳に頼らず ReSpeaker の 6ch 録音で判定できる。ファーム 4.00 の
+  個体では ch1 が処理済み・ch2-5 が生マイク 4 本・ch6 が再生ループバック
+  なので、440Hz を鳴らしながら 16kHz/6ch で録り、開始 2.5 秒を捨てて
+  Goertzel で 440Hz 成分を取ると、鳴っていればマイク群がノイズ床の
+  千倍以上になる。ch6 が正常でマイク群が無反応なら、Pi から ReSpeaker まで
+  は健全でアンプから先が原因、と 1 回で切り分けられる
+
+### 実機検証結果（2026-09-09、2609-0001 / image_2026-09-08-palmimo.img.xz）
+
+440Hz を既定へ再生しながら 6ch 録音し、開始 2.5 秒を捨てて Goertzel を取った。
+
+| 起動 | カード並び | asound.conf | 結果 |
+|---|---|---|---|
+| 修正前 | 0=HDMI / 1=ReSpeaker | 無し | `aplay` が `audio open error` で失敗 |
+| A | 0=HDMI / 1=ReSpeaker | 有り | mic group 3866・loopback 8191 |
+| B | 0=ReSpeaker | 有り | mic group 4021 |
+| C | 0=ReSpeaker | 有り | mic group 4053 |
+| D | 2=ReSpeaker | 有り | mic group 78-90・loopback 8191（下記） |
+
+- **列挙順は実際に動く。** 同一個体で card 0 / 1 / 2 の三通りを引いた
+- 既定への同時再生 2 本がどちらも成功（dmix が生きている）。`arecord -D default`
+  も 6ch で録れる
+- ★**D だけマイク側の値が桁違いに低い（78-90。A-C は 3866-4053）。**
+  D は ReSpeaker を物理的に抜き差ししたあとの回で、`loopback 8191` は
+  他と同じ＝**Pi から ReSpeaker までは健全**。落ちているのは ReSpeaker から
+  先（3.5mm / アンプ / スピーカー）で、**この設定とは無関係の HW 事象**。
+  この節の切り分け表そのものが「アンプから先が原因」を指している。
+  経路の判定（既定がどのカードに届くか）は loopback で取れているので
+  D も PASS として扱ってよいが、**音圧の低下は別途 HW 側で見る必要がある**
+- **ReSpeaker を抜いた状態**での起動: 失敗ユニット 0、comitup / avahi-daemon /
+  palmimo-portal / palmimo-firstboot がいずれも意図どおりの状態、Portal が 200、
+  既定のオープンはハングせず即 `No such device` で終了。journal に出る
+  `90-alsa-restore.rules` の警告は `alsa-utils` 自身の記述ミスで、
+  `udevadm verify` で単体再現する既存事象（この設定とは無関係）
+
 ## palmimo-firstboot.service + firstboot.sh
 
 ワンショット（`Type=oneshot` + `ConditionPathExists`）。**個体化の情報源は
@@ -223,7 +299,8 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    しない。files/ が置いた no-op unit が static unit を上書きするだけで
    十分）
 8. 検査（apply 自身のセルフチェック）: `/etc/network/interfaces` に Wi-Fi
-   定義が無い / 国コード設定済み / `systemctl is-enabled` が期待どおり /
+   定義が無い / `~/.asoundrc` が無い（あると `/etc/asound.conf` より後に
+   読まれて既定を上書きしてしまう。手適用機でしか起きない）/ 国コード設定済み / `systemctl is-enabled` が期待どおり /
    `curl -fsS localhost:80/api/v1/system/status` が 200 / `dnsmasq`
    バイナリが存在する / `systemctl cat comitup-web` に
    `ExecStart=/bin/true` がある（no-op unit に置き換わっている） /

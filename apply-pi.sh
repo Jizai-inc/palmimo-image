@@ -177,6 +177,20 @@ if ssh_run "grep -Eq '^[[:space:]]*(iface|wpa-|wireless-)' /etc/network/interfac
 fi
 echo "    ok: no Wi-Fi definition in /etc/network/interfaces"
 
+# ~/.asoundrc shadowing /etc/asound.conf: FAIL, do not auto-fix. ALSA loads
+# the user file after the system one, so a leftover ~/.asoundrc from an
+# earlier debugging session silently wins over the default this script just
+# placed, and audio keeps going wherever that file says. Deleting someone's
+# hand-written config is worse than telling them it is in the way; the
+# shipped image has no such file, so this only ever fires on a hand-applied
+# Pi.
+if ssh_run "test -e \$HOME/.asoundrc"; then
+  echo "    FAIL: ~/.asoundrc exists and overrides /etc/asound.conf — the ALSA default will not be the one this script placed." >&2
+  echo "    Remove it by hand and re-run apply-pi.sh." >&2
+  exit 1
+fi
+echo "    ok: no ~/.asoundrc shadowing /etc/asound.conf"
+
 # Wi-Fi country code: set if not already JP. raspi-config nonint is idempotent.
 ssh_run "sudo raspi-config nonint do_wifi_country JP"
 echo "    ok: Wi-Fi country set to JP"

@@ -31,6 +31,7 @@ FIRSTBOOT_UNIT = FILES_DIR / "etc" / "systemd" / "system" / "palmimo-firstboot.s
 POLKIT_RULES = FILES_DIR / "etc" / "polkit-1" / "rules.d" / "50-palmimo-portal.rules"
 COMITUP_CONF = FILES_DIR / "etc" / "comitup.conf"
 COMITUP_WEB_UNIT = FILES_DIR / "etc" / "systemd" / "system" / "comitup-web.service"
+ASOUND_CONF = FILES_DIR / "etc" / "asound.conf"
 FIRSTBOOT_SCRIPT = FILES_DIR / "usr" / "local" / "lib" / "palmimo" / "firstboot.sh"
 APPLY_SCRIPT = IMAGE_DIR / "apply-pi.sh"
 MAKE_IDENTITY_SCRIPT = IMAGE_DIR / "tools" / "make_identity.py"
@@ -310,6 +311,63 @@ def test_comitup_conf_has_hostname_placeholder_and_nuke_enabled() -> None:
     # firstboot sets it per device from the identity file (identity file spec
     # v2). Only the explanatory comment may mention the key name.
     assert not re.search(r"^\s*ap_password\s*:", text, re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# asound.conf: the ALSA default, pinned by card name (#9)
+# ---------------------------------------------------------------------------
+
+
+def test_asound_conf_pins_the_alsa_default_to_the_respeaker_by_card_name() -> None:
+    text = _text(ASOUND_CONF)
+    assert re.search(r'^\s*pcm\.!default\s+"sysdefault:CARD=ArrayUAC10"\s*$', text, re.MULTILINE)
+    assert re.search(r"^\s*ctl\.!default\s*\{", text, re.MULTILINE)
+    assert re.search(r"^\s*card\s+ArrayUAC10\s*$", text, re.MULTILINE)
+
+
+def test_asound_conf_does_not_use_defaults_pcm_card() -> None:
+    # `defaults.pcm.card` takes an integer only: handed a card name, alsa-lib
+    # discards the whole file ("card is not a string" -> "may be old or
+    # corrupted"), measured on 2609-0001. An index there would parse and then
+    # lose to the next boot's enumeration order, which is the bug this file
+    # exists to fix -- so neither spelling of that key may come back.
+    text = _text(ASOUND_CONF)
+    offenders = [
+        line for line in text.splitlines() if not line.lstrip().startswith("#") and "defaults.pcm.card" in line
+    ]
+    assert offenders == []
+
+
+def test_apply_pi_sh_fails_on_an_asoundrc_that_shadows_the_system_default() -> None:
+    # ALSA loads ~/.asoundrc after /etc/asound.conf, so a leftover user file
+    # silently wins over the default apply-pi.sh just placed. The script must
+    # say so and stop -- never delete someone's hand-written config, the same
+    # stance it takes on a Wi-Fi definition in /etc/network/interfaces.
+    text = _text(APPLY_SCRIPT)
+    assert "$HOME/.asoundrc" in text
+    assert "FAIL: ~/.asoundrc exists" in text
+    assert not re.search(r"rm\s.*\.asoundrc", text)
+
+
+def test_asound_conf_never_pins_a_card_by_index() -> None:
+    # The ReSpeaker enumerates against the two HDMI devices in a different
+    # order on different boots -- the same unit came up as card 0, card 1 and
+    # card 2. Any card index here would be right only until the next reboot,
+    # so no directive may carry one, in any of the spellings ALSA accepts:
+    # `card 2`, `CARD=2`, and the plugin-argument form `hw:2` / `plughw:2,0` /
+    # `sysdefault:2`. A device index (`DEV=0`) is not a card index and is
+    # stable, so it stays allowed.
+    index_spellings = (
+        r"card\s+[0-9]",
+        r"CARD=[0-9]",
+        r":[0-9]",
+    )
+    offenders = [
+        line
+        for line in _text(ASOUND_CONF).splitlines()
+        if not line.lstrip().startswith("#") and any(re.search(pattern, line) for pattern in index_spellings)
+    ]
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------
