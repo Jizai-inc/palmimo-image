@@ -165,10 +165,12 @@ ctl.!default {
 }
 ```
 
-- 素の既定は card 0 = `vc4hdmi0`（HDMI）。SDK は `-D` を付けずに既定へ
-  再生するので、**配線が正しくてもスピーカーは無音になる**。2026-09-09 に
-  `image_2026-09-08-palmimo.img.xz` から起動した 2609-0001 で実測し、
-  `~/.asoundrc` も `/etc/asound.conf` も存在しないこと、`plughw` で
+- 素の既定は card 0。SDK は `-D` を付けずに既定へ再生するので、HDMI が
+  card 0 に来た起動では**配線が正しくてもスピーカーからは何も出ない**。
+  出方は表示器の有無で変わる —— 繋がっていれば音は HDMI へ流れて無音、
+  繋がっていなければ再生がそもそも開けずに失敗する（実測は後者）。
+  2026-09-09 に `image_2026-09-08-palmimo.img.xz` から起動した 2609-0001 で
+  実測し、`~/.asoundrc` も `/etc/asound.conf` も存在しないこと、`plughw` で
   ReSpeaker を明示すれば鳴ることを確認した
 - **番号ではなくカード名で固定する。** ReSpeaker は 2 枚の HDMI に対する
   列挙順が起動ごとに変わり、同一個体で card 0 / card 1 / card 2 の三通りを
@@ -207,11 +209,18 @@ ctl.!default {
 | A | 0=HDMI / 1=ReSpeaker | 有り | mic group 3866・loopback 8191 |
 | B | 0=ReSpeaker | 有り | mic group 4021 |
 | C | 0=ReSpeaker | 有り | mic group 4053 |
-| D | 2=ReSpeaker | 有り | mic group 78-90・loopback 8191 |
+| D | 2=ReSpeaker | 有り | mic group 78-90・loopback 8191（下記） |
 
 - **列挙順は実際に動く。** 同一個体で card 0 / 1 / 2 の三通りを引いた
 - 既定への同時再生 2 本がどちらも成功（dmix が生きている）。`arecord -D default`
   も 6ch で録れる
+- ★**D だけマイク側の値が桁違いに低い（78-90。A-C は 3866-4053）。**
+  D は ReSpeaker を物理的に抜き差ししたあとの回で、`loopback 8191` は
+  他と同じ＝**Pi から ReSpeaker までは健全**。落ちているのは ReSpeaker から
+  先（3.5mm / アンプ / スピーカー）で、**この設定とは無関係の HW 事象**。
+  この節の切り分け表そのものが「アンプから先が原因」を指している。
+  経路の判定（既定がどのカードに届くか）は loopback で取れているので
+  D も PASS として扱ってよいが、**音圧の低下は別途 HW 側で見る必要がある**
 - **ReSpeaker を抜いた状態**での起動: 失敗ユニット 0、comitup / avahi-daemon /
   palmimo-portal / palmimo-firstboot がいずれも意図どおりの状態、Portal が 200、
   既定のオープンはハングせず即 `No such device` で終了。journal に出る
@@ -290,7 +299,8 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    しない。files/ が置いた no-op unit が static unit を上書きするだけで
    十分）
 8. 検査（apply 自身のセルフチェック）: `/etc/network/interfaces` に Wi-Fi
-   定義が無い / 国コード設定済み / `systemctl is-enabled` が期待どおり /
+   定義が無い / `~/.asoundrc` が無い（あると `/etc/asound.conf` より後に
+   読まれて既定を上書きしてしまう。手適用機でしか起きない）/ 国コード設定済み / `systemctl is-enabled` が期待どおり /
    `curl -fsS localhost:80/api/v1/system/status` が 200 / `dnsmasq`
    バイナリが存在する / `systemctl cat comitup-web` に
    `ExecStart=/bin/true` がある（no-op unit に置き換わっている） /

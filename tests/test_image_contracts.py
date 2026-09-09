@@ -338,16 +338,34 @@ def test_asound_conf_does_not_use_defaults_pcm_card() -> None:
     assert offenders == []
 
 
+def test_apply_pi_sh_fails_on_an_asoundrc_that_shadows_the_system_default() -> None:
+    # ALSA loads ~/.asoundrc after /etc/asound.conf, so a leftover user file
+    # silently wins over the default apply-pi.sh just placed. The script must
+    # say so and stop -- never delete someone's hand-written config, the same
+    # stance it takes on a Wi-Fi definition in /etc/network/interfaces.
+    text = _text(APPLY_SCRIPT)
+    assert "$HOME/.asoundrc" in text
+    assert "FAIL: ~/.asoundrc exists" in text
+    assert not re.search(r"rm\s.*\.asoundrc", text)
+
+
 def test_asound_conf_never_pins_a_card_by_index() -> None:
     # The ReSpeaker enumerates against the two HDMI devices in a different
-    # order on different boots -- observed as card 2 on one boot and card 0
-    # on the next of the same unit. Any numeric card here would be right only
-    # until the next reboot, so no directive may carry one.
-    text = _text(ASOUND_CONF)
+    # order on different boots -- the same unit came up as card 0, card 1 and
+    # card 2. Any card index here would be right only until the next reboot,
+    # so no directive may carry one, in any of the spellings ALSA accepts:
+    # `card 2`, `CARD=2`, and the plugin-argument form `hw:2` / `plughw:2,0` /
+    # `sysdefault:2`. A device index (`DEV=0`) is not a card index and is
+    # stable, so it stays allowed.
+    index_spellings = (
+        r"card\s+[0-9]",
+        r"CARD=[0-9]",
+        r":[0-9]",
+    )
     offenders = [
         line
-        for line in text.splitlines()
-        if not line.lstrip().startswith("#") and re.search(r"\b(card|CARD=?)\s*[0-9]", line)
+        for line in _text(ASOUND_CONF).splitlines()
+        if not line.lstrip().startswith("#") and any(re.search(pattern, line) for pattern in index_spellings)
     ]
     assert offenders == []
 
