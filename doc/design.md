@@ -487,7 +487,7 @@ arm64 の Docker ホストが必要（`build-docker.sh` が QEMU 経由の
 アーキテクチャエミュレーションを内部で処理する）。pi-gen を clone → `arm64`
 ブランチへ → `stage-palmimo` を symlink → `config` を配置 →
 `PIGEN_DOCKER_OPTS` でこのリポジトリを bind mount → `./build-docker.sh`。
-`PALMIMO_PORTAL_TAG`（既定 `v0.1.0`）は `PIGEN_DOCKER_OPTS` に `-e` で渡す
+`PALMIMO_PORTAL_TAG`（既定は `pigen/config` が持つ）は `PIGEN_DOCKER_OPTS` に `-e` で渡す
 （`config` はコンテナ内で source されるだけで、ホストの環境変数は
 自動では渡らないため）。
 
