@@ -38,9 +38,14 @@ tools/
   make_image.py          -> build the shipped .img.xz (pi-gen, Docker)
   provision_sd.py        -> flash an SD card + inject the identity file
   make_identity.py       -> generate a test identity file
+  build_platform_bundle.py -> build the platform/ release tarball deterministically
 lib/
   patch_comitup_nm.py    -> shared WPA2/PMF nm.py patch (apply-pi.sh + pi-gen both use this)
 packages.txt             -> apt package list (shared source for apply-pi.sh and pigen/)
+platform/                -> app execution platform bundle (see "Platform bundle" below)
+  manifest.json            -> version, requires_portal, and the explicit "owns" enumeration
+  install.sh               -> idempotent installer: install / verify / record subcommands
+  files/                   -> unit template, tmpfiles, polkit rules, journald config, app-launch
 pigen/                   -> pi-gen custom stage (see pigen/README.md for stage notes)
 dist/                    -> built images land here (gitignored)
 doc/design.md            -> design rationale, verification history, failure matrix
@@ -135,6 +140,42 @@ Prerequisites: SSH key auth, and passwordless sudo for the Pi user (both the
 Raspberry Pi Imager default). Each step is idempotent; a failed step stops
 the script without touching later steps, and running from the start always
 converges.
+
+## Platform bundle
+
+`platform/` is the app execution platform: the `palmimo-app` system user,
+the `palmimo-app@.service` unit template, the `app-launch` helper, tmpfiles,
+polkit rules, and persistent journald config that let Portal run
+third-party apps in their own sandbox. It ships out-of-band from the SD
+image itself — as a tagged `palmimo-platform-<tag>.tar.gz` GitHub Release
+asset (`.github/workflows/release.yml`) — so existing devices can pick up
+platform changes without a reflash. See
+[palmimo-app-platform.md](https://github.com/Jizai-inc/mi-mo-devkit-pre/blob/main/doc/design/palmimo-app-platform.md)
+chapter 2 (palmimo-devkit monorepo) for the design; this repository only
+implements it.
+
+Both consumers just call the bundle's own installer — no platform-specific
+path belongs in either:
+
+- `pigen/stage-palmimo/05-app-platform/00-run.sh` (image build)
+- `apply-pi.sh`'s equivalent step (dev-loop apply)
+
+```bash
+sudo platform/install.sh install          # apply to the running root
+sudo platform/install.sh verify           # check for drift, exit non-zero on any
+```
+
+`verify`'s exit code is a contract the Portal reads: `0` clean, `1` drift found
+(differences are printed to stdout as JSON lines, one per difference), `2`+
+could not run at all (bad arguments, unreadable manifest, ...). Don't collapse
+these to a bare zero/nonzero check on either side.
+
+Accepted risk: the shared `uv-cache` being writable by the `palmimo-app-sync`
+uid means a malicious app's own dependency install can poison cached wheels
+for a later sync of a different app.
+
+`tools/build_platform_bundle.py` produces the release tarball
+deterministically (used by CI and available locally for the same output).
 
 ## Licenses and corresponding source
 

@@ -1,0 +1,79 @@
+# Cuts a GitHub Release for a pushed `vX.Y.Z` tag and attaches the platform
+# bundle (manifest.json, install.sh, its helper scripts, files/) as
+# tools/build_platform_bundle.py produces it, plus a standalone
+# manifest.json asset -- see doc/design/palmimo-app-platform.md 2.8
+# (palmimo-devkit monorepo) for what consumes these (pi-gen's
+# 05-app-platform stage and the Portal's platform-update job). The
+# standalone manifest lets the Portal's frequent latest-version poll skip
+# downloading the whole tarball.
+#
+# Mirrors palmimo-portal's release workflow: draft release (a maintainer
+# reviews and publishes by hand), `--clobber` re-upload while still a
+# draft, refuse to touch an already-published release.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag points at a commit on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag $TAG does not point at a commit on main" >&2
+            exit 1
+          fi
+
+      - name: Package the release asset
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          asset="palmimo-platform-${TAG}.tar.gz"
+          manifest_asset="palmimo-platform-${TAG}.manifest.json"
+          python3 tools/build_platform_bundle.py --out "$asset" --sha256-out "$asset.sha256" \
+            --manifest-out "$manifest_asset" --manifest-sha256-out "$manifest_asset.sha256"
+
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          asset="palmimo-platform-${TAG}.tar.gz"
+          manifest_asset="palmimo-platform-${TAG}.manifest.json"
+          assets=("$asset" "$asset.sha256" "$manifest_asset" "$manifest_asset.sha256")
+          # A hyphenated tag (v1.2.0-rc1, etc.) is a pre-release -- pass
+          # --prerelease so it can never end up as `releases/latest` (what
+          # every device's platform-update check queries) by a maintainer
+          # forgetting to tick the box by hand when publishing the draft.
+          prerelease_flag=()
+          case "$TAG" in
+            *-*) prerelease_flag=(--prerelease) ;;
+          esac
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "release $TAG is already published; publish a new tag instead of replacing its assets" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "$TAG" \
+              "${prerelease_flag[@]}" "${assets[@]}"
+          fi

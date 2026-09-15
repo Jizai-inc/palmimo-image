@@ -230,6 +230,26 @@ if ! ssh_run "sudo grep -q pmf /usr/share/comitup/comitup/nm.py"; then
 fi
 echo "    ok: nm.py contains the pmf line"
 
+echo "==> [8b/9] app execution platform"
+# Same install.sh the pi-gen stage runs against ROOTFS_DIR (see
+# pigen/stage-palmimo/05-app-platform/00-run.sh) -- no platform-specific
+# path belongs in this script, only the call.
+#
+# bundle_sha256 is computed here (host side, same tool the release workflow
+# and the pi-gen stage use) rather than re-derived on the Pi from a single
+# file, so apply-pi.sh and pi-gen record the same value for the same
+# platform/ tree -- see tools/build_platform_bundle.py.
+PLATFORM_BUNDLE_TAR="$(mktemp -u).tar.gz"
+PLATFORM_BUNDLE_SHA256="$(uv run "${IMAGE_DIR}/tools/build_platform_bundle.py" --out "$PLATFORM_BUNDLE_TAR")"
+rm -f "$PLATFORM_BUNDLE_TAR"
+rsync -az \
+  --rsync-path='sudo rsync' \
+  -e 'ssh -o BatchMode=yes' \
+  "${IMAGE_DIR}/platform/" "${PI_HOST}:/tmp/palmimo-platform/"
+ssh_run "sudo /tmp/palmimo-platform/install.sh install --root / && \
+  sudo /tmp/palmimo-platform/install.sh record --root / --sha '${PLATFORM_BUNDLE_SHA256}' && \
+  rm -rf /tmp/palmimo-platform"
+
 echo "==> [9/9] identity"
 if [ -n "$identity_path" ]; then
   scp -o BatchMode=yes "$identity_path" "${PI_HOST}:/tmp/palmimo-identity.json"
