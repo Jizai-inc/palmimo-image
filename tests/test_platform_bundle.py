@@ -561,3 +561,96 @@ def test_verify_exit_code_is_2_when_it_cannot_run() -> None:
         text=True,
     )
     assert result.returncode == 2
+
+
+# ---------------------------------------------------------------------------
+# check_platform_version.py: a content change to platform/ must come with a
+# manifest.json version bump, or the Portal's version-number comparison
+# never notices the change exists.
+# ---------------------------------------------------------------------------
+
+CHECK_VERSION_TOOL = REPO_ROOT / "tools" / "check_platform_version.py"
+
+
+def _make_platform_dir(root: Path, *, version: int, extra: str = "unchanged") -> Path:
+    platform_dir = root / "platform"
+    (platform_dir / "files").mkdir(parents=True)
+    (platform_dir / "manifest.json").write_text(json.dumps({"version": version}), encoding="utf-8")
+    (platform_dir / "files" / "a.txt").write_text(extra, encoding="utf-8")
+    return platform_dir
+
+
+@pytest.mark.parametrize(
+    "base_version, head_version, base_extra, head_extra, expected_returncode",
+    [
+        (1, 1, "same", "same", 0),
+        (1, 2, "same", "different", 0),
+        (1, 1, "same", "different", 1),
+    ],
+    ids=["identical_content_same_version", "changed_content_bumped", "changed_content_not_bumped"],
+)
+def test_check_platform_version_returncode(
+    tmp_path: Path,
+    base_version: int,
+    head_version: int,
+    base_extra: str,
+    head_extra: str,
+    expected_returncode: int,
+) -> None:
+    base_dir = _make_platform_dir(tmp_path / "base", version=base_version, extra=base_extra)
+    head_dir = _make_platform_dir(tmp_path / "head", version=head_version, extra=head_extra)
+
+    result = subprocess.run(
+        ["python3", str(CHECK_VERSION_TOOL), str(base_dir), str(head_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stdout + result.stderr
+    if expected_returncode == 1:
+        assert str(base_version) in result.stderr
+        assert str(head_version) in result.stderr
+
+
+def test_check_platform_version_ignores_manifest_formatting_and_version_field(tmp_path: Path) -> None:
+    base_dir = _make_platform_dir(tmp_path / "base", version=1)
+    head_dir = _make_platform_dir(tmp_path / "head", version=1)
+    # Reformat head's manifest.json (different whitespace, different version
+    # value) without touching any other file -- content is unchanged.
+    head_manifest = head_dir / "manifest.json"
+    head_manifest.write_text(json.dumps({"version": 1}, indent=2) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["python3", str(CHECK_VERSION_TOOL), str(base_dir), str(head_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_check_platform_version_ignores_pycache_and_pyc_files(tmp_path: Path) -> None:
+    base_dir = _make_platform_dir(tmp_path / "base", version=1)
+    head_dir = _make_platform_dir(tmp_path / "head", version=1)
+    pycache = head_dir / "files" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "a.cpython-312.pyc").write_bytes(b"stale bytecode")
+    (head_dir / "files" / "b.pyc").write_bytes(b"stale bytecode")
+
+    result = subprocess.run(
+        ["python3", str(CHECK_VERSION_TOOL), str(base_dir), str(head_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_check_platform_version_exits_2_on_missing_directory(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["python3", str(CHECK_VERSION_TOOL), str(tmp_path / "no-such-base"), str(tmp_path / "no-such-head")],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2

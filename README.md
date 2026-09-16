@@ -177,6 +177,14 @@ for a later sync of a different app.
 `tools/build_platform_bundle.py` produces the release tarball
 deterministically (used by CI and available locally for the same output).
 
+`manifest.json`'s integer `version` must be bumped whenever `platform/`
+content changes — the Portal decides whether a device needs an update purely
+by comparing that number, so a content change under an unbumped version never
+reaches devices. `tools/check_platform_version.py` enforces this: a PR-time
+CI job (`platform_version_guard`) checks it against the PR's base branch, and
+the release workflow checks it against the previous published release before
+attaching any asset.
+
 ## Licenses and corresponding source
 
 ### comitup's modified nm.py (GPLv2 §2(a))

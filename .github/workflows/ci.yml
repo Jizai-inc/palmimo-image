@@ -61,6 +61,25 @@ jobs:
       - run: uv sync --dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} pytest
 
+  # Guards the Portal's own update mechanism: it decides whether a device
+  # needs an update purely by comparing manifest.json's integer `version`,
+  # so a platform/ content change that ships under an unbumped version
+  # never reaches devices (see tools/check_platform_version.py).
+  platform_version_guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch origin "${{ github.base_ref }}"
+      - name: Extract the base ref's platform/ into a temp dir
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/base
+          git archive "origin/${{ github.base_ref }}" platform | tar -x -C /tmp/base
+      - run: python3 tools/check_platform_version.py /tmp/base/platform platform
+
   # CI convergence check (design 2.8, palmimo-devkit monorepo doc/design):
   # a fresh image build and an existing device applying the same bundle
   # must reach the same on-disk state. Runs in a bare debian:trixie

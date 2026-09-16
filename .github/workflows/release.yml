@@ -39,6 +39,29 @@ jobs:
             exit 1
           fi
 
+      - name: Guard against shipping platform/ content without a version bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prev_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --json tagName,publishedAt --jq \
+            "[.[] | select(.tagName != \"$TAG\")] | sort_by(.publishedAt) | last | .tagName // empty")"
+          if [ -z "$prev_tag" ]; then
+            echo "no previous published release found; skipping the platform version guard"
+            exit 0
+          fi
+          echo "comparing against previous release $prev_tag"
+          asset="palmimo-platform-${prev_tag}.tar.gz"
+          if ! gh release download "$prev_tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --output "/tmp/$asset"; then
+            echo "previous release $prev_tag has no $asset; skipping the platform version guard"
+            exit 0
+          fi
+          mkdir -p /tmp/prev-platform
+          tar -xzf "/tmp/$asset" -C /tmp/prev-platform
+          python3 tools/check_platform_version.py /tmp/prev-platform platform
+
       - name: Package the release asset
         env:
           TAG: ${{ github.ref_name }}
