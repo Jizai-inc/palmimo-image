@@ -6,9 +6,9 @@ The Portal decides whether a device needs an update purely by comparing
 manifest.json's integer `version` between what it has and what is on offer
 (see platform/manifest.json and doc/design/palmimo-app-platform.md 2.8) --
 it never diffs file content. A content change shipped under an unchanged or
-lowered version therefore never reaches devices. Run standalone with plain
-python3 (no third-party imports): CI's platform_convergence job and the
-release workflow both invoke this outside the uv project.
+lowered version therefore never reaches devices. Runs with plain python3
+(stdlib plus the sibling build_platform_bundle.py): CI and the release
+workflow invoke it outside the uv project.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+
+from build_platform_bundle import bundle_files
 
 
 def _manifest_bytes_for_hash(path: Path) -> bytes:
@@ -29,10 +31,10 @@ def _manifest_bytes_for_hash(path: Path) -> bytes:
 
 
 def _content_hash(root: Path) -> str:
+    # Only what the bundle tarball ships counts: a README or bytecode next to
+    # platform/ never reaches a device, so changing it needs no version bump.
     digest = hashlib.sha256()
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        if "__pycache__" in path.parts or path.suffix == ".pyc":
-            continue
+    for path in bundle_files(root):
         rel = path.relative_to(root).as_posix()
         digest.update(rel.encode())
         if rel == "manifest.json":

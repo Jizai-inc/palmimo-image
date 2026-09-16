@@ -54,10 +54,16 @@ jobs:
           fi
           echo "comparing against previous release $prev_tag"
           asset="palmimo-platform-${prev_tag}.tar.gz"
-          if ! gh release download "$prev_tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --output "/tmp/$asset"; then
+          # Only a release cut before bundles existed may lack the asset; a
+          # listed asset that fails to download must stop the release.
+          # Captured first so a failing `gh` aborts the step (set -e) instead of
+          # reading as "no asset" through the pipeline.
+          prev_assets="$(gh release view "$prev_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if ! grep -qxF "$asset" <<<"$prev_assets"; then
             echo "previous release $prev_tag has no $asset; skipping the platform version guard"
             exit 0
           fi
+          gh release download "$prev_tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --output "/tmp/$asset"
           mkdir -p /tmp/prev-platform
           tar -xzf "/tmp/$asset" -C /tmp/prev-platform
           python3 tools/check_platform_version.py /tmp/prev-platform platform

@@ -28,19 +28,21 @@ PLATFORM_DIR = REPO_ROOT / "platform"
 FIXED_MTIME = 0
 
 
-def _iter_bundle_files() -> list[Path]:
+def bundle_files(platform_dir: Path = PLATFORM_DIR) -> list[Path]:
+    """Return the files of *platform_dir* that the bundle tarball ships, sorted by bundle path."""
     paths = [
-        PLATFORM_DIR / "manifest.json",
-        PLATFORM_DIR / "install.sh",
-        PLATFORM_DIR / "manifest_tool.py",
-        PLATFORM_DIR / "verify_platform.py",
-        *sorted((PLATFORM_DIR / "files").rglob("*")),
+        platform_dir / "manifest.json",
+        platform_dir / "install.sh",
+        platform_dir / "manifest_tool.py",
+        platform_dir / "verify_platform.py",
+        *(platform_dir / "files").rglob("*"),
     ]
-    return [p for p in paths if p.is_file() and "__pycache__" not in p.parts]
+    shipped = [p for p in paths if p.is_file() and "__pycache__" not in p.relative_to(platform_dir).parts]
+    return sorted(shipped, key=lambda p: p.relative_to(platform_dir).as_posix())
 
 
 def build(out_path: Path) -> None:
-    files = sorted(_iter_bundle_files(), key=lambda p: p.relative_to(PLATFORM_DIR).as_posix())
+    files = bundle_files()
     # gzip's own header carries a second, independent mtime/filename field
     # that tarfile.open("w:gz") does not let us pin -- wrap a GzipFile
     # explicitly so the compressed bytes are reproducible too, not just the

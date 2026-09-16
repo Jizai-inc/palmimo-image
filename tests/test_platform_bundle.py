@@ -629,13 +629,16 @@ def test_check_platform_version_ignores_manifest_formatting_and_version_field(tm
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_check_platform_version_ignores_pycache_and_pyc_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "relpath",
+    ["README.md", "files/__pycache__/a.cpython-312.pyc", "__pycache__/verify_platform.cpython-312.pyc"],
+)
+def test_check_platform_version_ignores_files_the_bundle_does_not_ship(tmp_path: Path, relpath: str) -> None:
     base_dir = _make_platform_dir(tmp_path / "base", version=1)
     head_dir = _make_platform_dir(tmp_path / "head", version=1)
-    pycache = head_dir / "files" / "__pycache__"
-    pycache.mkdir()
-    (pycache / "a.cpython-312.pyc").write_bytes(b"stale bytecode")
-    (head_dir / "files" / "b.pyc").write_bytes(b"stale bytecode")
+    extra = head_dir / relpath
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"not shipped")
 
     result = subprocess.run(
         ["python3", str(CHECK_VERSION_TOOL), str(base_dir), str(head_dir)],
