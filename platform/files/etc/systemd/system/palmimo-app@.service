@@ -19,6 +19,9 @@ Environment=XDG_CONFIG_HOME=/var/lib/palmimo/apps/%i/.config
 Environment=XDG_DATA_HOME=/var/lib/palmimo/apps/%i/.local/share
 ExecStart=/usr/lib/palmimo/app-launch %i
 Restart=no
+# `uv run` stays the unit's main process and exits 128+15 when a stop sends
+# SIGTERM, which systemd would record as a failed run. A requested stop is clean.
+SuccessExitStatus=143
 KillMode=control-group
 TimeoutStopSec=15
 
