@@ -52,6 +52,12 @@
     ],
     "state_directories": [
       {
+        "path": "var/lib/palmimo",
+        "owner": "user",
+        "group": "user",
+        "mode": "0755"
+      },
+      {
         "path": "var/lib/palmimo/apps",
         "owner": "user",
         "group": "palmimo-apps",
@@ -84,8 +90,8 @@
       {
         "path": "var/log/journal",
         "owner": "root",
-        "group": "root",
-        "mode": "0755"
+        "group": "systemd-journal",
+        "mode": "2755"
       }
     ],
     "external_binaries": [
@@ -107,10 +113,17 @@
     "users": [
       {
         "name": "palmimo-app",
-        "groups": ["video", "audio", "dialout", "palmimo-apps"]
+        "groups": [
+          "video",
+          "audio",
+          "dialout",
+          "palmimo-apps"
+        ]
       }
     ],
-    "groups": ["palmimo-apps"],
+    "groups": [
+      "palmimo-apps"
+    ],
     "units": [
       "palmimo-app@.service",
       "palmimo-app-sync@.service",

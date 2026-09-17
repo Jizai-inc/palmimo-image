@@ -77,8 +77,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/base
-          git archive "origin/${{ github.base_ref }}" platform | tar -x -C /tmp/base
-      - run: python3 tools/check_platform_version.py /tmp/base/platform platform
+          # A base branch from before the bundle existed has nothing to compare against.
+          if git cat-file -e "origin/${{ github.base_ref }}:platform/manifest.json" 2>/dev/null; then
+            git archive "origin/${{ github.base_ref }}" platform | tar -x -C /tmp/base
+          fi
+      - name: Require a version bump when shipped platform content changed
+        run: |
+          if [ -d /tmp/base/platform ]; then
+            python3 tools/check_platform_version.py /tmp/base/platform platform
+          else
+            echo "base has no platform/; nothing to compare"
+          fi
 
   # CI convergence check (design 2.8, palmimo-devkit monorepo doc/design):
   # a fresh image build and an existing device applying the same bundle
