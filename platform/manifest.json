@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
@@ -137,7 +137,9 @@
     ],
     "apt_packages": [
       "libgl1",
-      "libglib2.0-0t64"
+      "libglib2.0-0t64",
+      "libportaudio2",
+      "v4l-utils"
     ],
     "repair_root_owned": [
       ".",

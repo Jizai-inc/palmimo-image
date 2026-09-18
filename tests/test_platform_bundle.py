@@ -364,7 +364,7 @@ def test_install_creates_staging_and_trash_setgid_for_the_apps_group(
 # `uv run` does for the app itself
 # ---------------------------------------------------------------------------
 
-_SANDBOX_KEYS = ["ProtectSystem", "ProtectHome", "PrivateTmp", "NoNewPrivileges", "ProtectProc", "ProcSubset"]
+_SANDBOX_KEYS = ["ProtectSystem", "ProtectHome", "PrivateTmp", "NoNewPrivileges", "ProtectProc"]
 
 
 def _parse_service_section(unit_path: Path) -> dict[str, list[str]]:

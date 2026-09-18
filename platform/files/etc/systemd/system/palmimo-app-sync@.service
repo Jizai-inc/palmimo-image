@@ -54,4 +54,3 @@ BindPaths=/var/lib/palmimo/apps/.trash
 # being writable by this unit's uid means a malicious app's own dependency
 # install can poison cached wheels for a later sync of a different app.
 ProtectProc=invisible
-ProcSubset=pid

@@ -50,8 +50,9 @@ BindPaths=/run/palmimo/locks
 # palmimo-app uid, so DAC alone would let either enumerate/inspect the
 # other's process via /proc -- these close that. See
 # palmimo-app-sync@.service for the uv-cache risk this does NOT cover.
+# ProtectProc hides other users' processes; /proc/cpuinfo stays visible because
+# CPU-feature detection in ML runtimes (XNNPACK via mediapipe) reads it.
 ProtectProc=invisible
-ProcSubset=pid
 
 # Devices: closed by default. Portal adds the declared device classes at
 # start time via a runtime set-property (see the app-manifest devices field).
