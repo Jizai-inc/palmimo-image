@@ -121,11 +121,14 @@ install_apt_packages() {
 
   # Devices flashed from the shipped image carry a package left unpacked
   # but unconfigured by the image build (comitup); apt refuses to run until
-  # that is finished. Idempotent and quick when nothing is pending.
-  _apt_root_run env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+  # that is finished. Idempotent and quick when nothing is pending. The
+  # image ships its own /etc/comitup.conf, so keep installed conffiles
+  # instead of prompting (there is no terminal here).
+  _apt_root_run env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold
   _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get update
   # shellcheck disable=SC2086  # $missing is a controlled, space-joined package-name list
-  _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
+  _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confold $missing
 }
 
 add_user_to_group() {
