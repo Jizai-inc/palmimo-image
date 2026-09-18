@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "requires_portal": "0.2.0",
+  "requires_portal": "0.1.7",
   "restart_portal": true,
   "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
   "owns": {
