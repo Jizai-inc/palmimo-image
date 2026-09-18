@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Sync an app's dependencies -- or purge a leftover -- as palmimo-app.
+
+Runs as the palmimo-app-sync unit's own user -- never as the Portal's own
+uid ("user"), which is where an untrusted pyproject's build backend / path
+deps would otherwise execute, and which cannot delete the 0700 directories
+an app creates as uid palmimo-app either. Reads
+/var/lib/palmimo/apps/.staging/<name>/sync.json, written by the Portal
+before starting the unit; see palmimo-app-sync@.service and
+doc/design/palmimo-app-platform.md (palmimo-devkit monorepo) for the
+contract this implements.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tomllib
+from collections.abc import Callable
+from pathlib import Path
+
+
+# Overridable so tests can point this at a tmp directory instead of the
+# real (root-owned) /var/lib/palmimo/apps tree. TRASH_DIR defaults as a
+# sibling of STAGING_DIR so overriding just PALMIMO_STAGING_DIR (as the
+# sync tests already do) keeps both roots consistent with each other.
+STAGING_DIR = Path(os.environ.get("PALMIMO_STAGING_DIR", "/var/lib/palmimo/apps/.staging"))
+TRASH_DIR = Path(os.environ.get("PALMIMO_TRASH_DIR", str(STAGING_DIR.parent / ".trash")))
+
+# Exit 64 (EX_USAGE): a purge request naming a path outside these roots is
+# a caller bug, not a filesystem error -- distinct from the exit codes
+# `uv` itself can return.
+EX_USAGE = 64
+
+
+def _run(argv: list[str], *, env: dict[str, str] | None = None) -> int:
+    print("app-sync:", " ".join(argv), file=sys.stderr)
+    return subprocess.run(argv, env=env).returncode
+
+
+def _requires_python(project: Path) -> str | None:
+    """Read [project].requires-python from project/pyproject.toml, or None
+    if the file or the key is absent."""
+    try:
+        data = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    value = data.get("project", {}).get("requires-python")
+    return value if isinstance(value, str) else None
+
+
+def _run_uv(argv: list[str], *, env: dict[str, str] | None = None, requires_python: str | None) -> int:
+    """Run `uv venv` or `uv sync`, both of which can fail with "No
+    interpreter found" when requires_python names a version nothing on the
+    system satisfies -- append one actionable hint line when that happens."""
+    print("app-sync:", " ".join(argv), file=sys.stderr)
+    result = subprocess.run(argv, env=env, capture_output=True, text=True)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0 and "No interpreter found" in result.stderr and requires_python:
+        # The Portal only shows the stderr tail; name the requirement so
+        # the last line is actionable on its own.
+        print(
+            f"app-sync: no system Python satisfies requires-python {requires_python!r}",
+            file=sys.stderr,
+        )
+    return result.returncode
+
+
+def _chmod_and_retry(func: Callable[[str], object], path: str, exc_info: object) -> None:
+    os.chmod(path, 0o700)
+    func(path)
+
+
+def _purge(raw_path: str) -> int:
+    target = Path(raw_path).resolve()
+    allowed_roots = (STAGING_DIR.resolve(), TRASH_DIR.resolve())
+    # Strictly under one of the roots, never the root itself -- purging
+    # .staging/ or .trash/ wholesale would take every other app's
+    # in-flight job down with it.
+    if not any(target != root and target.is_relative_to(root) for root in allowed_roots):
+        print(f"app-sync: refusing to purge {target} -- outside {allowed_roots}", file=sys.stderr)
+        return EX_USAGE
+
+    if target.exists():
+        shutil.rmtree(target, onerror=_chmod_and_retry)
+    return 0 if not target.exists() else 1
+
+
+def _sync(spec: dict) -> int:
+    project = Path(spec["project"])
+    frozen = spec.get("frozen", True)
+    relocatable = spec.get("relocatable", True)
+    venv = project / ".venv"
+    # Both `uv venv` and `uv sync` discover a `.python-version` in any
+    # *ancestor* directory (e.g. the devkit monorepo root, when project is
+    # an example installed from a full repo clone), which can pin an
+    # interpreter unrelated to this project -- seen on a device: `uv venv
+    # --python ">=3.12"` picked the system 3.13, then `uv sync` found an
+    # ancestor `.python-version` pinning 3.12 and recreated the venv with a
+    # downloaded 3.12. Pass the project's own requires-python explicitly to
+    # both commands so ancestor files never apply to either.
+    requires_python = _requires_python(project)
+
+    if not venv.exists():
+        argv = ["uv", "venv"]
+        if relocatable:
+            argv.append("--relocatable")
+        if requires_python:
+            argv += ["--python", requires_python]
+        argv.append(str(venv))
+        rc = _run_uv(argv, requires_python=requires_python)
+        if rc != 0:
+            return rc
+
+    # --no-editable belt-and-braces UV_NO_EDITABLE=1 (set on the unit): an
+    # editable install embeds this STAGING path into site-packages, which
+    # breaks every console script once the Portal renames the directory to
+    # its final apps/<name> path after sync.
+    argv = ["uv", "sync", "--project", str(project), "--no-editable"]
+    if requires_python:
+        argv += ["--python", requires_python]
+    # uv has no --no-frozen flag -- --frozen is the only way to name this
+    # choice explicitly, and its absence already means "resolve normally".
+    if frozen:
+        argv.append("--frozen")
+
+    env = dict(os.environ)
+    env["UV_PROJECT_ENVIRONMENT"] = str(venv)
+    rc = _run_uv(argv, env=env, requires_python=requires_python)
+    if rc != 0:
+        return rc
+
+    # Not fatal: a full cache is a growth problem for the next sync, not a
+    # reason to fail this one.
+    prune_rc = _run(["uv", "cache", "prune"], env=env)
+    if prune_rc != 0:
+        print(f"app-sync: uv cache prune exited {prune_rc} (ignored)", file=sys.stderr)
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("app-sync: missing app name argument", file=sys.stderr)
+        return 1
+    name = sys.argv[1]
+
+    sync_path = STAGING_DIR / name / "sync.json"
+    try:
+        spec = json.loads(sync_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"app-sync: cannot read {sync_path}: {exc}", file=sys.stderr)
+        return 1
+
+    if "purge" in spec:
+        return _purge(spec["purge"])
+    return _sync(spec)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -38,9 +38,14 @@ tools/
   make_image.py          -> build the shipped .img.xz (pi-gen, Docker)
   provision_sd.py        -> flash an SD card + inject the identity file
   make_identity.py       -> generate a test identity file
+  build_platform_bundle.py -> build the platform/ release tarball deterministically
 lib/
   patch_comitup_nm.py    -> shared WPA2/PMF nm.py patch (apply-pi.sh + pi-gen both use this)
 packages.txt             -> apt package list (shared source for apply-pi.sh and pigen/)
+platform/                -> app execution platform bundle (see "Platform bundle" below)
+  manifest.json            -> version, requires_portal, and the explicit "owns" enumeration
+  install.sh               -> idempotent installer: install / verify / record subcommands
+  files/                   -> unit template, tmpfiles, polkit rules, journald config, app-launch
 pigen/                   -> pi-gen custom stage (see pigen/README.md for stage notes)
 dist/                    -> built images land here (gitignored)
 doc/design.md            -> design rationale, verification history, failure matrix
@@ -135,6 +140,65 @@ Prerequisites: SSH key auth, and passwordless sudo for the Pi user (both the
 Raspberry Pi Imager default). Each step is idempotent; a failed step stops
 the script without touching later steps, and running from the start always
 converges.
+
+## Platform bundle
+
+`platform/` is the app execution platform: the `palmimo-app` system user,
+the `palmimo-app@.service` unit template, the `app-launch` helper, tmpfiles,
+polkit rules, persistent journald config, and the apt packages that let
+Portal run third-party apps in their own sandbox. It installs, via apt, the
+shared libraries apps commonly need but cannot install for themselves
+(currently OpenGL and GLib, for `opencv-python`). It also places the NLTK
+data the SDK's English text-to-speech phonemizer needs under
+`/usr/share/nltk_data`, shared by every app. It ships out-of-band from the SD
+image itself — as a tagged `palmimo-platform-<tag>.tar.gz` GitHub Release
+asset (`.github/workflows/release.yml`) — so existing devices can pick up
+platform changes without a reflash. See
+[palmimo-app-platform.md](https://github.com/Jizai-inc/mi-mo-devkit-pre/blob/main/doc/design/palmimo-app-platform.md)
+chapter 2 (palmimo-devkit monorepo) for the design; this repository only
+implements it.
+
+Both consumers just call the bundle's own installer — no platform-specific
+path belongs in either:
+
+- `pigen/stage-palmimo/05-app-platform/00-run.sh` (image build)
+- `apply-pi.sh`'s equivalent step (dev-loop apply)
+
+```bash
+sudo platform/install.sh install          # apply to the running root
+sudo platform/install.sh verify           # check for drift, exit non-zero on any
+```
+
+`verify`'s exit code is a contract the Portal reads: `0` clean, `1` drift found
+(differences are printed to stdout as JSON lines, one per difference), `2`+
+could not run at all (bad arguments, unreadable manifest, ...). Don't collapse
+these to a bare zero/nonzero check on either side.
+
+`install` also repairs ownership of a fixed set of `/etc`, `/usr` and root-level
+paths left owned by a non-root uid on devices flashed from images built before
+palmimo-image commit `28fdabb` (which shipped `files/` via a non-root-preserving
+`rsync -a`). Those devices can only be fixed through this bundle, since a
+reflash is not an update path.
+
+Accepted risk: the shared `uv-cache` being writable by the `palmimo-app-sync`
+uid means a malicious app's own dependency install can poison cached wheels
+for a later sync of a different app.
+
+An app whose `requires-python` the image's own Python doesn't satisfy gets one
+downloaded into the platform-owned `uv-python` directory — `uv`'s verified
+`python-build-standalone` build, tried only after the system interpreter
+misses — at roughly 50 MB of disk per distinct Python version installed.
+
+`tools/build_platform_bundle.py` produces the release tarball
+deterministically (used by CI and available locally for the same output).
+
+`manifest.json`'s integer `version` must be bumped whenever `platform/`
+content changes — the Portal decides whether a device needs an update purely
+by comparing that number, so a content change under an unbumped version never
+reaches devices. `tools/check_platform_version.py` enforces this: a PR-time
+CI job (`platform_version_guard`) checks it against the PR's base branch, and
+the release workflow checks it against the previous published release before
+attaching any asset.
 
 ## Licenses and corresponding source
 

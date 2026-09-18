@@ -1,0 +1,21 @@
+// Lets the Portal's own account drive app units by name, without granting
+// it manage-units on anything else. Kept separate from 50-palmimo-portal.rules
+// (Portal's own unit permissions) so the two grants can be reasoned about
+// and revoked independently.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.user !== "user") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    if (!unit || !/^palmimo-app(-sync)?@[a-z][a-z0-9-]{0,39}\.service$/.test(unit)) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var verb = action.lookup("verb");
+    if (verb === "start" || verb === "stop" || verb === "restart" || verb === "set-property") {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

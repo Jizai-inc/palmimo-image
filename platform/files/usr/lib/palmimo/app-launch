@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Replace this process with the named app's `uv run`, per its argv.json.
+
+Runs as the palmimo-app unit's own user (never root). Reads
+/run/palmimo/apps/<name>/argv.json, written by the Portal before starting
+the unit; see palmimo-app@.service and doc/design/palmimo-app-platform.md
+(palmimo-devkit monorepo, chapter 2.3) for the contract this implements.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+# Overridable so tests can point this at a tmp directory instead of the
+# real (root-owned, tmpfs) /run/palmimo/apps tree -- same pattern as
+# app-sync's PALMIMO_STAGING_DIR.
+RUN_DIR = Path(os.environ.get("PALMIMO_RUN_DIR", "/run/palmimo/apps"))
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("app-launch: missing app name argument", file=sys.stderr)
+        return 1
+    name = sys.argv[1]
+
+    argv_path = RUN_DIR / name / "argv.json"
+    try:
+        spec = json.loads(argv_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"app-launch: cannot read {argv_path}: {exc}", file=sys.stderr)
+        return 1
+
+    project = spec["project"]
+    argv = spec["argv"]
+    cwd = spec.get("cwd")
+
+    # 78 (EX_CONFIG) is a distinct exit code the Portal maps to a
+    # "needs_repair" app state, rather than an ordinary crash.
+    if not (Path(project) / ".venv" / "bin" / "python").exists():
+        print(f"app-launch: {project} has no .venv -- run install/update first", file=sys.stderr)
+        return 78
+
+    if cwd:
+        os.chdir(cwd)
+
+    os.execvp("uv", ["uv", "run", "--frozen", "--no-sync", "--project", project, "--", *argv])
+    return 1  # unreachable: execvp only returns on failure, which raises
+
+
+if __name__ == "__main__":
+    sys.exit(main())

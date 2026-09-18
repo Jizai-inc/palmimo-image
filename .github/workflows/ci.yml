@@ -60,3 +60,86 @@ jobs:
           enable-cache: true
       - run: uv sync --dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} pytest
+
+  # Guards the Portal's own update mechanism: it decides whether a device
+  # needs an update purely by comparing manifest.json's integer `version`,
+  # so a platform/ content change that ships under an unbumped version
+  # never reaches devices (see tools/check_platform_version.py).
+  platform_version_guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch origin "${{ github.base_ref }}"
+      - name: Extract the base ref's platform/ into a temp dir
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/base
+          # A base branch from before the bundle existed has nothing to compare against.
+          if git cat-file -e "origin/${{ github.base_ref }}:platform/manifest.json" 2>/dev/null; then
+            git archive "origin/${{ github.base_ref }}" platform | tar -x -C /tmp/base
+          fi
+      - name: Require a version bump when shipped platform content changed
+        run: |
+          if [ -d /tmp/base/platform ]; then
+            python3 tools/check_platform_version.py /tmp/base/platform platform
+          else
+            echo "base has no platform/; nothing to compare"
+          fi
+
+  # CI convergence check (design 2.8, palmimo-devkit monorepo doc/design):
+  # a fresh image build and an existing device applying the same bundle
+  # must reach the same on-disk state. Runs in a bare debian:trixie
+  # container (no systemd, no uv project) so install/verify only exercise
+  # the --root path pi-gen's stage and a live apply both use.
+  platform_convergence:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    env:
+      PALMIMO_UV_SOURCE: /tmp/stub-bin/uv
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends rsync python3
+      - name: Stub uv (this check never needs a real one)
+        run: |
+          mkdir -p /tmp/stub-bin
+          printf '#!/bin/sh\necho fake-uv\n' >"$PALMIMO_UV_SOURCE"
+          chmod +x "$PALMIMO_UV_SOURCE"
+
+      - name: Fresh install converges and verifies clean
+        env:
+          PALMIMO_FAKE_ACCOUNTS: /tmp/fake_accounts_a.txt
+        run: |
+          set -euo pipefail
+          : >"$PALMIMO_FAKE_ACCOUNTS"
+          platform/install.sh install --root /tmp/a
+          platform/install.sh verify --root /tmp/a
+
+      - name: A device carrying leftovers reconverges to the same tree
+        env:
+          PALMIMO_FAKE_ACCOUNTS: /tmp/fake_accounts_b.txt
+        run: |
+          set -euo pipefail
+          : >"$PALMIMO_FAKE_ACCOUNTS"
+          platform/install.sh install --root /tmp/b
+          # A stray file inside a bundle-owned (rsync --delete) directory,
+          # simulating a v(N-1) leftover -- must disappear on reinstall.
+          # Removal of a declared "retired" path is unit-tested in
+          # tests/test_platform_bundle.py instead: platform v1 itself
+          # retires nothing yet, so there is no live retired path to seed
+          # against the real, shipped manifest here.
+          mkdir -p /tmp/b/usr/lib/palmimo
+          echo stale >/tmp/b/usr/lib/palmimo/old-helper.py
+          platform/install.sh install --root /tmp/b
+          platform/install.sh verify --root /tmp/b
+
+      - name: Fresh image and reconverged device have identical owned trees
+        run: |
+          set -euo pipefail
+          hash_a="$(python3 tools/compute_tree_hash.py /tmp/a)"
+          hash_b="$(python3 tools/compute_tree_hash.py /tmp/b)"
+          echo "/tmp/a: $hash_a"
+          echo "/tmp/b: $hash_b"
+          [ "$hash_a" = "$hash_b" ]
