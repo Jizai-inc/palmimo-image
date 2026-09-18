@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
@@ -135,7 +135,10 @@
       "palmimo-app-sync@.service",
       "palmimo-portal.service.d/10-platform.conf"
     ],
-    "apt_packages": [],
+    "apt_packages": [
+      "libgl1",
+      "libglib2.0-0t64"
+    ],
     "repair_root_owned": [
       ".",
       "etc",

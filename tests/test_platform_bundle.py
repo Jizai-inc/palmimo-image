@@ -978,3 +978,52 @@ def test_record_replaces_installed_json_without_leaving_a_temp_file(tmp_path: Pa
     assert entries == ["installed.json"]
     data = json.loads((platform_dir / "installed.json").read_text(encoding="utf-8"))
     assert data["bundle_sha256"] == "deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# apt packages: apps run as palmimo-app and cannot install system libraries
+# themselves (see manifest owns.apt_packages) -- an app that needs one
+# (e.g. opencv-python's libGL/libglib) only gets it through this bundle.
+# ---------------------------------------------------------------------------
+
+
+def test_install_records_an_apt_intent_for_each_manifest_apt_package(
+    installed_root: tuple[Path, Path, Path],
+) -> None:
+    _root, fake_accounts, _uv_source = installed_root
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    recorded = fake_accounts.read_text(encoding="utf-8")
+    for pkg in manifest["owns"]["apt_packages"]:
+        assert f"apt-get install {pkg}" in recorded
+
+
+@pytest.mark.skipif(shutil.which("dpkg-query") is None, reason="dpkg-query not installed")
+def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(tmp_path: Path) -> None:
+    verify_platform = _import_verify_platform()
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    installed_pkg, absent_pkg = manifest["owns"]["apt_packages"]
+
+    root = tmp_path / "root"
+    dpkg_dir = root / "var" / "lib" / "dpkg"
+    dpkg_dir.mkdir(parents=True)
+    (dpkg_dir / "status").write_text(
+        "\n".join(
+            [
+                f"Package: {installed_pkg}",
+                "Status: install ok installed",
+                "Priority: optional",
+                "Section: libs",
+                "Installed-Size: 1",
+                "Maintainer: Test <test@example.com>",
+                "Architecture: arm64",
+                "Version: 1.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
+
+    apt_diffs = [d for d in diffs if d["path"] in manifest["owns"]["apt_packages"]]
+    assert apt_diffs == [{"kind": "missing", "path": absent_pkg}]

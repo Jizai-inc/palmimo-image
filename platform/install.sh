@@ -79,6 +79,51 @@ ensure_user() {
     --gid palmimo-apps --groups "${supplementary_groups}" -R "${ROOT}" "${name}"
 }
 
+_apt_root_run() {
+  if [ "${ROOT}" = "/" ]; then
+    "$@"
+  else
+    # pi-gen builds call `install --root ROOTFS_DIR` against a chroot
+    # rootfs that has no running init of its own -- apt-get must target
+    # that chroot, the same way pi-gen's own on_chroot helper runs apt-get
+    # for every other package in this image (pigen/stage-palmimo/*/00-run.sh).
+    chroot "${ROOT%/}" "$@"
+  fi
+}
+
+# --- apt packages -------------------------------------------------------
+
+install_apt_packages() {
+  # Apps run as palmimo-app with no permission to install system
+  # libraries themselves (see doc/design/palmimo-app-platform.md); shared
+  # libraries an app's own dependencies need (e.g. opencv-python's
+  # libGL/libglib) can only reach a field device through this bundle.
+  if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+    while IFS= read -r pkg; do
+      [ -n "$pkg" ] || continue
+      record_account_intent "apt-get install ${pkg}"
+    done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)
+    return 0
+  fi
+
+  local missing="" pkg status
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    # shellcheck disable=SC2016  # dpkg-query's own format string, not shell expansion
+    status="$(_apt_root_run dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)"
+    case "$status" in
+      *"install ok installed"*) ;;
+      *) missing="${missing}${missing:+ }${pkg}" ;;
+    esac
+  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)
+
+  [ -n "$missing" ] || return 0
+
+  _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get update
+  # shellcheck disable=SC2086  # $missing is a controlled, space-joined package-name list
+  _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
+}
+
 add_user_to_group() {
   local user="$1" group="$2"
   # Never consult or mutate the host's account DB: with --root pointing at
@@ -249,6 +294,7 @@ do_install() {
   ensure_group palmimo-apps
   ensure_user palmimo-app "video,audio,dialout,palmimo-apps"
   add_user_to_group user palmimo-apps
+  install_apt_packages
 
   install_owned_files
   install_managed_directories

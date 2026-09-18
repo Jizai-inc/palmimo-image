@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -184,6 +185,32 @@ def _check_repair_root_owned(manifest: dict, root: Path, fake_lines: set[str] | 
     return diffs
 
 
+def _check_apt_packages(manifest: dict, root: Path, fake_lines: set[str] | None) -> list[dict]:
+    # No dpkg database exists on a bare test root, and fake-accounts mode
+    # never touches apt at all (install.sh only records intent) -- see
+    # install_apt_packages in install.sh.
+    if fake_lines is not None:
+        return []
+    diffs = []
+    admindir_args = [] if root == Path("/") else [f"--admindir={root}/var/lib/dpkg"]
+    for pkg in manifest["owns"].get("apt_packages", []):
+        try:
+            result = subprocess.run(
+                ["dpkg-query", *admindir_args, "-W", "-f=${Status}", pkg],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            # Every real target is Debian-based and always has dpkg-query;
+            # this only happens verifying a non-Debian host (e.g. running
+            # the test suite on macOS), where the package can't be checked.
+            diffs.append(_diff("missing", pkg, note="dpkg-query not available"))
+            continue
+        if "install ok installed" not in result.stdout:
+            diffs.append(_diff("missing", pkg))
+    return diffs
+
+
 def _check_accounts(manifest: dict, root: Path, fake_accounts_file: str | None) -> list[dict]:
     diffs = []
     if fake_accounts_file:
@@ -224,6 +251,7 @@ def verify(manifest: dict, files_dir: Path, root: Path, fake_accounts_file: str 
     diffs.extend(_check_bundle_cache(manifest, root, fake_lines))
     diffs.extend(_check_external_binaries(manifest, root, fake_lines))
     diffs.extend(_check_repair_root_owned(manifest, root, fake_lines))
+    diffs.extend(_check_apt_packages(manifest, root, fake_lines))
     diffs.extend(_check_accounts(manifest, root, fake_accounts_file))
     diffs.extend(_check_retired(manifest, root))
     return diffs

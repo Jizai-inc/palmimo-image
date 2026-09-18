@@ -46,6 +46,11 @@ def cmd_bundle_cache(manifest: dict) -> None:
         print(f"{entry['path']}\t{entry['mode']}\t{entry['owner']}\t{entry['group']}")
 
 
+def cmd_apt_packages(manifest: dict) -> None:
+    for name in manifest["owns"]["apt_packages"]:
+        print(name)
+
+
 def cmd_retired(manifest: dict) -> None:
     for path in manifest.get("retired", []):
         print(path)
@@ -65,6 +70,7 @@ COMMANDS = {
     "state-directories": cmd_state_directories,
     "external-binaries": cmd_external_binaries,
     "bundle-cache": cmd_bundle_cache,
+    "apt-packages": cmd_apt_packages,
     "retired": cmd_retired,
     "repair-root-owned": cmd_repair_root_owned,
 }

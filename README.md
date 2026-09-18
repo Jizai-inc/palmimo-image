@@ -145,8 +145,10 @@ converges.
 
 `platform/` is the app execution platform: the `palmimo-app` system user,
 the `palmimo-app@.service` unit template, the `app-launch` helper, tmpfiles,
-polkit rules, and persistent journald config that let Portal run
-third-party apps in their own sandbox. It ships out-of-band from the SD
+polkit rules, persistent journald config, and the apt packages that let
+Portal run third-party apps in their own sandbox. It installs, via apt, the
+shared libraries apps commonly need but cannot install for themselves
+(currently OpenGL and GLib, for `opencv-python`). It ships out-of-band from the SD
 image itself — as a tagged `palmimo-platform-<tag>.tar.gz` GitHub Release
 asset (`.github/workflows/release.yml`) — so existing devices can pick up
 platform changes without a reflash. See
