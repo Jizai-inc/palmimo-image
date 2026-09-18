@@ -13,6 +13,12 @@ UMask=0002
 WorkingDirectory=/var/lib/palmimo/apps/%i
 EnvironmentFile=/run/palmimo/apps/%i/env
 Environment=PALMIMO_APP_NAME=%i
+# A relocatable venv built from a managed (downloaded) Python has its
+# .venv/bin/python symlink -- and pyvenv.cfg's home= -- point at an
+# absolute path under UV_PYTHON_INSTALL_DIR (see palmimo-app-sync@.service
+# for where that download happens); this unit needs the same install dir
+# bind-mounted at the same absolute path for that symlink to resolve.
+Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 Environment=HOME=/var/lib/palmimo/apps/%i
 Environment=XDG_CACHE_HOME=/var/lib/palmimo/apps/%i/.cache
 Environment=XDG_CONFIG_HOME=/var/lib/palmimo/apps/%i/.config
@@ -36,6 +42,7 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 TemporaryFileSystem=/var/lib/palmimo:ro
 BindPaths=/var/lib/palmimo/apps/%i
+BindReadOnlyPaths=/var/lib/palmimo/uv-python
 TemporaryFileSystem=/run/palmimo:ro
 BindReadOnlyPaths=/run/palmimo/apps/%i
 BindPaths=/run/palmimo/locks

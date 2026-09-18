@@ -387,6 +387,33 @@ def test_app_sync_unit_sandbox_keys_match_app_unit() -> None:
         assert app[key] == app_sync[key], f"{key} differs: {app[key]!r} (app) vs {app_sync[key]!r} (app-sync)"
 
 
+# ---------------------------------------------------------------------------
+# uv-managed Python: an app's requires-python can name a version the image
+# doesn't ship. app-sync must be allowed to download one, and app-launch's
+# venv must be able to resolve the interpreter symlink that download leaves
+# behind (see doc/design/palmimo-app-platform.md for the contract).
+# ---------------------------------------------------------------------------
+
+
+def test_app_sync_unit_allows_downloading_a_python_the_system_lacks() -> None:
+    app_sync = _parse_service_section(APP_SYNC_UNIT)
+    env_blob = " ".join(app_sync.get("Environment", []))
+    assert "UV_PYTHON_DOWNLOADS=automatic" in env_blob
+    assert "UV_PYTHON_PREFERENCE=system" in env_blob
+
+
+@pytest.mark.parametrize(
+    "unit_path, bind_directive",
+    [(APP_SYNC_UNIT, "BindPaths"), (APP_UNIT, "BindReadOnlyPaths")],
+    ids=["sync_unit_writable", "app_unit_read_only"],
+)
+def test_uv_python_install_dir_is_set_and_bound(unit_path: Path, bind_directive: str) -> None:
+    values = _parse_service_section(unit_path)
+    env_blob = " ".join(values.get("Environment", []))
+    assert "UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python" in env_blob
+    assert "/var/lib/palmimo/uv-python" in values.get(bind_directive, [])
+
+
 @pytest.mark.parametrize(
     "frozen, expected_sync_argv_tail",
     [

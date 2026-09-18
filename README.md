@@ -180,6 +180,11 @@ Accepted risk: the shared `uv-cache` being writable by the `palmimo-app-sync`
 uid means a malicious app's own dependency install can poison cached wheels
 for a later sync of a different app.
 
+An app whose `requires-python` the image's own Python doesn't satisfy gets one
+downloaded into the platform-owned `uv-python` directory — `uv`'s verified
+`python-build-standalone` build, tried only after the system interpreter
+misses — at roughly 50 MB of disk per distinct Python version installed.
+
 `tools/build_platform_bundle.py` produces the release tarball
 deterministically (used by CI and available locally for the same output).
 

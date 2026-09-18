@@ -70,6 +70,12 @@
         "mode": "2775"
       },
       {
+        "path": "var/lib/palmimo/uv-python",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
         "path": "var/lib/palmimo/apps/.staging",
         "owner": "user",
         "group": "palmimo-apps",
