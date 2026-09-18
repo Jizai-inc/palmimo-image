@@ -51,6 +51,11 @@ def cmd_apt_packages(manifest: dict) -> None:
         print(name)
 
 
+def cmd_data_archives(manifest: dict) -> None:
+    for entry in manifest["owns"].get("data_archives", []):
+        print(f"{entry['url']}\t{entry['sha256']}\t{entry['dest']}")
+
+
 def cmd_retired(manifest: dict) -> None:
     for path in manifest.get("retired", []):
         print(path)
@@ -71,6 +76,7 @@ COMMANDS = {
     "external-binaries": cmd_external_binaries,
     "bundle-cache": cmd_bundle_cache,
     "apt-packages": cmd_apt_packages,
+    "data-archives": cmd_data_archives,
     "retired": cmd_retired,
     "repair-root-owned": cmd_repair_root_owned,
 }

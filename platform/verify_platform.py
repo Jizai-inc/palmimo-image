@@ -211,6 +211,21 @@ def _check_apt_packages(manifest: dict, root: Path, fake_lines: set[str] | None)
     return diffs
 
 
+def _check_data_archives(manifest: dict, root: Path, fake_lines: set[str] | None) -> list[dict]:
+    # Content is never hashed here: unlike owns.files, these directories
+    # come from a third-party zip, not this repository's files/ tree, so
+    # there is nothing local to diff them against.
+    if fake_lines is not None:
+        return []
+    diffs = []
+    for entry in manifest["owns"].get("data_archives", []):
+        stem = Path(entry["url"]).stem
+        rel = f"{entry['dest']}/{stem}"
+        if not (root / rel).is_dir():
+            diffs.append(_diff("missing", rel))
+    return diffs
+
+
 def _check_accounts(manifest: dict, root: Path, fake_accounts_file: str | None) -> list[dict]:
     diffs = []
     if fake_accounts_file:
@@ -252,6 +267,7 @@ def verify(manifest: dict, files_dir: Path, root: Path, fake_accounts_file: str 
     diffs.extend(_check_external_binaries(manifest, root, fake_lines))
     diffs.extend(_check_repair_root_owned(manifest, root, fake_lines))
     diffs.extend(_check_apt_packages(manifest, root, fake_lines))
+    diffs.extend(_check_data_archives(manifest, root, fake_lines))
     diffs.extend(_check_accounts(manifest, root, fake_accounts_file))
     diffs.extend(_check_retired(manifest, root))
     return diffs
