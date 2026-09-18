@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import pwd
 import shutil
 import stat
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -657,3 +660,113 @@ def test_check_platform_version_exits_2_on_missing_directory(tmp_path: Path) -> 
     )
 
     assert result.returncode == 2
+
+
+# ---------------------------------------------------------------------------
+# verify must catch a helper tree left owned by whoever extracted it
+# (confirmed on device: rsync -a as root preserved the staged tree's
+# unprivileged owner instead of the manifest's root:root). None of these
+# checks need root: they build a --root tree by hand and call
+# verify_platform.verify() directly, without going through install.sh.
+# ---------------------------------------------------------------------------
+
+
+def _import_verify_platform() -> types.ModuleType:
+    sys.path.insert(0, str(PLATFORM_DIR))
+    try:
+        import verify_platform
+    finally:
+        sys.path.pop(0)
+    return verify_platform
+
+
+def _build_owner_check_root(tmp_path: Path) -> tuple[dict, Path]:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    root = tmp_path / "root"
+    file_entry = manifest["owns"]["files"][0]
+    dir_entry = manifest["owns"]["managed_directories"][0]
+    binary_entry = manifest["owns"]["external_binaries"][0]
+
+    dst_file = root / file_entry["path"]
+    dst_file.parent.mkdir(parents=True)
+    shutil.copyfile(PLATFORM_DIR / "files" / file_entry["path"], dst_file)
+    dst_file.chmod(int(file_entry["mode"], 8))
+
+    dst_dir = root / dir_entry["path"]
+    shutil.copytree(PLATFORM_DIR / "files" / dir_entry["path"], dst_dir)
+    dst_dir.chmod(int(dir_entry["mode"], 8))
+    for p in dst_dir.rglob("*"):
+        if p.is_file():
+            p.chmod(0o755)
+
+    dst_binary = root / binary_entry["path"]
+    dst_binary.parent.mkdir(parents=True)
+    dst_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    dst_binary.chmod(int(binary_entry["mode"], 8))
+
+    return manifest, root
+
+
+def test_verify_reports_owner_diff_for_files_managed_dirs_and_external_binaries(tmp_path: Path) -> None:
+    verify_platform = _import_verify_platform()
+    manifest, root = _build_owner_check_root(tmp_path)
+    file_entry = manifest["owns"]["files"][0]
+    dir_entry = manifest["owns"]["managed_directories"][0]
+    binary_entry = manifest["owns"]["external_binaries"][0]
+
+    diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
+
+    assert any(d["kind"] == "owner" and d["path"] == file_entry["path"] for d in diffs)
+    assert any(d["kind"] == "owner" and d["path"].startswith(dir_entry["path"] + "/") for d in diffs)
+    assert any(d["kind"] == "owner" and d["path"] == binary_entry["path"] for d in diffs)
+
+
+def test_verify_reports_no_owner_diff_when_manifest_owner_matches_actual_owner(tmp_path: Path) -> None:
+    verify_platform = _import_verify_platform()
+    manifest, root = _build_owner_check_root(tmp_path)
+    import grp
+
+    current_user = pwd.getpwuid(os.getuid()).pw_name
+    current_group = grp.getgrgid(os.getgid()).gr_name
+    for entry in (
+        manifest["owns"]["files"][0],
+        manifest["owns"]["managed_directories"][0],
+        manifest["owns"]["external_binaries"][0],
+    ):
+        entry["owner"] = current_user
+        entry["group"] = current_group
+
+    diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
+
+    assert not any(d["kind"] == "owner" for d in diffs)
+
+
+# ---------------------------------------------------------------------------
+# `install.sh record` must never leave a partially written installed.json:
+# the Portal reads this file to decide what version is on disk, and a crash
+# mid-write must not corrupt or truncate an existing one.
+# ---------------------------------------------------------------------------
+
+
+def _run_record(root: Path, sha: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", str(INSTALL_SH), "record", "--root", str(root), "--sha", sha],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_record_replaces_installed_json_without_leaving_a_temp_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    platform_dir = root / "var" / "lib" / "palmimo" / "platform"
+    platform_dir.mkdir(parents=True)
+    (platform_dir / "installed.json").write_text('{"version": 0}', encoding="utf-8")
+
+    result = _run_record(root, "deadbeef")
+
+    assert result.returncode == 0, result.stderr
+    entries = sorted(p.name for p in platform_dir.iterdir())
+    assert entries == ["installed.json"]
+    data = json.loads((platform_dir / "installed.json").read_text(encoding="utf-8"))
+    assert data["bundle_sha256"] == "deadbeef"

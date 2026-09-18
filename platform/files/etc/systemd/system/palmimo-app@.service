@@ -24,6 +24,9 @@ Restart=no
 SuccessExitStatus=143
 KillMode=control-group
 TimeoutStopSec=15
+# The app is untrusted and shares the CPU with the Portal; a fork bomb must
+# not be able to starve the device of PIDs. No MemoryMax: device RAM varies.
+TasksMax=1024
 
 # Filesystem: nothing but the app's own directory and the bind-mounted run
 # directory is writable or even visible.

@@ -45,24 +45,24 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          prev_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
-            --json tagName,publishedAt --jq \
-            "[.[] | select(.tagName != \"$TAG\")] | sort_by(.publishedAt) | last | .tagName // empty")"
+          # Newest published, non-draft, non-prerelease release (excluding
+          # this tag) that carries a bundle asset: only releases cut before
+          # bundles existed lack one. `gh api` failing must fail this step
+          # (set -e), not read as "no previous release". --paginate emits
+          # one result per page (newest page first), so keep the first line;
+          # sed reads to EOF so gh never sees a closed pipe under pipefail.
+          prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '
+            [.[] | select(.draft == false and .prerelease == false and .tag_name != env.TAG)]
+            | sort_by(.published_at) | reverse
+            | map(select(.assets | any(.name == ("palmimo-platform-" + .tag_name + ".tar.gz"))))
+            | .[0].tag_name // empty
+          ' | sed -n '1p')"
           if [ -z "$prev_tag" ]; then
-            echo "no previous published release found; skipping the platform version guard"
+            echo "no previous published release with a platform bundle asset found; skipping the platform version guard"
             exit 0
           fi
           echo "comparing against previous release $prev_tag"
           asset="palmimo-platform-${prev_tag}.tar.gz"
-          # Only a release cut before bundles existed may lack the asset; a
-          # listed asset that fails to download must stop the release.
-          # Captured first so a failing `gh` aborts the step (set -e) instead of
-          # reading as "no asset" through the pipeline.
-          prev_assets="$(gh release view "$prev_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          if ! grep -qxF "$asset" <<<"$prev_assets"; then
-            echo "previous release $prev_tag has no $asset; skipping the platform version guard"
-            exit 0
-          fi
           gh release download "$prev_tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --output "/tmp/$asset"
           mkdir -p /tmp/prev-platform
           tar -xzf "/tmp/$asset" -C /tmp/prev-platform

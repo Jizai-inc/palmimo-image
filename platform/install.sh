@@ -107,24 +107,35 @@ add_user_to_group() {
 # --- file installation -------------------------------------------------------
 
 install_owned_files() {
-  while IFS=$'\t' read -r path mode _owner _group; do
+  while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
     # mkdir -p first rather than relying on GNU install's -D: BSD install
     # (macOS, used for local dev/test runs) has no -D equivalent.
     mkdir -p "$(dirname "${ROOT%/}/${path}")"
-    install -m "${mode}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
+    # A bare test root has no accounts for -o/-g to resolve; fake-accounts
+    # mode asserts ownership intent elsewhere instead (see ensure_user).
+    if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+      install -m "${mode}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
+    else
+      install -m "${mode}" -o "${owner}" -g "${group}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
+    fi
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)
 }
 
 install_managed_directories() {
-  while IFS=$'\t' read -r path mode _owner _group; do
+  while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
     mkdir -p "${ROOT%/}/${path}"
     # This directory is exclusively ours (nothing else ships into
     # usr/lib/palmimo), so a full rsync --delete is safe here -- it is
     # exactly what converges a stray leftover file from a retired
-    # v(N-1) layout to this bundle's files/ tree.
-    rsync -a --delete "${FILES_DIR}/${path}/" "${ROOT%/}/${path}/"
+    # v(N-1) layout to this bundle's files/ tree. -rlptD (no -o -g) instead
+    # of -a: as root, -a would preserve the staged tree's owner (whoever
+    # extracted the bundle), not the manifest's.
+    rsync -rlptD --delete "${FILES_DIR}/${path}/" "${ROOT%/}/${path}/"
+    if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+      chown -R "${owner}:${group}" "${ROOT%/}/${path}"
+    fi
     chmod "${mode}" "${ROOT%/}/${path}"
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" managed-directories)
 }
@@ -250,10 +261,16 @@ do_record() {
   version="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" version)"
   local platform_dir="${ROOT%/}/var/lib/palmimo/platform"
   mkdir -p "$platform_dir"
+  # Written via a same-directory temp file + os.replace so a device losing
+  # power or the Portal killing this process mid-write never leaves
+  # installed.json truncated or half-written -- the Portal reads this file
+  # to decide what version is on disk.
   python3 - "$platform_dir/installed.json" "$version" "$sha" <<'PYEOF'
 import datetime
 import json
+import os
 import sys
+import tempfile
 
 out_path, version, sha = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 data = {
@@ -261,9 +278,15 @@ data = {
     "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "bundle_sha256": sha,
 }
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
+fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(out_path), prefix=".installed.json.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, out_path)
+except BaseException:
+    os.unlink(tmp_path)
+    raise
 PYEOF
   # var/lib/palmimo/platform is user:user (state_directories above), but
   # this file itself is written as root -- the Portal (running as user)

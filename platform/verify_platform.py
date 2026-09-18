@@ -38,7 +38,7 @@ def _fake_account_lines(fake_accounts_file: str) -> set[str]:
         return set()
 
 
-def _check_files(manifest: dict, files_dir: Path, root: Path) -> list[dict]:
+def _check_files(manifest: dict, files_dir: Path, root: Path, fake_lines: set[str] | None) -> list[dict]:
     diffs = []
     for entry in manifest["owns"]["files"]:
         rel = entry["path"]
@@ -51,10 +51,13 @@ def _check_files(manifest: dict, files_dir: Path, root: Path) -> list[dict]:
             diffs.append(_diff("content", rel))
         if _mode(dst) != entry["mode"].zfill(4):
             diffs.append(_diff("mode", rel, expected=entry["mode"], actual=_mode(dst)))
+        diffs.extend(_check_owner_group(rel, dst, entry, fake_lines))
     return diffs
 
 
-def _check_managed_directory_tree(rel_dir: str, src_dir: Path, dst_dir: Path) -> list[dict]:
+def _check_managed_directory_tree(
+    rel_dir: str, src_dir: Path, dst_dir: Path, entry: dict, fake_lines: set[str] | None
+) -> list[dict]:
     diffs = []
     if not dst_dir.is_dir():
         diffs.append(_diff("missing", rel_dir))
@@ -66,19 +69,25 @@ def _check_managed_directory_tree(rel_dir: str, src_dir: Path, dst_dir: Path) ->
     for rel_file in sorted(dst_files - src_files):
         diffs.append(_diff("unexpected", f"{rel_dir}/{rel_file}"))
     for rel_file in sorted(src_files & dst_files):
-        if _sha256(dst_dir / rel_file) != _sha256(src_dir / rel_file):
+        dst_file = dst_dir / rel_file
+        if _sha256(dst_file) != _sha256(src_dir / rel_file):
             diffs.append(_diff("content", f"{rel_dir}/{rel_file}"))
+        # A managed directory has no per-file manifest entries, so a file
+        # inside it is expected to carry the owning directory's owner/group.
+        diffs.extend(_check_owner_group(f"{rel_dir}/{rel_file}", dst_file, entry, fake_lines))
     return diffs
 
 
-def _check_managed_directories(manifest: dict, files_dir: Path, root: Path) -> list[dict]:
+def _check_managed_directories(manifest: dict, files_dir: Path, root: Path, fake_lines: set[str] | None) -> list[dict]:
     diffs = []
     for entry in manifest["owns"]["managed_directories"]:
         rel = entry["path"]
-        diffs.extend(_check_managed_directory_tree(rel, files_dir / rel, root / rel))
+        diffs.extend(_check_managed_directory_tree(rel, files_dir / rel, root / rel, entry, fake_lines))
         dst = root / rel
-        if dst.is_dir() and _mode(dst) != entry["mode"].zfill(4):
-            diffs.append(_diff("mode", rel, expected=entry["mode"], actual=_mode(dst)))
+        if dst.is_dir():
+            if _mode(dst) != entry["mode"].zfill(4):
+                diffs.append(_diff("mode", rel, expected=entry["mode"], actual=_mode(dst)))
+            diffs.extend(_check_owner_group(rel, dst, entry, fake_lines))
     return diffs
 
 
@@ -137,13 +146,17 @@ def _check_bundle_cache(manifest: dict, root: Path, fake_lines: set[str] | None)
     return diffs
 
 
-def _check_external_binaries(manifest: dict, root: Path) -> list[dict]:
+def _check_external_binaries(manifest: dict, root: Path, fake_lines: set[str] | None) -> list[dict]:
     diffs = []
     for entry in manifest["owns"]["external_binaries"]:
         rel = entry["path"]
         dst = root / rel
         if not dst.is_file() or not os.access(dst, os.X_OK):
             diffs.append(_diff("missing", rel))
+            continue
+        if _mode(dst) != entry["mode"].zfill(4):
+            diffs.append(_diff("mode", rel, expected=entry["mode"], actual=_mode(dst)))
+        diffs.extend(_check_owner_group(rel, dst, entry, fake_lines))
     return diffs
 
 
@@ -180,12 +193,12 @@ def _check_retired(manifest: dict, root: Path) -> list[dict]:
 
 def verify(manifest: dict, files_dir: Path, root: Path, fake_accounts_file: str | None) -> list[dict]:
     diffs: list[dict] = []
-    diffs.extend(_check_files(manifest, files_dir, root))
-    diffs.extend(_check_managed_directories(manifest, files_dir, root))
     fake_lines = _fake_account_lines(fake_accounts_file) if fake_accounts_file else None
+    diffs.extend(_check_files(manifest, files_dir, root, fake_lines))
+    diffs.extend(_check_managed_directories(manifest, files_dir, root, fake_lines))
     diffs.extend(_check_state_directories(manifest, root, fake_lines))
     diffs.extend(_check_bundle_cache(manifest, root, fake_lines))
-    diffs.extend(_check_external_binaries(manifest, root))
+    diffs.extend(_check_external_binaries(manifest, root, fake_lines))
     diffs.extend(_check_accounts(manifest, root, fake_accounts_file))
     diffs.extend(_check_retired(manifest, root))
     return diffs
