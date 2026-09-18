@@ -1001,7 +1001,7 @@ def test_install_records_an_apt_intent_for_each_manifest_apt_package(
 def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(tmp_path: Path) -> None:
     verify_platform = _import_verify_platform()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    installed_pkg, absent_pkg = manifest["owns"]["apt_packages"]
+    installed_pkg, *absent_pkgs = manifest["owns"]["apt_packages"]
 
     root = tmp_path / "root"
     dpkg_dir = root / "var" / "lib" / "dpkg"
@@ -1026,7 +1026,7 @@ def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(t
     diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
 
     apt_diffs = [d for d in diffs if d["path"] in manifest["owns"]["apt_packages"]]
-    assert apt_diffs == [{"kind": "missing", "path": absent_pkg}]
+    assert apt_diffs == [{"kind": "missing", "path": pkg} for pkg in absent_pkgs]
 
 
 # ---------------------------------------------------------------------------
