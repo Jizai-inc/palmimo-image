@@ -868,6 +868,7 @@ def _build_owner_check_root(tmp_path: Path) -> tuple[dict, Path]:
     return manifest, root
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root-owned tree cannot show an owner diff")
 def test_verify_reports_owner_diff_for_files_managed_dirs_and_external_binaries(tmp_path: Path) -> None:
     verify_platform = _import_verify_platform()
     manifest, root = _build_owner_check_root(tmp_path)
@@ -954,6 +955,7 @@ def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_
     assert f"chown root:root {root / 'etc' / 'cloud'}" not in recorded
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root-owned tree cannot show an owner diff")
 def test_verify_reports_owner_diff_for_a_repair_root_owned_path_owned_by_current_user(tmp_path: Path) -> None:
     verify_platform = _import_verify_platform()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
