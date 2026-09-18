@@ -51,6 +51,13 @@ def cmd_retired(manifest: dict) -> None:
         print(path)
 
 
+def cmd_repair_root_owned(manifest: dict) -> None:
+    # "." represents the filesystem root itself (owns.repair_root_owned
+    # has no per-entry object to hold a distinct representation).
+    for path in manifest["owns"]["repair_root_owned"]:
+        print(path)
+
+
 COMMANDS = {
     "version": cmd_version,
     "files": cmd_files,
@@ -59,6 +66,7 @@ COMMANDS = {
     "external-binaries": cmd_external_binaries,
     "bundle-cache": cmd_bundle_cache,
     "retired": cmd_retired,
+    "repair-root-owned": cmd_repair_root_owned,
 }
 
 

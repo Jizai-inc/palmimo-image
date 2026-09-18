@@ -160,6 +160,30 @@ def _check_external_binaries(manifest: dict, root: Path, fake_lines: set[str] | 
     return diffs
 
 
+def _check_repair_root_owned(manifest: dict, root: Path, fake_lines: set[str] | None) -> list[dict]:
+    diffs = []
+    for path in manifest["owns"].get("repair_root_owned", []):
+        rel = "." if path == "." else path
+        dst = root if path == "." else root / path
+        if not dst.exists():
+            continue
+        if fake_lines is not None:
+            continue
+        try:
+            import pwd
+
+            owner_name = pwd.getpwuid(dst.stat().st_uid).pw_name
+        except KeyError:
+            diffs.append(_diff("owner", rel, note="uid does not resolve to a name"))
+            continue
+        if owner_name != "root":
+            diffs.append(_diff("owner", rel, expected="root", actual=owner_name))
+        mode = stat.S_IMODE(dst.stat().st_mode)
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            diffs.append(_diff("mode", rel, note="group- or world-writable", actual=oct(mode)[2:].zfill(4)))
+    return diffs
+
+
 def _check_accounts(manifest: dict, root: Path, fake_accounts_file: str | None) -> list[dict]:
     diffs = []
     if fake_accounts_file:
@@ -199,6 +223,7 @@ def verify(manifest: dict, files_dir: Path, root: Path, fake_accounts_file: str 
     diffs.extend(_check_state_directories(manifest, root, fake_lines))
     diffs.extend(_check_bundle_cache(manifest, root, fake_lines))
     diffs.extend(_check_external_binaries(manifest, root, fake_lines))
+    diffs.extend(_check_repair_root_owned(manifest, root, fake_lines))
     diffs.extend(_check_accounts(manifest, root, fake_accounts_file))
     diffs.extend(_check_retired(manifest, root))
     return diffs

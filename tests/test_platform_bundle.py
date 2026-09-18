@@ -735,6 +735,11 @@ def test_verify_reports_no_owner_diff_when_manifest_owner_matches_actual_owner(t
     ):
         entry["owner"] = current_user
         entry["group"] = current_group
+    # Out of scope for this test: the fixture's file/dir/binary entries sit
+    # under ancestor directories (e.g. etc/systemd/system) that are also
+    # repair_root_owned paths, which always expect root and are exercised
+    # separately below.
+    manifest["owns"]["repair_root_owned"] = []
 
     diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
 
@@ -755,6 +760,48 @@ def _run_record(root: Path, sha: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# repair_root_owned: images built before palmimo-image commit 28fdabb shipped
+# files/ via `rsync -a` from a macOS checkout, leaving these paths owned by a
+# non-root uid on every device in the field. The platform bundle is the only
+# update vehicle those devices have.
+# ---------------------------------------------------------------------------
+
+
+def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_path: Path) -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    repair_paths = set(manifest["owns"]["repair_root_owned"])
+    assert {"etc", "etc/comitup.conf", "usr/local/lib/palmimo", "etc/cloud"} <= repair_paths
+
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc" / "comitup.conf").write_text("x", encoding="utf-8")
+    # "usr/local/lib/palmimo" and "etc/cloud" are left absent.
+    fake_accounts = tmp_path / "fake_accounts.txt"
+    fake_accounts.touch()
+    uv_source = _stub_uv(tmp_path)
+
+    result = _run_install(root, fake_accounts, uv_source)
+
+    assert result.returncode == 0, result.stderr
+    recorded = fake_accounts.read_text(encoding="utf-8")
+    assert f"chown root:root {root / 'etc'}" in recorded
+    assert f"chown root:root {root / 'etc' / 'comitup.conf'}" in recorded
+    assert f"chown root:root {root / 'usr' / 'local' / 'lib' / 'palmimo'}" not in recorded
+    assert f"chown root:root {root / 'etc' / 'cloud'}" not in recorded
+
+
+def test_verify_reports_owner_diff_for_a_repair_root_owned_path_owned_by_current_user(tmp_path: Path) -> None:
+    verify_platform = _import_verify_platform()
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+
+    diffs = verify_platform.verify(manifest, PLATFORM_DIR / "files", root, None)
+
+    assert any(d["kind"] == "owner" and d["path"] == "etc" for d in diffs)
 
 
 def test_record_replaces_installed_json_without_leaving_a_temp_file(tmp_path: Path) -> None:

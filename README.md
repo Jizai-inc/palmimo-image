@@ -170,6 +170,12 @@ sudo platform/install.sh verify           # check for drift, exit non-zero on an
 could not run at all (bad arguments, unreadable manifest, ...). Don't collapse
 these to a bare zero/nonzero check on either side.
 
+`install` also repairs ownership of a fixed set of `/etc`, `/usr` and root-level
+paths left owned by a non-root uid on devices flashed from images built before
+palmimo-image commit `28fdabb` (which shipped `files/` via a non-root-preserving
+`rsync -a`). Those devices can only be fixed through this bundle, since a
+reflash is not an update path.
+
 Accepted risk: the shared `uv-cache` being writable by the `palmimo-app-sync`
 uid means a malicious app's own dependency install can poison cached wheels
 for a later sync of a different app.

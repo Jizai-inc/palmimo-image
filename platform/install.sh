@@ -104,6 +104,39 @@ add_user_to_group() {
   usermod -R "${ROOT}" -aG "${group}" "${user}"
 }
 
+# --- root-owned path repair --------------------------------------------------
+
+# Images built before commit 28fdabb (palmimo-image) shipped files/ via
+# `rsync -a` from a macOS checkout, leaving these paths on every such
+# device owned by the build host's uid instead of root. An unsafe owner
+# there makes systemd-tmpfiles and NetworkManager's dispatcher refuse to
+# run (see doc/design/palmimo-app-platform.md 2.8), so the platform bundle
+# -- the only update vehicle those devices have -- repairs it here.
+repair_root_owned_paths() {
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    local target
+    if [ "$path" = "." ]; then
+      target="${ROOT%/}"
+      [ -n "$target" ] || target="/"
+    else
+      target="${ROOT%/}/${path}"
+    fi
+    [ -e "$target" ] || continue
+    if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+      record_account_intent "chown root:root ${target}"
+      continue
+    fi
+    local owner_uid
+    owner_uid="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_uid)' "$target")"
+    if [ "$owner_uid" != "0" ]; then
+      chown root:root "$target"
+      log "repaired ownership: ${path}"
+    fi
+    chmod g-w,o-w "$target"
+  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" repair-root-owned)
+}
+
 # --- file installation -------------------------------------------------------
 
 install_owned_files() {
@@ -224,6 +257,7 @@ do_install() {
   install_uv
   install_bundle_cache
   remove_retired_paths
+  repair_root_owned_paths
 
   # /run/systemd/system only exists under a running systemd instance -- a
   # chroot (pi-gen's ROOTFS_DIR, or `install --root /` run inside a chroot
@@ -231,7 +265,10 @@ do_install() {
   # daemon-reload there fails and aborts the rest of install under set -e.
   if [ "${ROOT}" = "/" ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    systemd-tmpfiles --create
+    # Scoped to our own config: a global `--create` also processes every
+    # other tmpfiles.d entry on the device, and one unrelated broken entry
+    # there would abort this install under set -e.
+    systemd-tmpfiles --create /etc/tmpfiles.d/palmimo.conf
     # journald only re-reads Storage=persistent on its own restart/reload;
     # SIGUSR1 makes it flush its current (volatile) journal to
     # /var/log/journal immediately instead. Without this, a device updated

@@ -129,7 +129,30 @@
       "palmimo-app-sync@.service",
       "palmimo-portal.service.d/10-platform.conf"
     ],
-    "apt_packages": []
+    "apt_packages": [],
+    "repair_root_owned": [
+      ".",
+      "etc",
+      "etc/systemd",
+      "etc/systemd/system",
+      "etc/polkit-1",
+      "etc/NetworkManager",
+      "etc/NetworkManager/dispatcher.d",
+      "etc/cloud",
+      "etc/cloud/cloud.cfg.d",
+      "usr",
+      "usr/local",
+      "usr/local/lib",
+      "usr/local/lib/palmimo",
+      "etc/systemd/system/palmimo-portal.service",
+      "etc/systemd/system/palmimo-firstboot.service",
+      "etc/systemd/system/comitup-web.service",
+      "etc/comitup.conf",
+      "etc/NetworkManager/dispatcher.d/50-palmimo-avahi",
+      "etc/cloud/cloud.cfg.d/99-palmimo.cfg",
+      "usr/local/lib/palmimo/firstboot.sh",
+      "etc/polkit-1/rules.d/50-palmimo-portal.rules"
+    ]
   },
   "retired": [],
   "reflash_required": false
