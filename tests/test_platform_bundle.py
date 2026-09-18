@@ -1035,14 +1035,8 @@ def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(t
 # manifest owns.data_archives) -- this bundle is the only vehicle that
 # reaches /usr/share/nltk_data on a device.
 #
-# The sha256-mismatch shell branch in install.sh's install_data_archives is
-# not covered here: reaching it means running `install.sh install` in real
-# (non-fake) mode, which do_install() only ever reaches after
-# install_apt_packages and ensure_group/ensure_user -- both need system
-# privileges (apt/dpkg, groupadd/useradd) this sandboxed environment does
-# not have. Sourcing just that one function to test it in isolation would
-# assert an implementation detail instead of externally observable install.sh
-# behavior, so it is left untested here.
+# The sha256-mismatch branch needs a real (non-fake) install, which requires
+# root; it is not covered here.
 # ---------------------------------------------------------------------------
 
 
