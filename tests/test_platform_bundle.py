@@ -434,6 +434,99 @@ def test_app_sync_helper_builds_expected_uv_sync_argv(
     ]
 
 
+@pytest.mark.parametrize(
+    "requires_python, expected_venv_argv_tail",
+    [
+        (">=3.12", "--relocatable --python >=3.12"),
+        (None, "--relocatable"),
+    ],
+    ids=["with_requires_python", "without_requires_python"],
+)
+def test_app_sync_helper_passes_requires_python_to_uv_venv(
+    tmp_path: Path, requires_python: str | None, expected_venv_argv_tail: str
+) -> None:
+    # Without --python, `uv venv` falls back to discovering a
+    # `.python-version` from any ancestor directory -- e.g. a devkit
+    # monorepo root the project was cloned as part of -- which can pin an
+    # interpreter this project's own requires-python never asked for.
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    uv_log = tmp_path / "uv.log"
+    (stub_dir / "uv").write_text('#!/bin/sh\necho "$@" >> "$FAKE_UV_LOG"\nexit 0\n', encoding="utf-8")
+    (stub_dir / "uv").chmod(0o755)
+
+    staging_dir = tmp_path / "staging"
+    project_dir = tmp_path / "apps" / "myapp"
+    project_dir.mkdir(parents=True)  # no .venv: exercise the `uv venv` step
+    if requires_python is not None:
+        (project_dir / "pyproject.toml").write_text(
+            f'[project]\nname = "myapp"\nrequires-python = "{requires_python}"\n', encoding="utf-8"
+        )
+    (staging_dir / "myapp").mkdir(parents=True)
+    (staging_dir / "myapp" / "sync.json").write_text(
+        json.dumps({"project": str(project_dir), "frozen": True, "relocatable": True}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "PALMIMO_STAGING_DIR": str(staging_dir),
+            "FAKE_UV_LOG": str(uv_log),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    logged = uv_log.read_text(encoding="utf-8").splitlines()
+    assert logged[0] == f"venv {expected_venv_argv_tail} {project_dir / '.venv'}"
+
+
+def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_file(tmp_path: Path) -> None:
+    # Regression: `uv venv` walks up from the project directory looking for
+    # a `.python-version` file. A monorepo checkout containing the project
+    # (e.g. examples/teleop inside a full devkit clone) has one at its
+    # workspace root pinning an unrelated version. app-sync's own argv must
+    # come from the project's requires-python alone, never from that file.
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    uv_log = tmp_path / "uv.log"
+    (stub_dir / "uv").write_text('#!/bin/sh\necho "$@" >> "$FAKE_UV_LOG"\nexit 0\n', encoding="utf-8")
+    (stub_dir / "uv").chmod(0o755)
+
+    monorepo = tmp_path / "monorepo"
+    monorepo.mkdir()
+    (monorepo / ".python-version").write_text("3.999\n", encoding="utf-8")
+    project_dir = monorepo / "examples" / "myapp"
+    project_dir.mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "myapp"\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "myapp").mkdir(parents=True)
+    (staging_dir / "myapp" / "sync.json").write_text(
+        json.dumps({"project": str(project_dir), "frozen": True, "relocatable": True}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "PALMIMO_STAGING_DIR": str(staging_dir),
+            "FAKE_UV_LOG": str(uv_log),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    logged = uv_log.read_text(encoding="utf-8").splitlines()
+    assert logged[0] == f"venv --relocatable --python >=3.12 {project_dir / '.venv'}"
+
+
 def test_app_sync_helper_refuses_to_purge_a_path_outside_the_allowed_roots(tmp_path: Path) -> None:
     staging_dir = tmp_path / "apps" / ".staging"
     (staging_dir / "myapp").mkdir(parents=True)

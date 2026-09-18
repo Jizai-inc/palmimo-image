@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -38,6 +39,32 @@ EX_USAGE = 64
 def _run(argv: list[str], *, env: dict[str, str] | None = None) -> int:
     print("app-sync:", " ".join(argv), file=sys.stderr)
     return subprocess.run(argv, env=env).returncode
+
+
+def _requires_python(project: Path) -> str | None:
+    """Read [project].requires-python from project/pyproject.toml, or None
+    if the file or the key is absent."""
+    try:
+        data = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    value = data.get("project", {}).get("requires-python")
+    return value if isinstance(value, str) else None
+
+
+def _run_venv(argv: list[str], requires_python: str | None) -> int:
+    print("app-sync:", " ".join(argv), file=sys.stderr)
+    result = subprocess.run(argv, capture_output=True, text=True)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0 and "No interpreter found" in result.stderr and requires_python:
+        # The Portal only shows the stderr tail; name the requirement so
+        # the last line is actionable on its own.
+        print(
+            f"app-sync: no system Python satisfies requires-python {requires_python!r}",
+            file=sys.stderr,
+        )
+    return result.returncode
 
 
 def _chmod_and_retry(func: Callable[[str], object], path: str, exc_info: object) -> None:
@@ -71,8 +98,16 @@ def _sync(spec: dict) -> int:
         argv = ["uv", "venv"]
         if relocatable:
             argv.append("--relocatable")
+        # `uv venv` discovers a `.python-version` in any *ancestor*
+        # directory (e.g. the devkit monorepo root, when project is an
+        # example installed from a full repo clone), which can pin an
+        # interpreter unrelated to this project. Pass the project's own
+        # requires-python explicitly so ancestor files never apply.
+        requires_python = _requires_python(project)
+        if requires_python:
+            argv += ["--python", requires_python]
         argv.append(str(venv))
-        rc = _run(argv)
+        rc = _run_venv(argv, requires_python)
         if rc != 0:
             return rc
 
