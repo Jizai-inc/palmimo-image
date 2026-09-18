@@ -417,10 +417,10 @@ def test_uv_python_install_dir_is_set_and_bound(unit_path: Path, bind_directive:
 @pytest.mark.parametrize(
     "frozen, expected_sync_argv_tail",
     [
-        (True, "--package mypkg --frozen"),
+        (True, "--frozen"),
         # uv 0.11 has no --no-frozen flag ("unexpected argument"): omitting
         # --frozen entirely is what "resolve normally" means to uv.
-        (False, "--package mypkg"),
+        (False, ""),
     ],
     ids=["frozen", "not_frozen"],
 )
@@ -438,7 +438,7 @@ def test_app_sync_helper_builds_expected_uv_sync_argv(
     (project_dir / ".venv").mkdir(parents=True)  # pre-existing venv: skip the `uv venv` step
     (staging_dir / "myapp").mkdir(parents=True)
     (staging_dir / "myapp" / "sync.json").write_text(
-        json.dumps({"project": str(project_dir), "package": "mypkg", "frozen": frozen, "relocatable": True}),
+        json.dumps({"project": str(project_dir), "frozen": frozen, "relocatable": True}),
         encoding="utf-8",
     )
 
@@ -455,27 +455,62 @@ def test_app_sync_helper_builds_expected_uv_sync_argv(
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    assert logged == [
-        f"sync --project {project_dir} --no-editable {expected_sync_argv_tail}",
-        "cache prune",
-    ]
+    expected_sync = f"sync --project {project_dir} --no-editable {expected_sync_argv_tail}".rstrip()
+    assert logged == [expected_sync, "cache prune"]
+
+
+def test_app_sync_helper_ignores_an_unrecognized_sync_json_key(tmp_path: Path) -> None:
+    # The Portal used to send "package" for `uv sync --package`; it no
+    # longer decides workspace membership (uv does, from the project's own
+    # directory), so this key -- like any other key app-sync doesn't read --
+    # must not change the uv invocation or fail the sync.
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    uv_log = tmp_path / "uv.log"
+    (stub_dir / "uv").write_text('#!/bin/sh\necho "$@" >> "$FAKE_UV_LOG"\nexit 0\n', encoding="utf-8")
+    (stub_dir / "uv").chmod(0o755)
+
+    staging_dir = tmp_path / "staging"
+    project_dir = tmp_path / "apps" / "myapp"
+    (project_dir / ".venv").mkdir(parents=True)
+    (staging_dir / "myapp").mkdir(parents=True)
+    (staging_dir / "myapp" / "sync.json").write_text(
+        json.dumps({"project": str(project_dir), "package": "mypkg", "frozen": True, "relocatable": True}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "PALMIMO_STAGING_DIR": str(staging_dir),
+            "FAKE_UV_LOG": str(uv_log),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    logged = uv_log.read_text(encoding="utf-8").splitlines()
+    assert logged == [f"sync --project {project_dir} --no-editable --frozen", "cache prune"]
 
 
 @pytest.mark.parametrize(
-    "requires_python, expected_venv_argv_tail",
+    "requires_python, expected_venv_argv_tail, expected_sync_argv_tail",
     [
-        (">=3.12", "--relocatable --python >=3.12"),
-        (None, "--relocatable"),
+        (">=3.12", "--relocatable --python >=3.12", "--no-editable --python >=3.12 --frozen"),
+        (None, "--relocatable", "--no-editable --frozen"),
     ],
     ids=["with_requires_python", "without_requires_python"],
 )
-def test_app_sync_helper_passes_requires_python_to_uv_venv(
-    tmp_path: Path, requires_python: str | None, expected_venv_argv_tail: str
+def test_app_sync_helper_passes_requires_python_to_uv_venv_and_uv_sync(
+    tmp_path: Path, requires_python: str | None, expected_venv_argv_tail: str, expected_sync_argv_tail: str
 ) -> None:
     # Without --python, `uv venv` falls back to discovering a
     # `.python-version` from any ancestor directory -- e.g. a devkit
     # monorepo root the project was cloned as part of -- which can pin an
-    # interpreter this project's own requires-python never asked for.
+    # interpreter this project's own requires-python never asked for. `uv
+    # sync` does its own separate discovery, so it needs the same --python.
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -509,14 +544,19 @@ def test_app_sync_helper_passes_requires_python_to_uv_venv(
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
     assert logged[0] == f"venv {expected_venv_argv_tail} {project_dir / '.venv'}"
+    assert logged[1] == f"sync --project {project_dir} {expected_sync_argv_tail}"
 
 
 def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_file(tmp_path: Path) -> None:
     # Regression: `uv venv` walks up from the project directory looking for
-    # a `.python-version` file. A monorepo checkout containing the project
-    # (e.g. examples/teleop inside a full devkit clone) has one at its
-    # workspace root pinning an unrelated version. app-sync's own argv must
-    # come from the project's requires-python alone, never from that file.
+    # a `.python-version` file -- and `uv sync` repeats that same ancestor
+    # discovery independently of `uv venv` (seen on a device: `uv venv
+    # --python ">=3.12"` picked the system 3.13, then `uv sync` found an
+    # ancestor `.python-version` pinning 3.12 and recreated the venv with a
+    # downloaded 3.12). A monorepo checkout containing the project (e.g.
+    # examples/teleop inside a full devkit clone) has one at its workspace
+    # root pinning an unrelated version. Both commands' argv must come from
+    # the project's requires-python alone, never from that file.
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -552,6 +592,7 @@ def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_f
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
     assert logged[0] == f"venv --relocatable --python >=3.12 {project_dir / '.venv'}"
+    assert logged[1] == f"sync --project {project_dir} --no-editable --python >=3.12 --frozen"
 
 
 def test_app_sync_helper_refuses_to_purge_a_path_outside_the_allowed_roots(tmp_path: Path) -> None:
