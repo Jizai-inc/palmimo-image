@@ -131,47 +131,6 @@ install_apt_packages() {
     -o Dpkg::Options::=--force-confold $missing
 }
 
-# --- data archives -----------------------------------------------------
-
-install_data_archives() {
-  # The SDK's English TTS phonemizer (g2p-en via NLTK) needs NLTK corpus
-  # data that ships nowhere else reachable by a Portal-installed app --
-  # devkit docs tell an SSH user to fetch it by hand, but nothing does that
-  # for the Portal path. Placed under /usr/share/nltk_data (one of NLTK's
-  # default search roots) so every app shares one copy instead of each
-  # vendoring its own.
-  while IFS=$'\t' read -r url sha dest; do
-    [ -n "$url" ] || continue
-    local stem target
-    stem="$(basename "$url" .zip)"
-    target="${ROOT%/}/${dest}/${stem}"
-    if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-      record_account_intent "fetch ${url}"
-      continue
-    fi
-    [ -d "$target" ] && continue
-    local tmp
-    tmp="$(mktemp)"
-    curl -fsSL "$url" -o "$tmp"
-    if ! python3 -c '
-import hashlib, sys
-expected, path = sys.argv[1], sys.argv[2]
-with open(path, "rb") as f:
-    actual = hashlib.sha256(f.read()).hexdigest()
-sys.exit(0 if actual == expected else 1)
-' "$sha" "$tmp"; then
-      log "sha256 mismatch for ${url}"
-      rm -f "$tmp"
-      exit 1
-    fi
-    mkdir -p "${ROOT%/}/${dest}"
-    python3 -m zipfile -e "$tmp" "${ROOT%/}/${dest}"
-    rm -f "$tmp"
-    chown -R root:root "$target"
-    chmod -R u=rwX,go=rX "$target"
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" data-archives)
-}
-
 add_user_to_group() {
   local user="$1" group="$2"
   # Never consult or mutate the host's account DB: with --root pointing at
@@ -343,7 +302,6 @@ do_install() {
   ensure_user palmimo-app "video,audio,dialout,palmimo-apps"
   add_user_to_group user palmimo-apps
   install_apt_packages
-  install_data_archives
 
   install_owned_files
   install_managed_directories

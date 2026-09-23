@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
@@ -140,23 +140,6 @@
       "libglib2.0-0t64",
       "libportaudio2",
       "v4l-utils"
-    ],
-    "data_archives": [
-      {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip",
-        "sha256": "6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b",
-        "dest": "usr/share/nltk_data/taggers"
-      },
-      {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip",
-        "sha256": "e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9",
-        "dest": "usr/share/nltk_data/taggers"
-      },
-      {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/cmudict.zip",
-        "sha256": "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6",
-        "dest": "usr/share/nltk_data/corpora"
-      }
     ],
     "repair_root_owned": [
       ".",
