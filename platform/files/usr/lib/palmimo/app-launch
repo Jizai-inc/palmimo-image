@@ -2,7 +2,7 @@
 """Replace this process with the named app's `uv run`, per its argv.json.
 
 Runs as the palmimo-app unit's own user (never root). Reads
-/run/palmimo/apps/<name>/argv.json, written by the Portal before starting
+/run/palmimo/apps/<id>/argv.json, written by the Portal before starting
 the unit; see palmimo-app@.service and doc/design/palmimo-app-platform.md
 (palmimo-devkit monorepo, chapter 2.3) for the contract this implements.
 """

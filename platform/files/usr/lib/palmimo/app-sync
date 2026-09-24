@@ -119,7 +119,7 @@ def _sync(spec: dict) -> int:
     # --no-editable belt-and-braces UV_NO_EDITABLE=1 (set on the unit): an
     # editable install embeds this STAGING path into site-packages, which
     # breaks every console script once the Portal renames the directory to
-    # its final apps/<name> path after sync.
+    # its final apps/<id> path after sync.
     argv = ["uv", "sync", "--project", str(project), "--no-editable"]
     if requires_python:
         argv += ["--python", requires_python]

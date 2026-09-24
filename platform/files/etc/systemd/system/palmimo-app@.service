@@ -12,7 +12,7 @@ SupplementaryGroups=video audio dialout
 UMask=0002
 WorkingDirectory=/var/lib/palmimo/apps/%i
 EnvironmentFile=/run/palmimo/apps/%i/env
-Environment=PALMIMO_APP_NAME=%i
+Environment=PALMIMO_APP_ID=%i
 # A relocatable venv built from a managed (downloaded) Python has its
 # .venv/bin/python symlink -- and pyvenv.cfg's home= -- point at an
 # absolute path under UV_PYTHON_INSTALL_DIR (see palmimo-app-sync@.service

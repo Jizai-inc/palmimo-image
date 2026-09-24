@@ -15,7 +15,7 @@ Environment=XDG_CONFIG_HOME=/var/lib/palmimo/apps/.staging/%i/.config
 Environment=XDG_DATA_HOME=/var/lib/palmimo/apps/.staging/%i/.local/share
 # UV_NO_EDITABLE: `uv sync` otherwise installs the app's own project in
 # editable mode, embedding this STAGING absolute path into site-packages --
-# the rename to its final apps/<name> path after sync then leaves every
+# the rename to its final apps/<id> path after sync then leaves every
 # console script raising ModuleNotFoundError. Belt-and-braces with
 # app-sync's own --no-editable flag.
 Environment=UV_CACHE_DIR=/var/lib/palmimo/uv-cache UV_LINK_MODE=copy UV_NO_EDITABLE=1
@@ -25,7 +25,7 @@ Environment=UV_CACHE_DIR=/var/lib/palmimo/uv-cache UV_LINK_MODE=copy UV_NO_EDITA
 # python-build-standalone build into UV_PYTHON_INSTALL_DIR -- a
 # platform-owned path independent of this unit's own STAGING working
 # directory, so the venv's interpreter symlink still resolves after the
-# Portal renames the directory to its final apps/<name> path.
+# Portal renames the directory to its final apps/<id> path.
 Environment=UV_PYTHON_DOWNLOADS=automatic UV_PYTHON_PREFERENCE=system
 Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 ExecStart=/usr/lib/palmimo/app-sync %i

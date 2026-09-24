@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -34,6 +35,7 @@ BUILD_BUNDLE_SCRIPT = REPO_ROOT / "tools" / "build_platform_bundle.py"
 
 APP_UNIT = PLATFORM_DIR / "files" / "etc" / "systemd" / "system" / "palmimo-app@.service"
 APP_SYNC_UNIT = PLATFORM_DIR / "files" / "etc" / "systemd" / "system" / "palmimo-app-sync@.service"
+POLKIT_RULES = PLATFORM_DIR / "files" / "etc" / "polkit-1" / "rules.d" / "60-palmimo-app-platform.rules"
 APP_SYNC_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-sync"
 APP_LAUNCH_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-launch"
 
@@ -997,6 +999,46 @@ def test_install_records_an_apt_intent_for_each_manifest_apt_package(
     recorded = fake_accounts.read_text(encoding="utf-8")
     for pkg in manifest["owns"]["apt_packages"]:
         assert f"apt-get install {pkg}" in recorded
+
+
+# ---------------------------------------------------------------------------
+# polkit unit-name patterns: 60-palmimo-app-platform.rules grants
+# manage-units only to app IDs (<namespace>.<name>, doc/design/
+# palmimo-app-platform.md 3.9) and to the sync unit's own instance form.
+# There is no JS engine in this test environment to run the rules file
+# itself, so the two regex literals are extracted from it and evaluated
+# directly -- this still catches a regex edit that silently widens or
+# narrows what the rule accepts, which a Python re-implementation typed by
+# hand next to it would not.
+# ---------------------------------------------------------------------------
+
+
+def _polkit_unit_regexes() -> tuple[str, str]:
+    text = POLKIT_RULES.read_text(encoding="utf-8")
+    app = re.search(r"isAppUnit = unit && /(\^.*\$)/\.test\(unit\);", text)
+    sync = re.search(r"isSyncUnit = unit && /(\^.*\$)/\.test\(unit\);", text)
+    assert app and sync, "could not find isAppUnit/isSyncUnit regex literals in the rules file"
+    return app.group(1), sync.group(1)
+
+
+@pytest.mark.parametrize(
+    "unit, expect_allowed",
+    [
+        ("palmimo-app@alice.teleop.service", True),
+        # Pre-namespace unit names (bare app name, no "<namespace>.") must
+        # no longer be granted -- an old unit left running across an
+        # in-place platform upgrade must not keep being manageable.
+        ("palmimo-app@teleop.service", False),
+        ("palmimo-app@../x.service", False),
+        # The sync unit's own pattern has no namespace segment; an app-ID-
+        # shaped instance must not slip through it.
+        ("palmimo-app-sync@alice.teleop.service", False),
+    ],
+)
+def test_polkit_rules_grant_only_the_intended_unit_names(unit: str, expect_allowed: bool) -> None:
+    app_regex, sync_regex = _polkit_unit_regexes()
+    allowed = bool(re.fullmatch(app_regex, unit)) or bool(re.fullmatch(sync_regex, unit))
+    assert allowed is expect_allowed
 
 
 @pytest.mark.skipif(shutil.which("dpkg-query") is None, reason="dpkg-query not installed")
