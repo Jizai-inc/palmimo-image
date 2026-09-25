@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "requires_portal": "0.2.0",
+  "restart_portal": true,
+  "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
+  "owns": {
+    "files": [
+      {
+        "path": "etc/systemd/system/palmimo-app@.service",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "etc/systemd/system/palmimo-app-sync@.service",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "etc/systemd/system/palmimo-portal.service.d/10-platform.conf",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "etc/tmpfiles.d/palmimo.conf",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "etc/polkit-1/rules.d/60-palmimo-app-platform.rules",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "etc/systemd/journald.conf.d/palmimo.conf",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      }
+    ],
+    "managed_directories": [
+      {
+        "path": "usr/lib/palmimo",
+        "owner": "root",
+        "group": "root",
+        "mode": "0755"
+      }
+    ],
+    "state_directories": [
+      {
+        "path": "var/lib/palmimo",
+        "owner": "user",
+        "group": "user",
+        "mode": "0755"
+      },
+      {
+        "path": "var/lib/palmimo/apps",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
+        "path": "var/lib/palmimo/uv-cache",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
+        "path": "var/lib/palmimo/uv-python",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
+        "path": "var/lib/palmimo/apps/.staging",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
+        "path": "var/lib/palmimo/apps/.trash",
+        "owner": "user",
+        "group": "palmimo-apps",
+        "mode": "2775"
+      },
+      {
+        "path": "var/lib/palmimo/platform",
+        "owner": "user",
+        "group": "user",
+        "mode": "0755"
+      },
+      {
+        "path": "var/log/journal",
+        "owner": "root",
+        "group": "systemd-journal",
+        "mode": "2755"
+      }
+    ],
+    "external_binaries": [
+      {
+        "path": "usr/local/bin/uv",
+        "owner": "root",
+        "group": "root",
+        "mode": "0755"
+      }
+    ],
+    "bundle_cache": [
+      {
+        "path": "var/lib/palmimo/platform/current",
+        "owner": "user",
+        "group": "user",
+        "mode": "0755"
+      }
+    ],
+    "users": [
+      {
+        "name": "palmimo-app",
+        "groups": [
+          "video",
+          "audio",
+          "dialout",
+          "palmimo-apps"
+        ]
+      }
+    ],
+    "groups": [
+      "palmimo-apps"
+    ],
+    "units": [
+      "palmimo-app@.service",
+      "palmimo-app-sync@.service",
+      "palmimo-portal.service.d/10-platform.conf"
+    ],
+    "apt_packages": [
+      "libgl1",
+      "libglib2.0-0t64",
+      "libportaudio2",
+      "v4l-utils"
+    ],
+    "repair_root_owned": [
+      ".",
+      "etc",
+      "etc/systemd",
+      "etc/systemd/system",
+      "etc/polkit-1",
+      "etc/NetworkManager",
+      "etc/NetworkManager/dispatcher.d",
+      "etc/cloud",
+      "etc/cloud/cloud.cfg.d",
+      "usr",
+      "usr/local",
+      "usr/local/lib",
+      "usr/local/lib/palmimo",
+      "etc/systemd/system/palmimo-portal.service",
+      "etc/systemd/system/palmimo-firstboot.service",
+      "etc/systemd/system/comitup-web.service",
+      "etc/comitup.conf",
+      "etc/NetworkManager/dispatcher.d/50-palmimo-avahi",
+      "etc/cloud/cloud.cfg.d/99-palmimo.cfg",
+      "usr/local/lib/palmimo/firstboot.sh",
+      "etc/polkit-1/rules.d/50-palmimo-portal.rules"
+    ]
+  },
+  "retired": [],
+  "reflash_required": false
+}
