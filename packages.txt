@@ -2,3 +2,7 @@ comitup
 avahi-daemon
 git
 dnsmasq
+libgl1
+libglib2.0-0t64
+libportaudio2
+v4l-utils
