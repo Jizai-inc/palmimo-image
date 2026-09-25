@@ -406,6 +406,16 @@ def test_app_sync_unit_uses_a_staging_cache_and_never_downloads_python() -> None
     assert "/var/lib/palmimo/uv-cache" not in app_sync.get("BindPaths", [])
 
 
+def test_app_unit_never_downloads_python() -> None:
+    # UV_PYTHON_INSTALL_DIR is bind-mounted read-only (see
+    # test_uv_python_install_dir_is_set_and_bound below), same as the sync
+    # unit -- without this, `uv run` would attempt a download on a missing
+    # interpreter and fail on the read-only mount instead of the clear
+    # "never" refusal.
+    env_blob = " ".join(_parse_service_section(APP_UNIT).get("Environment", []))
+    assert "UV_PYTHON_DOWNLOADS=never" in env_blob
+
+
 @pytest.mark.parametrize(
     "unit_path, bind_directive",
     [(APP_SYNC_UNIT, "BindReadOnlyPaths"), (APP_UNIT, "BindReadOnlyPaths")],
@@ -1051,6 +1061,26 @@ def test_record_replaces_installed_json_without_leaving_a_temp_file(tmp_path: Pa
     assert entries == ["installed.json"]
     data = json.loads((platform_dir / "installed.json").read_text(encoding="utf-8"))
     assert data["bundle_sha256"] == "deadbeef"
+
+
+def test_record_fails_instead_of_chowning_when_target_group_entry_is_missing(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    # "user" resolves to the current process's own uid in passwd (so a
+    # `chown <uid>:` needs no privilege and would otherwise go unnoticed)
+    # but has no matching entry in group. Before this was fixed, a
+    # `chown "$(target_uid ...):$(target_gid ...)"` ran as `chown "1000:"`
+    # (empty group segment) -- chown(1) treats a trailing empty group as
+    # "leave the group unchanged" and exits 0 despite the group never
+    # having resolved, and set -e does not catch the inner failure because
+    # it is inside a command substitution nested in a larger command.
+    (root / "etc" / "passwd").write_text(f"user:x:{os.getuid()}:1000::/home/user:/bin/bash\n", encoding="utf-8")
+    (root / "etc" / "group").write_text("root:x:0:\n", encoding="utf-8")
+
+    result = _run_record(root, "deadbeef")
+
+    assert result.returncode != 0
+    assert "group entry missing for user" in result.stderr
 
 
 # ---------------------------------------------------------------------------

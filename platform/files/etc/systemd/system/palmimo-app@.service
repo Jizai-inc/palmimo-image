@@ -13,6 +13,7 @@ UMask=0002
 WorkingDirectory=/var/lib/palmimo/apps/%i
 EnvironmentFile=/run/palmimo/apps/%i/env
 Environment=PALMIMO_APP_ID=%i
+Environment=UV_PYTHON_DOWNLOADS=never
 Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 Environment=HOME=/var/lib/palmimo/apps/%i
 Environment=XDG_CACHE_HOME=/var/lib/palmimo/apps/%i/.cache

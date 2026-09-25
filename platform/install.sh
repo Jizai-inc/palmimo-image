@@ -233,7 +233,14 @@ install_owned_files() {
     if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
       install -m "${mode}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
     else
-      install -m "${mode}" -o "$(target_uid "$owner")" -g "$(target_gid "$group")" \
+      local uid gid
+      # Command substitution failure inside an argument list does not trip
+      # set -e, so target_uid/target_gid's error would otherwise be
+      # swallowed and `install -o "" -g ""` would run against an empty
+      # owner/group (a silent no-op on some install(1) implementations).
+      uid="$(target_uid "$owner")" || exit 1
+      gid="$(target_gid "$group")" || exit 1
+      install -m "${mode}" -o "$uid" -g "$gid" \
         "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
     fi
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)
@@ -251,7 +258,10 @@ install_managed_directories() {
     # extracted the bundle), not the manifest's.
     rsync -rlptD --delete "${FILES_DIR}/${path}/" "${ROOT%/}/${path}/"
     if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-      chown -R "$(target_uid "$owner"):$(target_gid "$group")" "${ROOT%/}/${path}"
+      local uid gid
+      uid="$(target_uid "$owner")" || exit 1
+      gid="$(target_gid "$group")" || exit 1
+      chown -R "${uid}:${gid}" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" managed-directories)
@@ -265,7 +275,10 @@ install_state_directories() {
     # PALMIMO_FAKE_ACCOUNTS mode asserts ownership intent instead of the
     # filesystem, so skip chown/chgrp on a name that would not resolve.
     if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-      chown "$(target_uid "$owner"):$(target_gid "$group")" "${ROOT%/}/${path}"
+      local uid gid
+      uid="$(target_uid "$owner")" || exit 1
+      gid="$(target_gid "$group")" || exit 1
+      chown "${uid}:${gid}" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" state-directories)
@@ -288,7 +301,10 @@ install_bundle_cache() {
   find "$tmp" -type f -exec chmod 0644 {} +
   chmod 0755 "$tmp/install.sh"
   if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && grep -q "^user:" "${ROOT%/}/etc/passwd" 2>/dev/null; then
-    chown -R "$(target_uid user):$(target_gid user)" "$tmp"
+    local uid gid
+    uid="$(target_uid user)" || exit 1
+    gid="$(target_gid user)" || exit 1
+    chown -R "${uid}:${gid}" "$tmp"
   fi
   if [ -d "$dest" ]; then
     rm -rf "${dest}.old"
@@ -415,7 +431,10 @@ PYEOF
   # later rewrites it after applying a bundle and needs to be able to
   # replace it, not just read it.
   if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && grep -q "^user:" "${ROOT%/}/etc/passwd" 2>/dev/null; then
-    chown "$(target_uid user):$(target_gid user)" "$platform_dir/installed.json"
+    local uid gid
+    uid="$(target_uid user)" || exit 1
+    gid="$(target_gid user)" || exit 1
+    chown "${uid}:${gid}" "$platform_dir/installed.json"
   fi
 }
 
