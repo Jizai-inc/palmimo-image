@@ -38,6 +38,7 @@ APP_SYNC_UNIT = PLATFORM_DIR / "files" / "etc" / "systemd" / "system" / "palmimo
 POLKIT_RULES = PLATFORM_DIR / "files" / "etc" / "polkit-1" / "rules.d" / "60-palmimo-app-platform.rules"
 APP_SYNC_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-sync"
 APP_LAUNCH_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-launch"
+PREVIOUS_RELEASE_FILTER = REPO_ROOT / ".github" / "scripts" / "previous-platform-release.jq"
 
 # Paths that would identify the platform's internals leaking into a script
 # that is only supposed to call the installer.
@@ -390,24 +391,23 @@ def test_app_sync_unit_sandbox_keys_match_app_unit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# uv-managed Python: an app's requires-python can name a version the image
-# doesn't ship. app-sync must be allowed to download one, and app-launch's
-# venv must be able to resolve the interpreter symlink that download leaves
-# behind (see doc/design/palmimo-app-platform.md for the contract).
+# uv cache and Python interpreters are shared only through Portal-owned
+# preparation. A sync job gets one staging cache and read-only interpreters.
 # ---------------------------------------------------------------------------
 
 
-def test_app_sync_unit_allows_downloading_a_python_the_system_lacks() -> None:
+def test_app_sync_unit_uses_a_staging_cache_and_never_downloads_python() -> None:
     app_sync = _parse_service_section(APP_SYNC_UNIT)
     env_blob = " ".join(app_sync.get("Environment", []))
-    assert "UV_PYTHON_DOWNLOADS=automatic" in env_blob
-    assert "UV_PYTHON_PREFERENCE=system" in env_blob
+    assert "UV_CACHE_DIR=/var/lib/palmimo/apps/.staging/%i/.uv-cache" in env_blob
+    assert "UV_PYTHON_DOWNLOADS=never" in env_blob
+    assert "/var/lib/palmimo/uv-cache" not in app_sync.get("BindPaths", [])
 
 
 @pytest.mark.parametrize(
     "unit_path, bind_directive",
-    [(APP_SYNC_UNIT, "BindPaths"), (APP_UNIT, "BindReadOnlyPaths")],
-    ids=["sync_unit_writable", "app_unit_read_only"],
+    [(APP_SYNC_UNIT, "BindReadOnlyPaths"), (APP_UNIT, "BindReadOnlyPaths")],
+    ids=["sync_unit_read_only", "app_unit_read_only"],
 )
 def test_uv_python_install_dir_is_set_and_bound(unit_path: Path, bind_directive: str) -> None:
     values = _parse_service_section(unit_path)
@@ -495,6 +495,41 @@ def test_app_sync_helper_ignores_an_unrecognized_sync_json_key(tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
     assert logged == [f"sync --project {project_dir} --no-editable --frozen", "cache prune"]
+
+
+def test_app_sync_helper_uses_only_its_staging_cache(tmp_path: Path) -> None:
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    uv_log = tmp_path / "uv.log"
+    (stub_dir / "uv").write_text('#!/bin/sh\necho "$UV_CACHE_DIR|$@" >> "$FAKE_UV_LOG"\nexit 0\n', encoding="utf-8")
+    (stub_dir / "uv").chmod(0o755)
+
+    staging_dir = tmp_path / "staging"
+    project_dir = tmp_path / "apps" / "myapp"
+    project_dir.mkdir(parents=True)
+    (staging_dir / "myapp").mkdir(parents=True)
+    (staging_dir / "myapp" / "sync.json").write_text(
+        json.dumps({"project": str(project_dir), "frozen": True, "relocatable": True}), encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "PALMIMO_STAGING_DIR": str(staging_dir),
+            "FAKE_UV_LOG": str(uv_log),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    cache = staging_dir / "myapp" / ".uv-cache"
+    assert uv_log.read_text(encoding="utf-8").splitlines() == [
+        f"{cache}|venv --relocatable {project_dir / '.venv'}",
+        f"{cache}|sync --project {project_dir} --no-editable --frozen",
+        f"{cache}|cache prune",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -628,7 +663,7 @@ def test_app_launch_exits_78_with_one_stderr_line_when_venv_is_missing(tmp_path:
     (run_dir / "myapp").mkdir(parents=True)
     project_dir.mkdir(parents=True)  # no .venv under it
     (run_dir / "myapp" / "argv.json").write_text(
-        json.dumps({"argv": ["myapp"], "project": str(project_dir)}), encoding="utf-8"
+        json.dumps({"argv": ["myapp"], "project": str(project_dir), "python": ">=3.12"}), encoding="utf-8"
     )
 
     result = subprocess.run(
@@ -642,7 +677,7 @@ def test_app_launch_exits_78_with_one_stderr_line_when_venv_is_missing(tmp_path:
     assert len(result.stderr.splitlines()) == 1
 
 
-def test_app_launch_execs_uv_run_frozen_no_sync(tmp_path: Path) -> None:
+def test_app_launch_execs_uv_run_with_the_portal_selected_python(tmp_path: Path) -> None:
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -655,7 +690,8 @@ def test_app_launch_execs_uv_run_frozen_no_sync(tmp_path: Path) -> None:
     (project_dir / ".venv" / "bin" / "python").touch()
     (run_dir / "myapp").mkdir(parents=True)
     (run_dir / "myapp" / "argv.json").write_text(
-        json.dumps({"argv": ["myapp", "--foo"], "project": str(project_dir)}), encoding="utf-8"
+        json.dumps({"argv": ["myapp", "--foo"], "project": str(project_dir), "python": ">=3.12"}),
+        encoding="utf-8",
     )
 
     result = subprocess.run(
@@ -671,7 +707,31 @@ def test_app_launch_execs_uv_run_frozen_no_sync(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    assert logged == [f"run --frozen --no-sync --project {project_dir} -- myapp --foo"]
+    assert logged == [f"run --frozen --no-sync --project {project_dir} --python >=3.12 -- myapp --foo"]
+
+
+def test_previous_release_filter_selects_a_release_using_its_own_tag_name(tmp_path: Path) -> None:
+    releases = [
+        {
+            "tag_name": "v1",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-01-01T00:00:00Z",
+            "assets": [{"name": "palmimo-platform-v1.tar.gz"}],
+        }
+    ]
+    release_json = tmp_path / "releases.json"
+    release_json.write_text(json.dumps(releases), encoding="utf-8")
+
+    result = subprocess.run(
+        ["jq", "-r", "-f", str(PREVIOUS_RELEASE_FILTER), str(release_json)],
+        env={"PATH": "/usr/bin:/bin", "TAG": "v2"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v1\n"
 
 
 # ---------------------------------------------------------------------------

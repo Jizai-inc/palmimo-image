@@ -105,6 +105,9 @@ install_apt_packages() {
     done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)
     return 0
   fi
+  # Used only by the root-owned-target convergence check.  That check makes
+  # a deliberately minimal target tree, where apt cannot run.
+  [ -n "${PALMIMO_SKIP_APT:-}" ] && return 0
 
   local missing="" pkg status
   while IFS= read -r pkg; do
@@ -191,6 +194,34 @@ repair_root_owned_paths() {
 
 # --- file installation -------------------------------------------------------
 
+target_account_id() {
+  local database="$1" name="$2" field="$3"
+  local value
+  value="$(awk -F: -v name="$name" -v field="$field" '$1 == name { print $field; exit }' \
+    "${ROOT%/}/etc/${database}" 2>/dev/null || true)"
+  [ -n "$value" ] || {
+    echo "install.sh: ${database} entry missing for ${name} under ${ROOT}" >&2
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
+target_uid() {
+  if [ "$ROOT" = "/" ]; then
+    printf '%s\n' "$1"
+  else
+    target_account_id passwd "$1" 3
+  fi
+}
+
+target_gid() {
+  if [ "$ROOT" = "/" ]; then
+    printf '%s\n' "$1"
+  else
+    target_account_id group "$1" 3
+  fi
+}
+
 install_owned_files() {
   while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
@@ -202,7 +233,8 @@ install_owned_files() {
     if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
       install -m "${mode}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
     else
-      install -m "${mode}" -o "${owner}" -g "${group}" "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
+      install -m "${mode}" -o "$(target_uid "$owner")" -g "$(target_gid "$group")" \
+        "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
     fi
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)
 }
@@ -219,7 +251,7 @@ install_managed_directories() {
     # extracted the bundle), not the manifest's.
     rsync -rlptD --delete "${FILES_DIR}/${path}/" "${ROOT%/}/${path}/"
     if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-      chown -R "${owner}:${group}" "${ROOT%/}/${path}"
+      chown -R "$(target_uid "$owner"):$(target_gid "$group")" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" managed-directories)
@@ -233,7 +265,7 @@ install_state_directories() {
     # PALMIMO_FAKE_ACCOUNTS mode asserts ownership intent instead of the
     # filesystem, so skip chown/chgrp on a name that would not resolve.
     if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-      chown "${owner}:${group}" "${ROOT%/}/${path}"
+      chown "$(target_uid "$owner"):$(target_gid "$group")" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
   done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" state-directories)
@@ -256,7 +288,7 @@ install_bundle_cache() {
   find "$tmp" -type f -exec chmod 0644 {} +
   chmod 0755 "$tmp/install.sh"
   if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && grep -q "^user:" "${ROOT%/}/etc/passwd" 2>/dev/null; then
-    chown -R user:user "$tmp"
+    chown -R "$(target_uid user):$(target_gid user)" "$tmp"
   fi
   if [ -d "$dest" ]; then
     rm -rf "${dest}.old"
@@ -383,7 +415,7 @@ PYEOF
   # later rewrites it after applying a bundle and needs to be able to
   # replace it, not just read it.
   if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && grep -q "^user:" "${ROOT%/}/etc/passwd" 2>/dev/null; then
-    chown user:user "$platform_dir/installed.json"
+    chown "$(target_uid user):$(target_gid user)" "$platform_dir/installed.json"
   fi
 }
 

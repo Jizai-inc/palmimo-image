@@ -178,14 +178,20 @@ palmimo-image commit `28fdabb` (which shipped `files/` via a non-root-preserving
 `rsync -a`). Those devices can only be fixed through this bundle, since a
 reflash is not an update path.
 
-Accepted risk: the shared `uv-cache` being writable by the `palmimo-app-sync`
-uid means a malicious app's own dependency install can poison cached wheels
-for a later sync of a different app.
+Portal moves each app's cache into its sync staging directory before starting
+`palmimo-app-sync@`; the unit never receives the shared cache directory. It
+also binds the shared `uv-python` directory read-only and cannot download an
+interpreter. Before sync, Portal obtains any interpreter required by the app,
+without executing the app's project code.
 
-An app whose `requires-python` the image's own Python doesn't satisfy gets one
-downloaded into the platform-owned `uv-python` directory — `uv`'s verified
-`python-build-standalone` build, tried only after the system interpreter
-misses — at roughly 50 MB of disk per distinct Python version installed.
+### Security model
+
+The platform installer is invoked through `sudo` from Portal and its staged
+bundle and cached `current/` copy are writable by `user`. This is not a
+privilege boundary: the shipped image deliberately gives `user` passwordless
+sudo for device administration. Portal must only stage a bundle whose archive
+and manifest have passed its release verification; a local process that can
+write those paths already has the same authority as `user`.
 
 `tools/build_platform_bundle.py` produces the release tarball
 deterministically (used by CI and available locally for the same output).
@@ -197,6 +203,18 @@ reaches devices. `tools/check_platform_version.py` enforces this: a PR-time
 CI job (`platform_version_guard`) checks it against the PR's base branch, and
 the release workflow checks it against the previous published release before
 attaching any asset.
+
+### Image release order
+
+For the v0.2.0 release, publish `palmimo-portal` v0.2.0 first. Then push the
+image v0.2.0 tag (with `PALMIMO_PORTAL_TAG=v0.2.0`): `release.yml` creates a
+draft release and attaches the platform bundle. Publish the draft, then
+publish `examples-v0.1.0`. Build the image and manually add its `.img.xz` to
+the already-published image release.
+
+Do not publish an image release manually before pushing its tag. The release
+workflow refuses to replace assets on a published release, so doing so leaves
+the platform bundle unattached.
 
 ## Licenses and corresponding source
 

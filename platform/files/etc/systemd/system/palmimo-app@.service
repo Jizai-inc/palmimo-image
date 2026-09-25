@@ -13,11 +13,6 @@ UMask=0002
 WorkingDirectory=/var/lib/palmimo/apps/%i
 EnvironmentFile=/run/palmimo/apps/%i/env
 Environment=PALMIMO_APP_ID=%i
-# A relocatable venv built from a managed (downloaded) Python has its
-# .venv/bin/python symlink -- and pyvenv.cfg's home= -- point at an
-# absolute path under UV_PYTHON_INSTALL_DIR (see palmimo-app-sync@.service
-# for where that download happens); this unit needs the same install dir
-# bind-mounted at the same absolute path for that symlink to resolve.
 Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 Environment=HOME=/var/lib/palmimo/apps/%i
 Environment=XDG_CACHE_HOME=/var/lib/palmimo/apps/%i/.cache
@@ -46,11 +41,8 @@ BindReadOnlyPaths=/var/lib/palmimo/uv-python
 TemporaryFileSystem=/run/palmimo:ro
 BindReadOnlyPaths=/run/palmimo/apps/%i
 BindPaths=/run/palmimo/locks
-# /proc: an app and a concurrently running palmimo-app-sync@ job share the
-# palmimo-app uid, so DAC alone would let either enumerate/inspect the
-# other's process via /proc -- these close that. See
-# palmimo-app-sync@.service for the uv-cache risk this does NOT cover.
-# ProtectProc hides other users' processes; /proc/cpuinfo stays visible because
+# ProtectProc does not hide same-uid processes; Portal does not sync while an
+# app runs. /proc/cpuinfo stays visible because
 # CPU-feature detection in ML runtimes (XNNPACK via mediapipe) reads it.
 ProtectProc=invisible
 

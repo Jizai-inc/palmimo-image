@@ -143,3 +143,32 @@ jobs:
           echo "/tmp/a: $hash_a"
           echo "/tmp/b: $hash_b"
           [ "$hash_a" = "$hash_b" ]
+
+      # A pi-gen target has its own account database.  This must run as root
+      # in the CI container because it verifies the numeric ownership written
+      # into a target whose user/group names do not exist on the runner.
+      - name: Target account IDs own the installed files
+        env:
+          PALMIMO_SKIP_APT: "1"
+        run: |
+          set -euo pipefail
+          target=/tmp/numeric-owners
+          mkdir -p "$target/etc"
+          cat >"$target/etc/passwd" <<'EOF'
+          root:x:0:0:root:/root:/bin/sh
+          user:x:1234:1234::/home/user:/bin/sh
+          palmimo-app:x:1236:1235::/nonexistent:/usr/sbin/nologin
+          EOF
+          cat >"$target/etc/group" <<'EOF'
+          root:x:0:
+          user:x:1234:user
+          palmimo-apps:x:1235:user,palmimo-app
+          systemd-journal:x:1237:
+          video:x:44:palmimo-app
+          audio:x:29:palmimo-app
+          dialout:x:20:palmimo-app
+          EOF
+          platform/install.sh install --root "$target"
+          [ "$(stat -c '%u:%g' "$target/var/lib/palmimo/apps")" = 1234:1235 ]
+          [ "$(stat -c '%u:%g' "$target/var/lib/palmimo/uv-cache")" = 1234:1235 ]
+          [ "$(stat -c '%u:%g' "$target/var/lib/palmimo/platform/current")" = 1234:1234 ]

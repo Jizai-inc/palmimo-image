@@ -90,7 +90,7 @@ def _purge(raw_path: str) -> int:
     return 0 if not target.exists() else 1
 
 
-def _sync(spec: dict) -> int:
+def _sync(spec: dict, name: str) -> int:
     project = Path(spec["project"])
     frozen = spec.get("frozen", True)
     relocatable = spec.get("relocatable", True)
@@ -104,6 +104,8 @@ def _sync(spec: dict) -> int:
     # downloaded 3.12. Pass the project's own requires-python explicitly to
     # both commands so ancestor files never apply to either.
     requires_python = _requires_python(project)
+    env = dict(os.environ)
+    env["UV_CACHE_DIR"] = str(STAGING_DIR / name / ".uv-cache")
 
     if not venv.exists():
         argv = ["uv", "venv"]
@@ -112,7 +114,7 @@ def _sync(spec: dict) -> int:
         if requires_python:
             argv += ["--python", requires_python]
         argv.append(str(venv))
-        rc = _run_uv(argv, requires_python=requires_python)
+        rc = _run_uv(argv, env=env, requires_python=requires_python)
         if rc != 0:
             return rc
 
@@ -128,7 +130,6 @@ def _sync(spec: dict) -> int:
     if frozen:
         argv.append("--frozen")
 
-    env = dict(os.environ)
     env["UV_PROJECT_ENVIRONMENT"] = str(venv)
     rc = _run_uv(argv, env=env, requires_python=requires_python)
     if rc != 0:
@@ -157,7 +158,7 @@ def main() -> int:
 
     if "purge" in spec:
         return _purge(spec["purge"])
-    return _sync(spec)
+    return _sync(spec, name)
 
 
 if __name__ == "__main__":

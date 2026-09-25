@@ -57,12 +57,8 @@ jobs:
           # (set -e), not read as "no previous release". --paginate emits
           # one result per page (newest page first), so keep the first line;
           # sed reads to EOF so gh never sees a closed pipe under pipefail.
-          prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '
-            [.[] | select(.draft == false and .prerelease == false and .tag_name != env.TAG)]
-            | sort_by(.published_at) | reverse
-            | map(select(.assets | any(.name == ("palmimo-platform-" + .tag_name + ".tar.gz"))))
-            | .[0].tag_name // empty
-          ' | sed -n '1p')"
+          prev_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq "$(cat .github/scripts/previous-platform-release.jq)" | sed -n '1p')"
           if [ -z "$prev_tag" ]; then
             echo "no previous published release with a platform bundle asset found; skipping the platform version guard"
             exit 0

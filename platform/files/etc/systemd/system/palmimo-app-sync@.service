@@ -18,15 +18,8 @@ Environment=XDG_DATA_HOME=/var/lib/palmimo/apps/.staging/%i/.local/share
 # the rename to its final apps/<id> path after sync then leaves every
 # console script raising ModuleNotFoundError. Belt-and-braces with
 # app-sync's own --no-editable flag.
-Environment=UV_CACHE_DIR=/var/lib/palmimo/uv-cache UV_LINK_MODE=copy UV_NO_EDITABLE=1
-# The image ships one Python (3.13); an app's requires-python can name a
-# version it lacks (e.g. 3.12). UV_PYTHON_PREFERENCE=system tries the
-# system interpreter first; only on a miss does uv download its verified
-# python-build-standalone build into UV_PYTHON_INSTALL_DIR -- a
-# platform-owned path independent of this unit's own STAGING working
-# directory, so the venv's interpreter symlink still resolves after the
-# Portal renames the directory to its final apps/<id> path.
-Environment=UV_PYTHON_DOWNLOADS=automatic UV_PYTHON_PREFERENCE=system
+Environment=UV_CACHE_DIR=/var/lib/palmimo/apps/.staging/%i/.uv-cache UV_LINK_MODE=copy UV_NO_EDITABLE=1
+Environment=UV_PYTHON_DOWNLOADS=never UV_PYTHON_PREFERENCE=only-system
 Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 ExecStart=/usr/lib/palmimo/app-sync %i
 TimeoutStartSec=1800
@@ -42,15 +35,11 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 TemporaryFileSystem=/var/lib/palmimo:ro
 BindPaths=/var/lib/palmimo/apps/.staging/%i
-BindPaths=/var/lib/palmimo/uv-cache
-BindPaths=/var/lib/palmimo/uv-python
+BindReadOnlyPaths=/var/lib/palmimo/uv-python
 # .trash: apps create 0700 dirs as uid palmimo-app that the Portal's own
 # uid cannot delete -- the Portal drives this unit to purge them (see
 # app-sync's "purge" request handling) after moving them here.
 BindPaths=/var/lib/palmimo/apps/.trash
-# /proc: this unit and a running app share the palmimo-app uid, so DAC
-# alone would let either enumerate/inspect the other's process via /proc --
-# these close that. Accepted risk this does NOT cover: the shared uv-cache
-# being writable by this unit's uid means a malicious app's own dependency
-# install can poison cached wheels for a later sync of a different app.
+# ProtectProc only hides processes owned by other users. Portal prevents sync
+# while an app is running, because these units share the palmimo-app uid.
 ProtectProc=invisible
