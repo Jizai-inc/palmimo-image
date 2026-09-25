@@ -401,6 +401,8 @@ def test_app_sync_unit_uses_a_staging_cache_and_never_downloads_python() -> None
     env_blob = " ".join(app_sync.get("Environment", []))
     assert "UV_CACHE_DIR=/var/lib/palmimo/apps/.staging/%i/.uv-cache" in env_blob
     assert "UV_PYTHON_DOWNLOADS=never" in env_blob
+    # The Portal-installed interpreters in UV_PYTHON_INSTALL_DIR are managed ones.
+    assert "UV_PYTHON_PREFERENCE=only-system" not in env_blob
     assert "/var/lib/palmimo/uv-cache" not in app_sync.get("BindPaths", [])
 
 
@@ -677,7 +679,14 @@ def test_app_launch_exits_78_with_one_stderr_line_when_venv_is_missing(tmp_path:
     assert len(result.stderr.splitlines()) == 1
 
 
-def test_app_launch_execs_uv_run_with_the_portal_selected_python(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("python_field", "expected_python_args"),
+    [({"python": ">=3.12"}, "--python >=3.12 "), ({"python": None}, ""), ({}, "")],
+    ids=["requires_python", "null", "absent"],
+)
+def test_app_launch_execs_uv_run_with_the_portal_selected_python(
+    tmp_path: Path, python_field: dict[str, str | None], expected_python_args: str
+) -> None:
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     uv_log = tmp_path / "uv.log"
@@ -690,7 +699,7 @@ def test_app_launch_execs_uv_run_with_the_portal_selected_python(tmp_path: Path)
     (project_dir / ".venv" / "bin" / "python").touch()
     (run_dir / "myapp").mkdir(parents=True)
     (run_dir / "myapp" / "argv.json").write_text(
-        json.dumps({"argv": ["myapp", "--foo"], "project": str(project_dir), "python": ">=3.12"}),
+        json.dumps({"argv": ["myapp", "--foo"], "project": str(project_dir), **python_field}),
         encoding="utf-8",
     )
 
@@ -707,7 +716,7 @@ def test_app_launch_execs_uv_run_with_the_portal_selected_python(tmp_path: Path)
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    assert logged == [f"run --frozen --no-sync --project {project_dir} --python >=3.12 -- myapp --foo"]
+    assert logged == [f"run --frozen --no-sync --project {project_dir} {expected_python_args}-- myapp --foo"]
 
 
 def test_previous_release_filter_selects_a_release_using_its_own_tag_name(tmp_path: Path) -> None:

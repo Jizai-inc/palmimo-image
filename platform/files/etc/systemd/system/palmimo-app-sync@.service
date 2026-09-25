@@ -19,7 +19,11 @@ Environment=XDG_DATA_HOME=/var/lib/palmimo/apps/.staging/%i/.local/share
 # console script raising ModuleNotFoundError. Belt-and-braces with
 # app-sync's own --no-editable flag.
 Environment=UV_CACHE_DIR=/var/lib/palmimo/apps/.staging/%i/.uv-cache UV_LINK_MODE=copy UV_NO_EDITABLE=1
-Environment=UV_PYTHON_DOWNLOADS=never UV_PYTHON_PREFERENCE=only-system
+# The Portal installs any interpreter the system lacks into
+# UV_PYTHON_INSTALL_DIR before this unit starts (read-only here), so the sync
+# must be able to pick a managed interpreter: "system" prefers the system
+# Python and falls back to managed ones; "only-system" would never use them.
+Environment=UV_PYTHON_DOWNLOADS=never UV_PYTHON_PREFERENCE=system
 Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
 ExecStart=/usr/lib/palmimo/app-sync %i
 TimeoutStartSec=1800
