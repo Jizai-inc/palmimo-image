@@ -36,7 +36,7 @@ def main() -> int:
 
     project = spec["project"]
     argv = spec["argv"]
-    python = spec.get("python")
+    python = spec.get("python") or sys.executable
     cwd = spec.get("cwd")
 
     # 78 (EX_CONFIG) is a distinct exit code the Portal maps to a
@@ -48,9 +48,7 @@ def main() -> int:
     if cwd:
         os.chdir(cwd)
 
-    # An app without requires-python gets no --python, the same as the sync.
-    python_args = ["--python", python] if python else []
-    os.execvp("uv", ["uv", "run", "--frozen", "--no-sync", "--project", project, *python_args, "--", *argv])
+    os.execvp("uv", ["uv", "run", "--frozen", "--no-sync", "--project", project, "--python", python, "--", *argv])
     return 1  # unreachable: execvp only returns on failure, which raises
 
 

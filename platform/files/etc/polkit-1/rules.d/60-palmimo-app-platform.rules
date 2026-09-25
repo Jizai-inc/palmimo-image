@@ -16,7 +16,7 @@ polkit.addRule(function (action, subject) {
         return polkit.Result.NOT_HANDLED;
     }
     var verb = action.lookup("verb");
-    if (verb === "start" || verb === "stop" || verb === "restart" || verb === "set-property") {
+    if (verb === "start" || verb === "stop" || verb === "restart" || verb === "reset-failed" || verb === "set-property") {
         return polkit.Result.YES;
     }
     return polkit.Result.NOT_HANDLED;

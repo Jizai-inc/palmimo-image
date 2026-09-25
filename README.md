@@ -212,6 +212,10 @@ draft release and attaches the platform bundle. Publish the draft, then
 publish `examples-v0.1.0`. Build the image and manually add its `.img.xz` to
 the already-published image release.
 
+Between publishing Portal v0.2.0 and the image release, Portal can report that
+the newest platform bundle is unavailable; this is expected until the image
+release publishes its platform asset.
+
 Do not publish an image release manually before pushing its tag. The release
 workflow refuses to replace assets on a published release, so doing so leaves
 the platform bundle unattached.

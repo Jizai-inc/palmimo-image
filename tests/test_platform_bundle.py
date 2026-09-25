@@ -141,6 +141,22 @@ def test_verify_reports_a_diff_when_an_owned_file_is_removed(installed_root: tup
     )
 
 
+def test_verify_reports_a_diff_when_a_managed_helper_loses_its_exec_bit(
+    installed_root: tuple[Path, Path, Path],
+) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    helper = root / "usr" / "lib" / "palmimo" / "app-launch"
+    helper.chmod(0o644)
+
+    result = _run_install(root, fake_accounts, Path(), command="verify")
+
+    assert result.returncode != 0
+    diffs = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(
+        d == {"kind": "mode", "path": "usr/lib/palmimo/app-launch", "expected": "0755", "actual": "0644"} for d in diffs
+    )
+
+
 def test_verify_reports_a_diff_when_a_retired_path_is_present(tmp_path: Path) -> None:
     # verify_platform.verify() takes the manifest as data, so this exercises
     # the retired-path check without needing a real v(N-1) -> v1 bundle
@@ -469,7 +485,9 @@ def test_app_sync_helper_builds_expected_uv_sync_argv(
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    expected_sync = f"sync --project {project_dir} --no-editable {expected_sync_argv_tail}".rstrip()
+    expected_sync = (
+        f"sync --project {project_dir} --no-editable --python {sys.executable} {expected_sync_argv_tail}".rstrip()
+    )
     assert logged == [expected_sync, "cache prune"]
 
 
@@ -506,7 +524,7 @@ def test_app_sync_helper_ignores_an_unrecognized_sync_json_key(tmp_path: Path) -
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    assert logged == [f"sync --project {project_dir} --no-editable --frozen", "cache prune"]
+    assert logged == [f"sync --project {project_dir} --no-editable --python {sys.executable} --frozen", "cache prune"]
 
 
 def test_app_sync_helper_uses_only_its_staging_cache(tmp_path: Path) -> None:
@@ -538,8 +556,8 @@ def test_app_sync_helper_uses_only_its_staging_cache(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     cache = staging_dir / "myapp" / ".uv-cache"
     assert uv_log.read_text(encoding="utf-8").splitlines() == [
-        f"{cache}|venv --relocatable {project_dir / '.venv'}",
-        f"{cache}|sync --project {project_dir} --no-editable --frozen",
+        f"{cache}|venv --relocatable --python {sys.executable} {project_dir / '.venv'}",
+        f"{cache}|sync --project {project_dir} --no-editable --python {sys.executable} --frozen",
         f"{cache}|cache prune",
     ]
 
@@ -548,7 +566,7 @@ def test_app_sync_helper_uses_only_its_staging_cache(tmp_path: Path) -> None:
     "requires_python, expected_venv_argv_tail, expected_sync_argv_tail",
     [
         (">=3.12", "--relocatable --python >=3.12", "--no-editable --python >=3.12 --frozen"),
-        (None, "--relocatable", "--no-editable --frozen"),
+        (None, f"--relocatable --python {sys.executable}", f"--no-editable --python {sys.executable} --frozen"),
     ],
     ids=["with_requires_python", "without_requires_python"],
 )
@@ -596,7 +614,14 @@ def test_app_sync_helper_passes_requires_python_to_uv_venv_and_uv_sync(
     assert logged[1] == f"sync --project {project_dir} {expected_sync_argv_tail}"
 
 
-def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("requires_python", "expected_python"),
+    [(">=3.12", ">=3.12"), (None, sys.executable)],
+    ids=["with_requires_python", "without_requires_python"],
+)
+def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_file(
+    tmp_path: Path, requires_python: str | None, expected_python: str
+) -> None:
     # Regression: `uv venv` walks up from the project directory looking for
     # a `.python-version` file -- and `uv sync` repeats that same ancestor
     # discovery independently of `uv venv` (seen on a device: `uv venv
@@ -617,9 +642,10 @@ def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_f
     (monorepo / ".python-version").write_text("3.999\n", encoding="utf-8")
     project_dir = monorepo / "examples" / "myapp"
     project_dir.mkdir(parents=True)
-    (project_dir / "pyproject.toml").write_text(
-        '[project]\nname = "myapp"\nrequires-python = ">=3.12"\n', encoding="utf-8"
-    )
+    pyproject = '[project]\nname = "myapp"\n'
+    if requires_python is not None:
+        pyproject += f'requires-python = "{requires_python}"\n'
+    (project_dir / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     staging_dir = tmp_path / "staging"
     (staging_dir / "myapp").mkdir(parents=True)
     (staging_dir / "myapp" / "sync.json").write_text(
@@ -640,8 +666,31 @@ def test_app_sync_helper_venv_argv_is_unaffected_by_an_ancestor_python_version_f
 
     assert result.returncode == 0, result.stdout + result.stderr
     logged = uv_log.read_text(encoding="utf-8").splitlines()
-    assert logged[0] == f"venv --relocatable --python >=3.12 {project_dir / '.venv'}"
-    assert logged[1] == f"sync --project {project_dir} --no-editable --python >=3.12 --frozen"
+    assert logged[0] == f"venv --relocatable --python {expected_python} {project_dir / '.venv'}"
+    assert logged[1] == f"sync --project {project_dir} --no-editable --python {expected_python} --frozen"
+
+
+def test_app_sync_helper_suggests_requires_python_when_the_system_interpreter_is_unavailable(tmp_path: Path) -> None:
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    (stub_dir / "uv").write_text('#!/bin/sh\necho "No interpreter found" >&2\nexit 1\n', encoding="utf-8")
+    (stub_dir / "uv").chmod(0o755)
+    staging_dir = tmp_path / "staging"
+    project_dir = tmp_path / "apps" / "myapp"
+    project_dir.mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "myapp"\n', encoding="utf-8")
+    (staging_dir / "myapp").mkdir(parents=True)
+    (staging_dir / "myapp" / "sync.json").write_text(json.dumps({"project": str(project_dir)}), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={"PATH": f"{stub_dir}:/usr/bin:/bin", "PALMIMO_STAGING_DIR": str(staging_dir)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "add project.requires-python to pyproject.toml" in result.stderr
 
 
 def test_app_sync_helper_refuses_to_purge_a_path_outside_the_allowed_roots(tmp_path: Path) -> None:
@@ -691,7 +740,11 @@ def test_app_launch_exits_78_with_one_stderr_line_when_venv_is_missing(tmp_path:
 
 @pytest.mark.parametrize(
     ("python_field", "expected_python_args"),
-    [({"python": ">=3.12"}, "--python >=3.12 "), ({"python": None}, ""), ({}, "")],
+    [
+        ({"python": ">=3.12"}, "--python >=3.12 "),
+        ({"python": None}, f"--python {sys.executable} "),
+        ({}, f"--python {sys.executable} "),
+    ],
     ids=["requires_python", "null", "absent"],
 )
 def test_app_launch_execs_uv_run_with_the_portal_selected_python(
@@ -1120,6 +1173,10 @@ def _polkit_unit_regexes() -> tuple[str, str]:
     return app.group(1), sync.group(1)
 
 
+def _polkit_allowed_verbs() -> set[str]:
+    return set(re.findall(r'verb === "([^"]+)"', POLKIT_RULES.read_text(encoding="utf-8")))
+
+
 @pytest.mark.parametrize(
     "unit, expect_allowed",
     [
@@ -1138,6 +1195,21 @@ def test_polkit_rules_grant_only_the_intended_unit_names(unit: str, expect_allow
     app_regex, sync_regex = _polkit_unit_regexes()
     allowed = bool(re.fullmatch(app_regex, unit)) or bool(re.fullmatch(sync_regex, unit))
     assert allowed is expect_allowed
+
+
+@pytest.mark.parametrize(
+    ("verb", "expect_allowed"),
+    [
+        ("start", True),
+        ("stop", True),
+        ("restart", True),
+        ("reset-failed", True),
+        ("set-property", True),
+        ("reload", False),
+    ],
+)
+def test_polkit_rules_grant_only_the_intended_unit_verbs(verb: str, expect_allowed: bool) -> None:
+    assert (verb in _polkit_allowed_verbs()) is expect_allowed
 
 
 @pytest.mark.skipif(shutil.which("dpkg-query") is None, reason="dpkg-query not installed")

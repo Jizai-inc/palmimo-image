@@ -60,11 +60,15 @@ def _run_uv(argv: list[str], *, env: dict[str, str] | None = None, requires_pyth
     result = subprocess.run(argv, env=env, capture_output=True, text=True)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
-    if result.returncode != 0 and "No interpreter found" in result.stderr and requires_python:
+    if result.returncode != 0 and "No interpreter found" in result.stderr:
         # The Portal only shows the stderr tail; name the requirement so
         # the last line is actionable on its own.
         print(
-            f"app-sync: no system Python satisfies requires-python {requires_python!r}",
+            (
+                f"app-sync: no system Python satisfies requires-python {requires_python!r}"
+                if requires_python
+                else "app-sync: add project.requires-python to pyproject.toml to select an installed Python"
+            ),
             file=sys.stderr,
         )
     return result.returncode
@@ -102,8 +106,10 @@ def _sync(spec: dict, name: str) -> int:
     # --python ">=3.12"` picked the system 3.13, then `uv sync` found an
     # ancestor `.python-version` pinning 3.12 and recreated the venv with a
     # downloaded 3.12. Pass the project's own requires-python explicitly to
-    # both commands so ancestor files never apply to either.
+    # both commands so ancestor files never apply to either. An app that
+    # omits the field uses the helper's system interpreter explicitly.
     requires_python = _requires_python(project)
+    python = requires_python or sys.executable
     env = dict(os.environ)
     env["UV_CACHE_DIR"] = str(STAGING_DIR / name / ".uv-cache")
 
@@ -111,8 +117,7 @@ def _sync(spec: dict, name: str) -> int:
         argv = ["uv", "venv"]
         if relocatable:
             argv.append("--relocatable")
-        if requires_python:
-            argv += ["--python", requires_python]
+        argv += ["--python", python]
         argv.append(str(venv))
         rc = _run_uv(argv, env=env, requires_python=requires_python)
         if rc != 0:
@@ -123,8 +128,7 @@ def _sync(spec: dict, name: str) -> int:
     # breaks every console script once the Portal renames the directory to
     # its final apps/<id> path after sync.
     argv = ["uv", "sync", "--project", str(project), "--no-editable"]
-    if requires_python:
-        argv += ["--python", requires_python]
+    argv += ["--python", python]
     # uv has no --no-frozen flag -- --frozen is the only way to name this
     # choice explicitly, and its absence already means "resolve normally".
     if frozen:

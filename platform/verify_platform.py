@@ -70,9 +70,12 @@ def _check_managed_directory_tree(
     for rel_file in sorted(dst_files - src_files):
         diffs.append(_diff("unexpected", f"{rel_dir}/{rel_file}"))
     for rel_file in sorted(src_files & dst_files):
+        src_file = src_dir / rel_file
         dst_file = dst_dir / rel_file
-        if _sha256(dst_file) != _sha256(src_dir / rel_file):
+        if _sha256(dst_file) != _sha256(src_file):
             diffs.append(_diff("content", f"{rel_dir}/{rel_file}"))
+        if src_file.stat().st_mode & stat.S_IXUSR and _mode(dst_file) != _mode(src_file):
+            diffs.append(_diff("mode", f"{rel_dir}/{rel_file}", expected=_mode(src_file), actual=_mode(dst_file)))
         # A managed directory has no per-file manifest entries, so a file
         # inside it is expected to carry the owning directory's owner/group.
         diffs.extend(_check_owner_group(f"{rel_dir}/{rel_file}", dst_file, entry, fake_lines))
