@@ -26,6 +26,7 @@ include = [
     "tools/**/*.py",
     "lib/**/*.py",
     "tests/**/*.py",
+    "platform/**/*.py",
 ]
 exclude = [
     ".venv",
@@ -87,6 +88,7 @@ files = [
     "tools/",
     "lib/",
     "tests/",
+    "platform/",
 ]
 exclude = [
     "\\.venv",

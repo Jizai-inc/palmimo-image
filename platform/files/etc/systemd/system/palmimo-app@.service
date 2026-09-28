@@ -1,0 +1,52 @@
+[Unit]
+Description=Palmimo app %i
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=palmimo-app
+Group=palmimo-apps
+SupplementaryGroups=video audio dialout
+UMask=0002
+WorkingDirectory=/var/lib/palmimo/apps/%i
+EnvironmentFile=/run/palmimo/apps/%i/env
+Environment=PALMIMO_APP_ID=%i
+Environment=UV_PYTHON_DOWNLOADS=never
+Environment=UV_PYTHON_INSTALL_DIR=/var/lib/palmimo/uv-python
+Environment=HOME=/var/lib/palmimo/apps/%i
+Environment=XDG_CACHE_HOME=/var/lib/palmimo/apps/%i/.cache
+Environment=XDG_CONFIG_HOME=/var/lib/palmimo/apps/%i/.config
+Environment=XDG_DATA_HOME=/var/lib/palmimo/apps/%i/.local/share
+ExecStart=/usr/lib/palmimo/app-launch %i
+Restart=no
+# `uv run` stays the unit's main process and exits 128+15 when a stop sends
+# SIGTERM, which systemd would record as a failed run. A requested stop is clean.
+SuccessExitStatus=143
+KillMode=control-group
+TimeoutStopSec=15
+# The app is untrusted and shares the CPU with the Portal; a fork bomb must
+# not be able to starve the device of PIDs. No MemoryMax: device RAM varies.
+TasksMax=1024
+
+# Filesystem: nothing but the app's own directory and the bind-mounted run
+# directory is writable or even visible.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+TemporaryFileSystem=/var/lib/palmimo:ro
+BindPaths=/var/lib/palmimo/apps/%i
+BindReadOnlyPaths=/var/lib/palmimo/uv-python
+TemporaryFileSystem=/run/palmimo:ro
+BindReadOnlyPaths=/run/palmimo/apps/%i
+BindPaths=/run/palmimo/locks
+# ProtectProc does not hide same-uid processes; Portal does not sync while an
+# app runs. /proc/cpuinfo stays visible because
+# CPU-feature detection in ML runtimes (XNNPACK via mediapipe) reads it.
+ProtectProc=invisible
+
+# Devices: closed by default. Portal adds the declared device classes at
+# start time via a runtime set-property (see the app-manifest devices field).
+DevicePolicy=closed

@@ -409,13 +409,36 @@ def test_apply_pi_sh_unmasks_comitup_web_and_does_not_mask_it() -> None:
 def test_packages_txt_is_the_one_list_apply_pi_sh_references() -> None:
     packages_text = _text(PACKAGES_TXT)
     packages = [line.strip() for line in packages_text.splitlines() if line.strip()]
-    assert packages == ["comitup", "avahi-daemon", "git", "dnsmasq"]
+    assert packages == [
+        "comitup",
+        "avahi-daemon",
+        "git",
+        "dnsmasq",
+        "libgl1",
+        "libglib2.0-0t64",
+        "libportaudio2",
+        "v4l-utils",
+    ]
 
     apply_text = _text(APPLY_SCRIPT)
     assert 'PACKAGES_FILE="${IMAGE_DIR}/packages.txt"' in apply_text
     assert "$PACKAGES_FILE" in apply_text
     # No inline apt package list left over in apply-pi.sh.
     assert "apt-get install -y comitup" not in apply_text
+
+
+def test_packages_txt_covers_every_platform_manifest_apt_package() -> None:
+    # The platform bundle's own apt install (install.sh install_apt_packages)
+    # runs `chroot ROOTFS apt-get` against a raw pi-gen chroot with no
+    # running init -- fragile compared to pi-gen's own on_chroot apt
+    # machinery. Listing these packages here too means pi-gen's 00-packages
+    # stage installs them during the image build, and install.sh's
+    # dpkg-query check finds them already present and skips its own
+    # chroot apt-get for every one of them.
+    packages = {line.strip() for line in _text(PACKAGES_TXT).splitlines() if line.strip()}
+    manifest = json.loads(_text(IMAGE_DIR / "platform" / "manifest.json"))
+    apt_packages = set(manifest["owns"]["apt_packages"])
+    assert apt_packages <= packages, apt_packages - packages
 
 
 # ---------------------------------------------------------------------------

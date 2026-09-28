@@ -571,6 +571,15 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
   （実装は sed 置換への直接埋め込みも避け、リテラルとして扱う——両対策とも
   同じレビュー指摘への対応）
 
+## 実機基盤バンドル（platform/、2026-09-14 実装）
+
+アプリ実行基盤（`palmimo-app` ユーザー、unit テンプレート、`app-launch`、
+tmpfiles、polkit、journald 永続化）の設計・不変条件は
+[palmimo-app-platform.md](https://github.com/Jizai-inc/mi-mo-devkit-pre/blob/main/doc/design/palmimo-app-platform.md)
+第 2 章（palmimo-devkit monorepo、非公開）に一本化されている。本リポジトリは
+その実装（`platform/`、`pigen/stage-palmimo/05-app-platform/`、
+`.github/workflows/release.yml`）を持つだけで、設計根拠はここには書かない。
+
 ## 未決（実装前に確定するもの）
 
 - polkit の comitup 許可が実際に必要か（T9 では user 権限で D-Bus 呼び出しが
