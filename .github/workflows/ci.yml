@@ -144,7 +144,7 @@ jobs:
           echo "/tmp/b: $hash_b"
           [ "$hash_a" = "$hash_b" ]
 
-      # A pi-gen target has its own account database.  This must run as root
+      # An offline target root has its own account database.  This must run as root
       # in the CI container because it verifies the numeric ownership written
       # into a target whose user/group names do not exist on the runner.
       - name: Target account IDs own the installed files

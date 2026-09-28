@@ -83,10 +83,8 @@ _apt_root_run() {
   if [ "${ROOT}" = "/" ]; then
     "$@"
   else
-    # pi-gen builds call `install --root ROOTFS_DIR` against a chroot
-    # rootfs that has no running init of its own -- apt-get must target
-    # that chroot, the same way pi-gen's own on_chroot helper runs apt-get
-    # for every other package in this image (pigen/stage-palmimo/*/00-run.sh).
+    # An offline target root has no running init of its own -- apt-get
+    # must run inside it.
     chroot "${ROOT%/}" "$@"
   fi
 }
