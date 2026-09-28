@@ -70,7 +70,7 @@ the Docker build (streamed to stdout and to `pigen/.workspace/build.log`),
 then copy the resulting `.img.xz` into `dist/` and print its sha256.
 
 Useful flags: `--portal-tag` (which palmimo-portal tag to bake in, default
-`v0.1.6`), `--pigen-ref` (pin override for one-off builds), `--dry-run`
+`v0.2.0`), `--pigen-ref` (pin override for one-off builds), `--dry-run`
 (print the plan, touch nothing), `--clean` (wipe the pi-gen workspace).
 
 Requires an arm64 Docker host (Docker Desktop on Apple Silicon works). The
@@ -125,9 +125,9 @@ trixie) machine over SSH. **Not used in the shipping path** — shipping
 always goes through image build + flash.
 
 ```bash
-PI_HOST=user@<addr> PORTAL_TAG=v0.1.6 apply-pi.sh
-PI_HOST=user@<addr> PORTAL_TAG=v0.1.6 apply-pi.sh --identity ./palmimo-identity.json
-PI_HOST=user@<addr> PORTAL_TAG=v0.1.6 apply-pi.sh --no-apt   # faster re-run once apt is done
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.0 apply-pi.sh
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.0 apply-pi.sh --identity ./palmimo-identity.json
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.0 apply-pi.sh --no-apt   # faster re-run once apt is done
 ```
 
 Generate a test identity file:

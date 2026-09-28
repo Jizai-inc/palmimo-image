@@ -99,10 +99,12 @@ install_apt_packages() {
   # libraries an app's own dependencies need (e.g. opencv-python's
   # libGL/libglib) can only reach a field device through this bundle.
   if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+    local rows
+    rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)"
     while IFS= read -r pkg; do
       [ -n "$pkg" ] || continue
       record_account_intent "apt-get install ${pkg}"
-    done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)
+    done <<< "$rows"
     return 0
   fi
   # Used only by the root-owned-target convergence check.  That check makes
@@ -110,6 +112,8 @@ install_apt_packages() {
   [ -n "${PALMIMO_SKIP_APT:-}" ] && return 0
 
   local missing="" pkg status
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)"
   while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
     # shellcheck disable=SC2016  # dpkg-query's own format string, not shell expansion
@@ -118,7 +122,7 @@ install_apt_packages() {
       *"install ok installed"*) ;;
       *) missing="${missing}${missing:+ }${pkg}" ;;
     esac
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)
+  done <<< "$rows"
 
   [ -n "$missing" ] || return 0
 
@@ -168,6 +172,8 @@ add_user_to_group() {
 # run (see doc/design/palmimo-app-platform.md 2.8), so the platform bundle
 # -- the only update vehicle those devices have -- repairs it here.
 repair_root_owned_paths() {
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" repair-root-owned)"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     local target
@@ -189,7 +195,7 @@ repair_root_owned_paths() {
       log "repaired ownership: ${path}"
     fi
     chmod g-w,o-w "$target"
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" repair-root-owned)
+  done <<< "$rows"
 }
 
 # --- file installation -------------------------------------------------------
@@ -223,6 +229,8 @@ target_gid() {
 }
 
 install_owned_files() {
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)"
   while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
     # mkdir -p first rather than relying on GNU install's -D: BSD install
@@ -243,10 +251,12 @@ install_owned_files() {
       install -m "${mode}" -o "$uid" -g "$gid" \
         "${FILES_DIR}/${path}" "${ROOT%/}/${path}"
     fi
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)
+  done <<< "$rows"
 }
 
 install_managed_directories() {
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" managed-directories)"
   while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
     mkdir -p "${ROOT%/}/${path}"
@@ -264,10 +274,12 @@ install_managed_directories() {
       chown -R "${uid}:${gid}" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" managed-directories)
+  done <<< "$rows"
 }
 
 install_state_directories() {
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" state-directories)"
   while IFS=$'\t' read -r path mode owner group; do
     [ -n "$path" ] || continue
     mkdir -p "${ROOT%/}/${path}"
@@ -281,7 +293,7 @@ install_state_directories() {
       chown "${uid}:${gid}" "${ROOT%/}/${path}"
     fi
     chmod "${mode}" "${ROOT%/}/${path}"
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" state-directories)
+  done <<< "$rows"
 }
 
 install_bundle_cache() {
@@ -315,10 +327,12 @@ install_bundle_cache() {
 }
 
 remove_retired_paths() {
+  local rows
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" retired)"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     rm -rf "${ROOT%/}/${path:?}"
-  done < <(python3 "${MANIFEST_TOOL}" "${MANIFEST}" retired)
+  done <<< "$rows"
 }
 
 install_uv() {

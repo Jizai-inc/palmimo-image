@@ -108,6 +108,31 @@ def test_install_twice_is_idempotent(installed_root: tuple[Path, Path, Path]) ->
     assert fake_accounts.read_text(encoding="utf-8") == fake_accounts_before
 
 
+def test_install_fails_when_the_manifest_cannot_be_read(tmp_path: Path) -> None:
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "python3"
+    shim.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    shim.chmod(0o755)
+    root = tmp_path / "root"
+    root.mkdir()
+    fake_accounts = tmp_path / "fake_accounts.txt"
+    fake_accounts.touch()
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "install", "--root", str(root)],
+        env={
+            "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/local/bin",
+            "PALMIMO_FAKE_ACCOUNTS": str(fake_accounts),
+            "PALMIMO_UV_SOURCE": str(_stub_uv(tmp_path)),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
 def test_verify_passes_after_install(installed_root: tuple[Path, Path, Path]) -> None:
     root, fake_accounts, _uv_source = installed_root
     result = _run_install(root, fake_accounts, Path(), command="verify")
