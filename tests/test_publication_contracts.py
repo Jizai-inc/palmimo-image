@@ -46,6 +46,9 @@ BANNED_CONTENT = [
     # A MAC address identifies one physical board, so it survives reimaging
     # and reassignment in a way an IP does not.
     r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}",
+    # The internal monorepo is private: a link into it is dead for every reader
+    # of this repository and names a repository that is not public.
+    r"(?i:jizai-inc/mi-mo-devkit-pre)",
 ]
 
 # Multi-byte encodings interleave ASCII with NUL bytes, so no byte-level
