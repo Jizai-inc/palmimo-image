@@ -575,8 +575,8 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 
 アプリ実行基盤（`palmimo-app` ユーザー、unit テンプレート、`app-launch`、
 tmpfiles、polkit、journald 永続化）の設計・不変条件は
-[palmimo-app-platform.md](https://github.com/Jizai-inc/mi-mo-devkit-pre/blob/main/doc/design/palmimo-app-platform.md)
-第 2 章（palmimo-devkit monorepo、非公開）に一本化されている。本リポジトリは
+内部設計文書 `palmimo-app-platform.md` の
+第 2 章（非公開）に一本化されている。本リポジトリは
 その実装（`platform/`、`pigen/stage-palmimo/05-app-platform/`、
 `.github/workflows/release.yml`）を持つだけで、設計根拠はここには書かない。
 

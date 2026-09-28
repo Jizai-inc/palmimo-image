@@ -151,9 +151,8 @@ shared libraries apps commonly need but cannot install for themselves
 (currently OpenGL and GLib, for `opencv-python`). It ships out-of-band from the SD
 image itself — as a tagged `palmimo-platform-<tag>.tar.gz` GitHub Release
 asset (`.github/workflows/release.yml`) — so existing devices can pick up
-platform changes without a reflash. See
-[palmimo-app-platform.md](https://github.com/Jizai-inc/mi-mo-devkit-pre/blob/main/doc/design/palmimo-app-platform.md)
-chapter 2 (palmimo-devkit monorepo) for the design; this repository only
+platform changes without a reflash. The design lives in an internal design
+document (`palmimo-app-platform.md`, chapter 2); this repository only
 implements it.
 
 Both consumers just call the bundle's own installer — no platform-specific
