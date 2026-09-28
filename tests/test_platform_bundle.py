@@ -760,17 +760,22 @@ def test_app_sync_helper_refuses_to_purge_a_path_outside_the_allowed_roots(tmp_p
     assert (outside_target / "sub" / "file").read_text(encoding="utf-8") == "keep me"
 
 
-def test_app_sync_helper_purges_a_tree_with_an_unreadable_subdirectory(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("layout", "mode"),
+    [("locked/file", 0o000), ("locked/sub/file", 0o555)],
+    ids=["unreadable-dir", "read-only-dir-with-subdir"],
+)
+def test_app_sync_helper_purges_a_tree_with_a_locked_directory(tmp_path: Path, layout: str, mode: int) -> None:
     if os.geteuid() == 0:
-        pytest.skip("root can remove unreadable directories without exercising the retry")
+        pytest.skip("root can remove locked directories without exercising the retry")
 
     staging_dir = tmp_path / "apps" / ".staging"
     (staging_dir / "myapp").mkdir(parents=True)
     target = tmp_path / "apps" / ".trash" / "myapp"
-    unreadable = target / "unreadable"
-    unreadable.mkdir(parents=True)
-    (unreadable / "file").write_text("remove me", encoding="utf-8")
-    unreadable.chmod(0o000)
+    leaf = target / layout
+    leaf.parent.mkdir(parents=True)
+    leaf.write_text("remove me", encoding="utf-8")
+    (target / "locked").chmod(mode)
     (staging_dir / "myapp" / "sync.json").write_text(json.dumps({"purge": str(target)}), encoding="utf-8")
 
     result = subprocess.run(

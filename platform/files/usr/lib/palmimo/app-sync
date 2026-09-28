@@ -73,16 +73,24 @@ def _run_uv(argv: list[str], *, env: dict[str, str] | None = None, requires_pyth
     return result.returncode
 
 
-def _chmod_and_retry(_: object, path: str, __: object) -> None:
+_RETRIED: set[str] = set()
+
+
+def _chmod_and_retry(_: object, path: str, exc_info: tuple[type, BaseException, object]) -> None:
+    # A path that still fails after its own and its parent's chmod cannot be fixed by a
+    # further retry; re-raising ends the walk instead of recursing on the same path.
+    if path in _RETRIED:
+        raise exc_info[1]
+    _RETRIED.add(path)
     target = Path(path)
     try:
+        os.chmod(target.parent, 0o700)
         os.chmod(target, 0o700)
     except FileNotFoundError:
         return
     if target.is_dir():
         shutil.rmtree(target, onerror=_chmod_and_retry)
         return
-    os.chmod(target.parent, 0o700)
     try:
         target.unlink()
     except FileNotFoundError:
