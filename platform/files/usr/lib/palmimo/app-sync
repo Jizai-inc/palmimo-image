@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable
 from pathlib import Path
 
 
@@ -74,9 +73,20 @@ def _run_uv(argv: list[str], *, env: dict[str, str] | None = None, requires_pyth
     return result.returncode
 
 
-def _chmod_and_retry(func: Callable[[str], object], path: str, exc_info: object) -> None:
-    os.chmod(path, 0o700)
-    func(path)
+def _chmod_and_retry(_: object, path: str, __: object) -> None:
+    target = Path(path)
+    try:
+        os.chmod(target, 0o700)
+    except FileNotFoundError:
+        return
+    if target.is_dir():
+        shutil.rmtree(target, onerror=_chmod_and_retry)
+        return
+    os.chmod(target.parent, 0o700)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _purge(raw_path: str) -> int:

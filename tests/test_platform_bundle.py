@@ -760,6 +760,30 @@ def test_app_sync_helper_refuses_to_purge_a_path_outside_the_allowed_roots(tmp_p
     assert (outside_target / "sub" / "file").read_text(encoding="utf-8") == "keep me"
 
 
+def test_app_sync_helper_purges_a_tree_with_an_unreadable_subdirectory(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root can remove unreadable directories without exercising the retry")
+
+    staging_dir = tmp_path / "apps" / ".staging"
+    (staging_dir / "myapp").mkdir(parents=True)
+    target = tmp_path / "apps" / ".trash" / "myapp"
+    unreadable = target / "unreadable"
+    unreadable.mkdir(parents=True)
+    (unreadable / "file").write_text("remove me", encoding="utf-8")
+    unreadable.chmod(0o000)
+    (staging_dir / "myapp" / "sync.json").write_text(json.dumps({"purge": str(target)}), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(APP_SYNC_HELPER), "myapp"],
+        env={"PATH": "/usr/bin:/bin", "PALMIMO_STAGING_DIR": str(staging_dir)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
 # ---------------------------------------------------------------------------
 # app-launch: the Portal's needs_repair mapping (exit 78) and the exact uv
 # invocation it execs into
