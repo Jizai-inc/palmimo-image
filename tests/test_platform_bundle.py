@@ -384,6 +384,29 @@ def test_install_leaves_a_verifiable_bundle_cache(installed_root: tuple[Path, Pa
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_cached_verify_reports_a_diff_when_app_launch_loses_its_exec_bit(
+    installed_root: tuple[Path, Path, Path],
+) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    helper = root / "usr" / "lib" / "palmimo" / "app-launch"
+    helper.chmod(0o644)
+    cached_install_sh = root / "var" / "lib" / "palmimo" / "platform" / "current" / "install.sh"
+
+    result = subprocess.run(
+        ["bash", str(cached_install_sh), "verify", "--root", str(root)],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "PALMIMO_FAKE_ACCOUNTS": str(fake_accounts)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    diffs = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(
+        diff == {"kind": "mode", "path": "usr/lib/palmimo/app-launch", "expected": "0755", "actual": "0644"}
+        for diff in diffs
+    )
+
+
 # ---------------------------------------------------------------------------
 # .staging/.trash: the Portal (uid "user") needs group-write on these
 # parents so palmimo-app-owned entries under them (created/rmdir'd as

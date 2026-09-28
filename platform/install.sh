@@ -308,8 +308,6 @@ install_bundle_cache() {
     "${SCRIPT_DIR}/verify_platform.py" "$tmp/"
   cp -a "${FILES_DIR}" "$tmp/files"
   find "$tmp" -type d -exec chmod 0755 {} +
-  find "$tmp" -type f -exec chmod 0644 {} +
-  chmod 0755 "$tmp/install.sh"
   if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && grep -q "^user:" "${ROOT%/}/etc/passwd" 2>/dev/null; then
     local uid gid
     uid="$(target_uid user)" || exit 1
