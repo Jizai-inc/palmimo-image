@@ -205,15 +205,22 @@ attaching any asset.
 
 ### Image release order
 
-For the v0.2.0 release, publish `palmimo-portal` v0.2.0 first. Then push the
-image v0.2.0 tag (with `PALMIMO_PORTAL_TAG=v0.2.0`): `release.yml` creates a
-draft release and attaches the platform bundle. Publish the draft, then
-publish `examples-v0.1.0`. Build the image and manually add its `.img.xz` to
-the already-published image release.
+Publish the `palmimo-portal` release that `pigen/config`'s
+`PALMIMO_PORTAL_TAG` and `platform/manifest.json`'s `requires_portal` name
+first. Then push the image tag: `release.yml` creates a draft release and
+attaches the platform bundle. Publish the draft. When the release comes with
+a new official-app catalog, publish its `examples-v*` release in
+palmimo-devkit after that.
 
-Between publishing Portal v0.2.0 and the image release, Portal can report that
-the newest platform bundle is unavailable; this is expected until the image
-release publishes its platform asset.
+A release carries only the platform bundle. The SD image itself is not
+attached: it is built from the release tag with `tools/make_image.py` (see
+[Build an image](#1-build-an-image)) by whoever flashes units. With its
+corresponding source collected, it exceeds GitHub's 2 GiB limit per release
+asset.
+
+Between publishing the Portal release and the image release, Portal can
+report that the newest platform bundle is unavailable; this is expected until
+the image release publishes its platform asset.
 
 Do not publish an image release manually before pushing its tag. The release
 workflow refuses to replace assets on a published release, so doing so leaves
