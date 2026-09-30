@@ -187,12 +187,12 @@ def test_install_repairs_existing_live_lock_file_groups(
     chgrp = shim_dir / "chgrp"
     chgrp.write_text(
         '#!/bin/bash\n[ "$1" = palmimo-locks ] || exit 2\n'
-        + ('exit 1\n' if repair_fails else '/usr/bin/chgrp "$LOCKS_GID" "${@:2}"\n')
+        + ("exit 1\n" if repair_fails else '/usr/bin/chgrp "$LOCKS_GID" "${@:2}"\n')
     )
     chgrp.chmod(0o755)
     # Source the entry point with a read-only verify, then isolate the live
     # runtime operations from the host account DB and systemd instance.
-    harness = r'''source "$1" verify --root "$2"
+    harness = r"""source "$1" verify --root "$2"
 for operation in ensure_group ensure_user add_user_to_group install_apt_packages \
     install_owned_files install_managed_directories install_state_directories \
     install_uv install_bundle_cache remove_retired_paths repair_root_owned_paths mkdir; do
@@ -213,7 +213,7 @@ find() {
 }
 ROOT=/
 do_install
-'''
+"""
     result = subprocess.run(
         ["bash", "-c", harness, "bash", str(INSTALL_SH), str(root)],
         env={
