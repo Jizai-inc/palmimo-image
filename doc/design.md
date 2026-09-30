@@ -580,6 +580,26 @@ tmpfiles、polkit、journald 永続化）の設計・不変条件は
 その実装（`platform/`、`pigen/stage-palmimo/05-app-platform/`、
 `.github/workflows/release.yml`）を持つだけで、設計根拠はここには書かない。
 
+### 資源予約の共有権限（platform v2）
+
+`/run/palmimo/locks` は tmpfiles が `2770 user palmimo-locks` で作る。
+`palmimo-locks` に `palmimo-app` と管理者 `user` を所属させ、アプリ unit の
+`SupplementaryGroups` にも追加する。setgid により、各ユーザーが作る
+ロックファイルは同じグループを継承する。
+
+ロックだけを共有するユーザーには `palmimo-locks` を付与する。
+`palmimo-apps` はアプリの置き場と uv キャッシュへの書き込み権限も持つため、
+ロック共有のために付与してはいけない。
+
+`/var/lib/palmimo/apps`（アプリのコード・venv・アプリのホーム）と
+`/var/lib/palmimo/uv-cache`（アプリごとのビルド成果物を含み得る）は `2770` とし、
+`palmimo-apps` に属さない ssh ユーザーからは読めないようにする。Portal は所有者
+`user`、アプリと同期は `palmimo-apps` として読むので影響しない。公開物だけの
+`uv-python` と `platform` は閉じない。
+
+既存機体には Portal の platform 更新で届く。更新後は再起動し、`/run` に残る
+旧グループのロックファイルを消してから共有ユーザーの利用を開始する。
+
 ## 未決（実装前に確定するもの）
 
 - polkit の comitup 許可が実際に必要か（T9 では user 権限で D-Bus 呼び出しが

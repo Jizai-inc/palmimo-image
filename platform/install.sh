@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Platform bundle installer (palmimo-image, platform v1). Runs as root.
+# Platform bundle installer (palmimo-image, platform v2). Runs as root.
 #
 # install() and verify() both read manifest.json's "owns" section (via
 # manifest_tool.py) rather than hardcoding paths, so the two can never
@@ -357,7 +357,10 @@ install_uv() {
 
 do_install() {
   ensure_group palmimo-apps
-  ensure_user palmimo-app "video,audio,dialout,palmimo-apps"
+  ensure_group palmimo-locks
+  ensure_user palmimo-app "video,audio,dialout,palmimo-apps,palmimo-locks"
+  add_user_to_group palmimo-app palmimo-locks
+  add_user_to_group user palmimo-locks
   add_user_to_group user palmimo-apps
   install_apt_packages
 

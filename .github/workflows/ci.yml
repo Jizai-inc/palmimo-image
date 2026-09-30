@@ -163,6 +163,7 @@ jobs:
           root:x:0:
           user:x:1234:user
           palmimo-apps:x:1235:user,palmimo-app
+          palmimo-locks:x:1238:user,palmimo-app
           systemd-journal:x:1237:
           video:x:44:palmimo-app
           audio:x:29:palmimo-app

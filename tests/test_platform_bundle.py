@@ -108,6 +108,114 @@ def test_install_twice_is_idempotent(installed_root: tuple[Path, Path, Path]) ->
     assert fake_accounts.read_text(encoding="utf-8") == fake_accounts_before
 
 
+@pytest.mark.parametrize("directory", ["apps", "uv-cache"])
+@pytest.mark.parametrize("existing_mode", [None, 0o2775])
+def test_install_closes_private_app_storage(tmp_path: Path, directory: str, existing_mode: int | None) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "var/lib/palmimo" / directory
+    payload = target / "myapp" / "private-data"
+    if existing_mode is not None:
+        payload.parent.mkdir(parents=True)
+        payload.write_bytes(b"keep app data")
+        target.chmod(existing_mode)
+    fake_accounts = tmp_path / "fake_accounts.txt"
+    fake_accounts.touch()
+
+    result = _run_install(root, fake_accounts, _stub_uv(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(target.stat().st_mode) == 0o2770
+    if existing_mode is not None:
+        assert payload.read_bytes() == b"keep app data"
+
+
+@pytest.mark.parametrize("directory", ["apps", "uv-cache"])
+def test_verify_detects_private_app_storage_open_to_others(
+    installed_root: tuple[Path, Path, Path], directory: str
+) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    relative_path = f"var/lib/palmimo/{directory}"
+    (root / relative_path).chmod(0o2775)
+
+    result = _run_install(root, fake_accounts, Path(), command="verify")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    diffs = [json.loads(line) for line in result.stdout.splitlines()]
+    assert {"kind": "mode", "path": relative_path, "expected": "2770", "actual": "2775"} in diffs
+
+
+def test_install_shares_resource_locks_with_app_and_user(installed_root: tuple[Path, Path, Path]) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    lines = fake_accounts.read_text(encoding="utf-8").splitlines()
+    assert "groupadd --system palmimo-locks" in lines
+    for name in ("palmimo-app", "user"):
+        assert f"usermod -aG palmimo-locks {name}" in lines
+    useradd = next(line for line in lines if line.startswith("useradd "))
+    assert "palmimo-locks" in useradd.split("--groups ")[1].split()[0].split(",")
+    entries = [line.split() for line in (root / "etc/tmpfiles.d/palmimo.conf").read_text().splitlines()]
+    assert ["d", "/run/palmimo/locks", "2770", "user", "palmimo-locks", "-"] in entries
+    unit = _parse_service_section(root / "etc/systemd/system/palmimo-app@.service")
+    assert "palmimo-locks" in " ".join(unit["SupplementaryGroups"]).split()
+
+
+@pytest.mark.parametrize("backend", ["fake", "target"])
+@pytest.mark.parametrize("missing", [None, "group", "palmimo-app", "user", "user-account"])
+def test_verify_detects_resource_lock_account_drift(
+    installed_root: tuple[Path, Path, Path], backend: str, missing: str | None
+) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    (root / "etc/passwd").write_text(
+        "palmimo-app:x:1236:1235::/nonexistent:/usr/sbin/nologin\n"
+        + ("" if missing == "user-account" else "user:x:1234:1234::/home/user:/bin/sh\n")
+    )
+    group_lines = [
+        "palmimo-apps:x:1235:user,palmimo-app",
+        "video:x:44:palmimo-app",
+        "audio:x:29:palmimo-app",
+        "dialout:x:20:palmimo-app",
+    ]
+    if missing != "group":
+        members = [name for name in ("palmimo-app", "user") if name != missing]
+        group_lines.append("palmimo-locks:x:1238:" + ",".join(members))
+    (root / "etc/group").write_text("\n".join(group_lines) + "\n")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+    if backend == "fake":
+        lines = fake_accounts.read_text().splitlines()
+        if missing == "group":
+            lines = [line for line in lines if line != "groupadd --system palmimo-locks"]
+        elif missing in ("palmimo-app", "user", "user-account"):
+            name = "user" if missing == "user-account" else missing
+            lines = [line for line in lines if line != f"usermod -aG palmimo-locks {name}"]
+            if missing == "user-account":
+                lines = [line for line in lines if not (line.startswith("usermod ") and line.endswith(" user"))]
+            if name == "palmimo-app":
+                lines = [line.replace(",palmimo-locks", "") for line in lines]
+        fake_accounts.write_text("\n".join(lines) + "\n")
+        env["PALMIMO_FAKE_ACCOUNTS"] = str(fake_accounts)
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "verify", "--root", str(root)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode in (0, 1), result.stdout + result.stderr
+    diffs = [json.loads(line) for line in result.stdout.splitlines()]
+    account_diffs = [d for d in diffs if d["kind"] in ("group_missing", "user_missing", "group_membership")]
+    if missing is None:
+        assert account_diffs == [], result.stdout + result.stderr
+    else:
+        assert result.returncode == 1, result.stdout + result.stderr
+        expected = (
+            {"kind": "group_missing", "path": "palmimo-locks"}
+            if missing == "group"
+            else {"kind": "user_missing", "path": "user"}
+            if missing == "user-account"
+            else {"kind": "group_membership", "path": missing, "group": "palmimo-locks"}
+        )
+        assert expected in account_diffs
+
+
 def test_install_fails_when_the_manifest_cannot_be_read(tmp_path: Path) -> None:
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
@@ -351,7 +459,9 @@ def test_tmpfiles_conf_makes_run_palmimo_apps_writable_by_user() -> None:
 def test_add_user_to_group_is_idempotent_when_membership_already_exists(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
-    (root / "etc" / "group").write_text("palmimo-apps:x:999:user\n", encoding="utf-8")
+    (root / "etc" / "group").write_text(
+        "palmimo-apps:x:999:user\npalmimo-locks:x:998:user,palmimo-app\n", encoding="utf-8"
+    )
     (root / "etc" / "passwd").write_text("user:x:1000:1000::/home/user:/bin/bash\n", encoding="utf-8")
     fake_accounts = tmp_path / "fake_accounts.txt"
     fake_accounts.touch()
