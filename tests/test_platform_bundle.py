@@ -159,6 +159,80 @@ def test_install_shares_resource_locks_with_app_and_user(installed_root: tuple[P
     assert "palmimo-locks" in " ".join(unit["SupplementaryGroups"]).split()
 
 
+@pytest.mark.parametrize("repair_fails", [False, True])
+def test_install_repairs_existing_live_lock_file_groups(
+    installed_root: tuple[Path, Path, Path], tmp_path: Path, repair_fails: bool
+) -> None:
+    root, fake_accounts, _uv_source = installed_root
+    old_gid = os.getgid()
+    new_gid = next((gid for gid in os.getgroups() if gid != old_gid), None)
+    if new_gid is None:
+        pytest.skip("requires membership in two groups to exercise chgrp without root")
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    lock = locks / "robot.lock"
+    lock.write_bytes(b"existing lock")
+    nested = locks / "nested"
+    nested.mkdir()
+    nested_lock = nested / "robot.lock"
+    nested_lock.touch()
+    outside = tmp_path / "outside.lock"
+    outside.touch()
+    (locks / "link.lock").symlink_to(outside)
+    for path in (lock, nested, nested_lock, outside):
+        os.chown(path, -1, old_gid)
+    inode = lock.stat().st_ino
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    chgrp = shim_dir / "chgrp"
+    chgrp.write_text(
+        '#!/bin/bash\n[ "$1" = palmimo-locks ] || exit 2\n'
+        + ('exit 1\n' if repair_fails else '/usr/bin/chgrp "$LOCKS_GID" "${@:2}"\n')
+    )
+    chgrp.chmod(0o755)
+    # Source the entry point with a read-only verify, then isolate the live
+    # runtime operations from the host account DB and systemd instance.
+    harness = r'''source "$1" verify --root "$2"
+for operation in ensure_group ensure_user add_user_to_group install_apt_packages \
+    install_owned_files install_managed_directories install_state_directories \
+    install_uv install_bundle_cache remove_retired_paths repair_root_owned_paths mkdir; do
+    eval "$operation() { :; }"
+done
+[() {
+    if builtin [ "$#" = 3 ] && builtin [ "$1" = -d ] && builtin [ "$2" = /run/systemd/system ]; then
+        return 0
+    fi
+    builtin [ "$@"
+}
+systemctl() { :; }
+systemd-tmpfiles() { export TMPFILES_CREATED=1; }
+find() {
+    builtin [ "${TMPFILES_CREATED:-}" = 1 ] || return 1
+    builtin [ "$1" = /run/palmimo/locks ] || return 1
+    command find "$LOCKS_DIR" "${@:2}"
+}
+ROOT=/
+do_install
+'''
+    result = subprocess.run(
+        ["bash", "-c", harness, "bash", str(INSTALL_SH), str(root)],
+        env={
+            **os.environ,
+            "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/local/bin",
+            "PALMIMO_FAKE_ACCOUNTS": str(fake_accounts),
+            "LOCKS_DIR": str(locks),
+            "LOCKS_GID": str(new_gid),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert lock.stat().st_gid == (old_gid if repair_fails else new_gid)
+    assert lock.stat().st_ino == inode
+    assert lock.read_bytes() == b"existing lock"
+    assert all(path.stat().st_gid == old_gid for path in (nested, nested_lock, outside))
+
+
 @pytest.mark.parametrize("backend", ["fake", "target"])
 @pytest.mark.parametrize("missing", [None, "group", "palmimo-app", "user", "user-account"])
 def test_verify_detects_resource_lock_account_drift(

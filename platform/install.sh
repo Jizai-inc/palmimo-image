@@ -383,6 +383,9 @@ do_install() {
     # other tmpfiles.d entry on the device, and one unrelated broken entry
     # there would abort this install under set -e.
     systemd-tmpfiles --create /etc/tmpfiles.d/palmimo.conf
+    # tmpfiles repairs the directory group only. Changing a held lock
+    # file's group preserves its inode and does not release flock.
+    find /run/palmimo/locks -maxdepth 1 -type f -exec chgrp palmimo-locks {} + 2>/dev/null || true
     # journald only re-reads Storage=persistent on its own restart/reload;
     # SIGUSR1 makes it flush its current (volatile) journal to
     # /var/log/journal immediately instead. Without this, a device updated
