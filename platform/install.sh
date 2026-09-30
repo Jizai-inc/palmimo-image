@@ -155,8 +155,8 @@ add_user_to_group() {
     return 0
   fi
   # "user" is the image's default account, provisioned by an earlier
-  # pi-gen stage / already present on a real device -- a bare test root
-  # legitimately has no such account yet, and that is not an error here.
+  # pi-gen stage / already present on a real device. Install tolerates a
+  # bare test root without this account; verify requires owns.users to exist.
   grep -q "^${user}:" "${ROOT%/}/etc/passwd" 2>/dev/null || return 0
   usermod -R "${ROOT}" -aG "${group}" "${user}"
 }

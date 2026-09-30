@@ -254,11 +254,11 @@ def _check_accounts(manifest: dict, root: Path, fake_accounts_file: str | None) 
             continue
         for group_name in user["groups"]:
             if group_name not in groups:
-                diffs.append(_diff("group_membership", name, group=group_name))
+                diffs.append(_diff("group_membership", name, expected=group_name))
                 continue
             gid, members = groups[group_name]
             if name not in members and (not gid or users[name] != gid):
-                diffs.append(_diff("group_membership", name, group=group_name))
+                diffs.append(_diff("group_membership", name, expected=group_name))
     return diffs
 
 

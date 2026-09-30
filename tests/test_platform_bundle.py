@@ -285,7 +285,7 @@ def test_verify_detects_resource_lock_account_drift(
             if missing == "group"
             else {"kind": "user_missing", "path": "user"}
             if missing == "user-account"
-            else {"kind": "group_membership", "path": missing, "group": "palmimo-locks"}
+            else {"kind": "group_membership", "path": missing, "expected": "palmimo-locks"}
         )
         assert expected in account_diffs
 
