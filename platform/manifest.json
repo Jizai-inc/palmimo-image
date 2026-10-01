@@ -123,21 +123,18 @@
           "video",
           "audio",
           "dialout",
-          "palmimo-apps",
-          "palmimo-locks"
+          "palmimo-apps"
         ]
       },
       {
         "name": "user",
         "groups": [
-          "palmimo-apps",
-          "palmimo-locks"
+          "palmimo-apps"
         ]
       }
     ],
     "groups": [
-      "palmimo-apps",
-      "palmimo-locks"
+      "palmimo-apps"
     ],
     "units": [
       "palmimo-app@.service",

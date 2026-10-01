@@ -582,14 +582,17 @@ tmpfiles、polkit、journald 永続化）の設計・不変条件は
 
 ### 資源予約の共有権限（platform v2）
 
-`/run/palmimo/locks` は tmpfiles が `2770 user palmimo-locks` で作る。
-`palmimo-locks` に `palmimo-app` と管理者 `user` を所属させ、アプリ unit の
-`SupplementaryGroups` にも追加する。setgid により、各ユーザーが作る
-ロックファイルは同じグループを継承する。
+`/run/lock/palmimo` は tmpfiles が `1777 root root` で起動のたびに作り、
+platform 更新の直後にも用意する。SDK はロックファイルを `0666` で作るため、
+機体にログインできる全員とアプリが同じ資源予約に参加できる。
+ロックは調停が目的であり、セキュリティ境界ではないので専用グループは作らない。
 
-ロックだけを共有するユーザーには `palmimo-locks` を付与する。
+アプリ unit は `ProtectSystem=strict` の下で
+`ReadWritePaths=/run/lock/palmimo` を指定し、共有ロックへの書き込みを許可する。
+依存関係の同期 unit は資源を開かないため、この指定を持たない。
+
 `palmimo-apps` はアプリの置き場と uv キャッシュへの書き込み権限も持つため、
-ロック共有のために付与してはいけない。
+ロック共有のために ssh ユーザーへ付与してはいけない。
 
 `/var/lib/palmimo/apps`（アプリのコード・venv・アプリのホーム）と
 `/var/lib/palmimo/uv-cache`（アプリごとのビルド成果物を含み得る）は `2770` とし、
@@ -597,8 +600,8 @@ tmpfiles、polkit、journald 永続化）の設計・不変条件は
 `user`、アプリと同期は `palmimo-apps` として読むので影響しない。公開物だけの
 `uv-python` と `platform` は閉じない。
 
-既存機体には Portal の platform 更新で届く。更新後は再起動し、`/run` に残る
-旧グループのロックファイルを消してから共有ユーザーの利用を開始する。
+既存機体には Portal の platform 更新で届く。SDK の更新と合わせ、共有ロックを
+使うプロセスをすべて再起動してから共有ユーザーの利用を開始する。
 
 ## 未決（実装前に確定するもの）
 

@@ -145,126 +145,66 @@ def test_verify_detects_private_app_storage_open_to_others(
     assert {"kind": "mode", "path": relative_path, "expected": "2770", "actual": "2775"} in diffs
 
 
-def test_install_shares_resource_locks_with_app_and_user(installed_root: tuple[Path, Path, Path]) -> None:
-    root, fake_accounts, _uv_source = installed_root
-    lines = fake_accounts.read_text(encoding="utf-8").splitlines()
-    assert "groupadd --system palmimo-locks" in lines
-    for name in ("palmimo-app", "user"):
-        assert f"usermod -aG palmimo-locks {name}" in lines
-    useradd = next(line for line in lines if line.startswith("useradd "))
-    assert "palmimo-locks" in useradd.split("--groups ")[1].split()[0].split(",")
+def test_install_declares_shared_resource_lock_directory(installed_root: tuple[Path, Path, Path]) -> None:
+    root, _fake_accounts, _uv_source = installed_root
     entries = [line.split() for line in (root / "etc/tmpfiles.d/palmimo.conf").read_text().splitlines()]
-    assert ["d", "/run/palmimo/locks", "2770", "user", "palmimo-locks", "-"] in entries
-    unit = _parse_service_section(root / "etc/systemd/system/palmimo-app@.service")
-    assert "palmimo-locks" in " ".join(unit["SupplementaryGroups"]).split()
+    assert ["d", "/run/lock/palmimo", "1777", "root", "root", "-"] in entries
 
 
-@pytest.mark.parametrize("repair_fails", [False, True])
-def test_install_repairs_existing_live_lock_file_groups(
-    installed_root: tuple[Path, Path, Path], tmp_path: Path, repair_fails: bool
-) -> None:
-    root, fake_accounts, _uv_source = installed_root
-    old_gid = os.getgid()
-    new_gid = next((gid for gid in os.getgroups() if gid != old_gid), None)
-    if new_gid is None:
-        pytest.skip("requires membership in two groups to exercise chgrp without root")
-    locks = tmp_path / "locks"
-    locks.mkdir()
-    lock = locks / "robot.lock"
-    lock.write_bytes(b"existing lock")
-    nested = locks / "nested"
-    nested.mkdir()
-    nested_lock = nested / "robot.lock"
-    nested_lock.touch()
-    outside = tmp_path / "outside.lock"
-    outside.touch()
-    (locks / "link.lock").symlink_to(outside)
-    for path in (lock, nested, nested_lock, outside):
-        os.chown(path, -1, old_gid)
-    inode = lock.stat().st_ino
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    chgrp = shim_dir / "chgrp"
-    chgrp.write_text(
-        '#!/bin/bash\n[ "$1" = palmimo-locks ] || exit 2\n'
-        + ("exit 1\n" if repair_fails else '/usr/bin/chgrp "$LOCKS_GID" "${@:2}"\n')
-    )
-    chgrp.chmod(0o755)
-    # Source the entry point with a read-only verify, then isolate the live
-    # runtime operations from the host account DB and systemd instance.
-    harness = r"""source "$1" verify --root "$2"
-for operation in ensure_group ensure_user add_user_to_group install_apt_packages \
-    install_owned_files install_managed_directories install_state_directories \
-    install_uv install_bundle_cache remove_retired_paths repair_root_owned_paths mkdir; do
-    eval "$operation() { :; }"
-done
-[() {
-    if builtin [ "$#" = 3 ] && builtin [ "$1" = -d ] && builtin [ "$2" = /run/systemd/system ]; then
-        return 0
-    fi
-    builtin [ "$@"
-}
-systemctl() { :; }
-systemd-tmpfiles() { export TMPFILES_CREATED=1; }
-find() {
-    builtin [ "${TMPFILES_CREATED:-}" = 1 ] || return 1
-    builtin [ "$1" = /run/palmimo/locks ] || return 1
-    command find "$LOCKS_DIR" "${@:2}"
-}
-ROOT=/
-do_install
-"""
-    result = subprocess.run(
-        ["bash", "-c", harness, "bash", str(INSTALL_SH), str(root)],
-        env={
-            **os.environ,
-            "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/local/bin",
-            "PALMIMO_FAKE_ACCOUNTS": str(fake_accounts),
-            "LOCKS_DIR": str(locks),
-            "LOCKS_GID": str(new_gid),
-        },
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert lock.stat().st_gid == (old_gid if repair_fails else new_gid)
-    assert lock.stat().st_ino == inode
-    assert lock.read_bytes() == b"existing lock"
-    assert all(path.stat().st_gid == old_gid for path in (nested, nested_lock, outside))
+def test_app_unit_allows_shared_resource_lock_writes() -> None:
+    unit = _parse_service_section(APP_UNIT)
+    assert "/run/lock/palmimo" in unit.get("ReadWritePaths", [])
 
 
 @pytest.mark.parametrize("backend", ["fake", "target"])
-@pytest.mark.parametrize("missing", [None, "group", "palmimo-app", "user", "user-account"])
-def test_verify_detects_resource_lock_account_drift(
-    installed_root: tuple[Path, Path, Path], backend: str, missing: str | None
+@pytest.mark.parametrize(
+    "missing_user, missing_group",
+    [
+        (None, None),
+        (None, "palmimo-apps"),
+        ("palmimo-app", "video"),
+        ("palmimo-app", "audio"),
+        ("palmimo-app", "dialout"),
+        ("palmimo-app", "palmimo-apps"),
+        ("user", "palmimo-apps"),
+        ("user", None),
+    ],
+)
+def test_verify_detects_app_account_drift(
+    installed_root: tuple[Path, Path, Path], backend: str, missing_user: str | None, missing_group: str | None
 ) -> None:
     root, fake_accounts, _uv_source = installed_root
     (root / "etc/passwd").write_text(
-        "palmimo-app:x:1236:1235::/nonexistent:/usr/sbin/nologin\n"
-        + ("" if missing == "user-account" else "user:x:1234:1234::/home/user:/bin/sh\n")
+        "palmimo-app:x:1236:1236::/nonexistent:/usr/sbin/nologin\n"
+        + ("" if (missing_user, missing_group) == ("user", None) else "user:x:1234:1234::/home/user:/bin/sh\n")
     )
-    group_lines = [
-        "palmimo-apps:x:1235:user,palmimo-app",
-        "video:x:44:palmimo-app",
-        "audio:x:29:palmimo-app",
-        "dialout:x:20:palmimo-app",
-    ]
-    if missing != "group":
-        members = [name for name in ("palmimo-app", "user") if name != missing]
-        group_lines.append("palmimo-locks:x:1238:" + ",".join(members))
+    group_lines = []
+    for name, gid, members in [
+        ("palmimo-apps", 1235, ["user", "palmimo-app"]),
+        ("video", 44, ["palmimo-app"]),
+        ("audio", 29, ["palmimo-app"]),
+        ("dialout", 20, ["palmimo-app"]),
+    ]:
+        if name == missing_group:
+            if missing_user is None:
+                continue
+            members.remove(missing_user)
+        group_lines.append(f"{name}:x:{gid}:" + ",".join(members))
     (root / "etc/group").write_text("\n".join(group_lines) + "\n")
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
     if backend == "fake":
         lines = fake_accounts.read_text().splitlines()
-        if missing == "group":
-            lines = [line for line in lines if line != "groupadd --system palmimo-locks"]
-        elif missing in ("palmimo-app", "user", "user-account"):
-            name = "user" if missing == "user-account" else missing
-            lines = [line for line in lines if line != f"usermod -aG palmimo-locks {name}"]
-            if missing == "user-account":
-                lines = [line for line in lines if not (line.startswith("usermod ") and line.endswith(" user"))]
-            if name == "palmimo-app":
-                lines = [line.replace(",palmimo-locks", "") for line in lines]
+        if missing_user is None and missing_group is not None:
+            lines = [line for line in lines if line != f"groupadd --system {missing_group}"]
+        elif missing_user == "user":
+            lines = [line for line in lines if not (line.startswith("usermod ") and line.endswith(" user"))]
+        elif missing_user == "palmimo-app":
+            for i, line in enumerate(lines):
+                if line.startswith("useradd "):
+                    groups = line.split("--groups ")[1].split()[0]
+                    lines[i] = line.replace(groups, ",".join(g for g in groups.split(",") if g != missing_group))
+                    if missing_group == "palmimo-apps":
+                        lines[i] = lines[i].replace("--gid palmimo-apps", "--gid app-primary")
         fake_accounts.write_text("\n".join(lines) + "\n")
         env["PALMIMO_FAKE_ACCOUNTS"] = str(fake_accounts)
     result = subprocess.run(
@@ -276,16 +216,16 @@ def test_verify_detects_resource_lock_account_drift(
     assert result.returncode in (0, 1), result.stdout + result.stderr
     diffs = [json.loads(line) for line in result.stdout.splitlines()]
     account_diffs = [d for d in diffs if d["kind"] in ("group_missing", "user_missing", "group_membership")]
-    if missing is None:
+    if missing_user is None and missing_group is None:
         assert account_diffs == [], result.stdout + result.stderr
     else:
         assert result.returncode == 1, result.stdout + result.stderr
         expected = (
-            {"kind": "group_missing", "path": "palmimo-locks"}
-            if missing == "group"
-            else {"kind": "user_missing", "path": "user"}
-            if missing == "user-account"
-            else {"kind": "group_membership", "path": missing, "expected": "palmimo-locks"}
+            {"kind": "group_missing", "path": missing_group}
+            if missing_user is None
+            else {"kind": "user_missing", "path": missing_user}
+            if missing_group is None
+            else {"kind": "group_membership", "path": missing_user, "expected": missing_group}
         )
         assert expected in account_diffs
 
@@ -533,9 +473,7 @@ def test_tmpfiles_conf_makes_run_palmimo_apps_writable_by_user() -> None:
 def test_add_user_to_group_is_idempotent_when_membership_already_exists(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
-    (root / "etc" / "group").write_text(
-        "palmimo-apps:x:999:user\npalmimo-locks:x:998:user,palmimo-app\n", encoding="utf-8"
-    )
+    (root / "etc" / "group").write_text("palmimo-apps:x:999:user\n", encoding="utf-8")
     (root / "etc" / "passwd").write_text("user:x:1000:1000::/home/user:/bin/bash\n", encoding="utf-8")
     fake_accounts = tmp_path / "fake_accounts.txt"
     fake_accounts.touch()
