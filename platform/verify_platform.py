@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -216,24 +217,48 @@ def _check_apt_packages(manifest: dict, root: Path, fake_lines: set[str] | None)
 
 def _check_accounts(manifest: dict, root: Path, fake_accounts_file: str | None) -> list[dict]:
     diffs = []
+    passwd_path = root / "etc/passwd"
+    group_path = root / "etc/group"
+    passwd_rows = [line.split(":") for line in passwd_path.read_text().splitlines()] if passwd_path.is_file() else []
+    group_rows = [line.split(":") for line in group_path.read_text().splitlines()] if group_path.is_file() else []
+    users = {row[0]: row[3] for row in passwd_rows if len(row) >= 4}
+    groups = {row[0]: (row[2], set(row[3].split(","))) for row in group_rows if len(row) >= 4}
     if fake_accounts_file:
-        lines = _fake_account_lines(fake_accounts_file)
-        for group in manifest["owns"]["groups"]:
-            if not any(line.startswith(f"groupadd --system {group}") for line in lines):
-                diffs.append(_diff("group_missing", group))
-        for user in manifest["owns"]["users"]:
-            if not any(line.split()[-1] == user["name"] and line.startswith("useradd") for line in lines):
-                diffs.append(_diff("user_missing", user["name"]))
-        return diffs
+        intents = [shlex.split(line) for line in _fake_account_lines(fake_accounts_file)]
+        for args in intents:
+            if args and args[0] == "groupadd":
+                groups.setdefault(args[-1], ("", set()))
+        for args in intents:
+            if not args or args[0] not in ("useradd", "usermod"):
+                continue
+            name = args[-1]
+            users.setdefault(name, "")
+            for option in ("--gid", "--groups", "-aG"):
+                if option not in args:
+                    continue
+                for group_name in args[args.index(option) + 1].split(","):
+                    # Device groups are supplied by the base image; bundle-owned
+                    # groups need their own groupadd intent or target entry.
+                    if group_name not in manifest["owns"]["groups"]:
+                        groups.setdefault(group_name, ("", set()))
+                    if group_name in groups:
+                        groups[group_name][1].add(name)
 
-    passwd = (root / "etc" / "passwd").read_text(encoding="utf-8") if (root / "etc" / "passwd").is_file() else ""
-    group = (root / "etc" / "group").read_text(encoding="utf-8") if (root / "etc" / "group").is_file() else ""
-    for grp_name in manifest["owns"]["groups"]:
-        if not any(line.startswith(f"{grp_name}:") for line in group.splitlines()):
-            diffs.append(_diff("group_missing", grp_name))
+    for group_name in manifest["owns"]["groups"]:
+        if group_name not in groups:
+            diffs.append(_diff("group_missing", group_name))
     for user in manifest["owns"]["users"]:
-        if not any(line.startswith(f"{user['name']}:") for line in passwd.splitlines()):
-            diffs.append(_diff("user_missing", user["name"]))
+        name = user["name"]
+        if name not in users:
+            diffs.append(_diff("user_missing", name))
+            continue
+        for group_name in user["groups"]:
+            if group_name not in groups:
+                diffs.append(_diff("group_membership", name, expected=group_name))
+                continue
+            gid, members = groups[group_name]
+            if name not in members and (not gid or users[name] != gid):
+                diffs.append(_diff("group_membership", name, expected=group_name))
     return diffs
 
 

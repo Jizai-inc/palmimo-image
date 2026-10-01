@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform: palmimo-app user/group, app-launch/app-sync helpers, palmimo-app@/palmimo-app-sync@ unit templates, device tmpfiles, polkit rules, persistent journald.",
@@ -61,13 +61,13 @@
         "path": "var/lib/palmimo/apps",
         "owner": "user",
         "group": "palmimo-apps",
-        "mode": "2775"
+        "mode": "2770"
       },
       {
         "path": "var/lib/palmimo/uv-cache",
         "owner": "user",
         "group": "palmimo-apps",
-        "mode": "2775"
+        "mode": "2770"
       },
       {
         "path": "var/lib/palmimo/uv-python",
@@ -123,6 +123,12 @@
           "video",
           "audio",
           "dialout",
+          "palmimo-apps"
+        ]
+      },
+      {
+        "name": "user",
+        "groups": [
           "palmimo-apps"
         ]
       }
