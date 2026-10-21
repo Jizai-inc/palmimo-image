@@ -6,9 +6,9 @@ mtime, so two builds from the same tree byte-for-byte match -- CI's build
 and a local rebuild of the same commit produce the same sha256, which is
 what test_build_platform_bundle_is_deterministic pins.
 
-install.sh loads manifest_tool.py and verify_platform.py from its own
-directory at runtime (see platform/install.sh), so the bundle carries all
-four platform/ files, not just manifest.json + install.sh + files/.
+install.sh loads manifest_tool.py, verify_platform.py, and the lib/ comitup
+patches from its own directory at runtime (see platform/install.sh), so the
+bundle carries them, not just manifest.json + install.sh + files/.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ def bundle_files(platform_dir: Path = PLATFORM_DIR) -> list[Path]:
         platform_dir / "manifest_tool.py",
         platform_dir / "verify_platform.py",
         *(platform_dir / "files").rglob("*"),
+        *(platform_dir / "lib").rglob("*.py"),
     ]
     shipped = [p for p in paths if p.is_file() and "__pycache__" not in p.relative_to(platform_dir).parts]
     return sorted(shipped, key=lambda p: p.relative_to(platform_dir).as_posix())

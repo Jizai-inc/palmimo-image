@@ -30,8 +30,8 @@ fi
 IMAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES_SRC="${IMAGE_DIR}/files/"
 PACKAGES_FILE="${IMAGE_DIR}/packages.txt"
-PATCH_NM_PY_SCRIPT="${IMAGE_DIR}/lib/patch_comitup_nm.py"
-PATCH_RECONNECT_SCRIPT="${IMAGE_DIR}/lib/patch_comitup_reconnect.py"
+PATCH_NM_PY_SCRIPT="${IMAGE_DIR}/platform/lib/patch_comitup_nm.py"
+PATCH_RECONNECT_SCRIPT="${IMAGE_DIR}/platform/lib/patch_comitup_reconnect.py"
 
 PORTAL_REPO_URL="https://github.com/Jizai-inc/palmimo-portal.git"
 PORTAL_DEST="/home/user/palmimo-portal"
@@ -89,13 +89,13 @@ else
 fi
 
 echo "==> [2/9] comitup: WPA2/PMF hotspot-security and AP-fallback patches"
-# lib/patch_comitup_nm.py is the single source of truth for this
+# platform/lib/patch_comitup_nm.py is the single source of truth for this
 # patch, shared with the pi-gen custom stage (which copies the same file
 # into the chroot and runs it there -- see doc/design.md,
 # "pi-gen イメージビルドと焼き込み CLI"). Piped over stdin into a remote
 # `sudo python3 -` so no copy of the script is left behind on the Pi.
 ssh -o BatchMode=yes "$PI_HOST" 'sudo python3 -' <"$PATCH_NM_PY_SCRIPT"
-# lib/patch_comitup_reconnect.py: fall back to the setup AP after an avahi
+# platform/lib/patch_comitup_reconnect.py: fall back to the setup AP after an avahi
 # restart, and try saved networks in autoconnect-priority order. Same
 # shared-script contract as the nm.py patch above.
 ssh -o BatchMode=yes "$PI_HOST" 'sudo python3 -' <"$PATCH_RECONNECT_SCRIPT"

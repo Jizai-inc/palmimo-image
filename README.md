@@ -40,13 +40,13 @@ tools/
   make_identity.py       -> generate a test identity file
   build_platform_bundle.py -> build the platform/ release tarball deterministically
 lib/
-  patch_comitup_nm.py    -> shared WPA2/PMF nm.py patch (apply-pi.sh + pi-gen both use this)
-  patch_comitup_reconnect.py -> shared AP-fallback / candidate-order mdns.py + nm.py patch
+  collect_oss_compliance.py -> OSS source/license collector run in the pi-gen OSS stage
 packages.txt             -> apt package list (shared source for apply-pi.sh and pigen/)
 platform/                -> app execution platform bundle (see "Platform bundle" below)
   manifest.json            -> version, requires_portal, and the explicit "owns" enumeration
   install.sh               -> idempotent installer: install / verify / record subcommands
   files/                   -> unit template, tmpfiles, polkit rules, journald config, app-launch
+  lib/                     -> comitup patches (install.sh, apply-pi.sh, and pi-gen all run these)
 pigen/                   -> pi-gen custom stage (see pigen/README.md for stage notes)
 dist/                    -> built images land here (gitignored)
 doc/design.md            -> design rationale, verification history, failure matrix
@@ -234,7 +234,7 @@ the platform bundle unattached.
 comitup 1.43's hotspot code (`/usr/share/comitup/comitup/nm.py`, GPL-2.0)
 only sets `key-mgmt`/`psk` on the setup AP, which leaves NetworkManager free
 to negotiate WPA1/TKIP with PMF unset — modern Apple clients then fail the
-handshake against the AP (verified on hardware). `lib/patch_comitup_nm.py`
+handshake against the AP (verified on hardware). `platform/lib/patch_comitup_nm.py`
 pins `proto=rsn` / `pairwise=ccmp` / `group=ccmp` and disables PMF
 (`brcmfmac` doesn't support PMF in AP mode) right after the anchor lines.
 The same patch script runs both in apply-pi.sh (piped over SSH as
@@ -251,7 +251,7 @@ requirement. The idempotency key is that notice marker itself, not just the
 presence of the new keys, so re-running the patch is always a safe no-op.
 The modified `nm.py` stays on the image as plain Python source (never
 compiled or stripped) — that covers the source-availability side for this
-modification. `lib/patch_comitup_nm.py` itself — the script that performs
+modification. `platform/lib/patch_comitup_nm.py` itself — the script that performs
 the patch — is Jizai Inc.'s own work and is licensed under this
 repository's Apache-2.0 license. It necessarily quotes the two anchor lines
 it searches for in `nm.py`, a de-minimis excerpt used only to locate the
@@ -260,7 +260,7 @@ applied.
 
 ### comitup's modified mdns.py and nm.py (GPLv2 §2(a))
 
-`lib/patch_comitup_reconnect.py` changes two more comitup 1.43 files under
+`platform/lib/patch_comitup_reconnect.py` changes two more comitup 1.43 files under
 the same rules. In `mdns.py` it rebuilds the avahi entry group after an
 avahi restart instead of raising, so a device whose Wi-Fi network
 disappears falls back to the setup AP; without it the AP does not come back

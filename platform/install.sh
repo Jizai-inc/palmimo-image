@@ -226,6 +226,32 @@ target_gid() {
   fi
 }
 
+# comitup ships in the image, not in this bundle; its fixes are patches to
+# the apt package's own files (see lib/), so they ride every platform
+# update to reach devices already in the field. Both patches are
+# idempotent, and the nm.py one must run first (its notice marker would
+# otherwise read the reconnect patch's notice as its own). comitup is
+# restarted only when a patch actually changed a file -- a restart while
+# CONNECTED keeps the connection (verified on hardware).
+patch_comitup() {
+  local dir="${ROOT%/}/usr/share/comitup/comitup"
+  if [ ! -f "${dir}/nm.py" ]; then
+    log "comitup not installed under ${ROOT}; skipped its patches"
+    return 0
+  fi
+  local out
+  out="$(python3 "${SCRIPT_DIR}/lib/patch_comitup_nm.py" "${dir}/nm.py")"
+  out+=$'
+'"$(python3 "${SCRIPT_DIR}/lib/patch_comitup_reconnect.py" "${dir}")"
+  log "${out}"
+  if printf '%s
+' "${out}" | grep -qE '^ +(patched|upgraded):'; then
+    if [ "${ROOT}" = "/" ] && [ -d /run/systemd/system ]; then
+      systemctl try-restart comitup.service
+    fi
+  fi
+}
+
 install_owned_files() {
   local rows
   rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" files)"
@@ -360,6 +386,7 @@ do_install() {
   ensure_user palmimo-app "video,audio,dialout,palmimo-apps"
   add_user_to_group user palmimo-apps
   install_apt_packages
+  patch_comitup
 
   install_owned_files
   install_managed_directories
