@@ -98,7 +98,12 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
         ssid = get_ssid_from_connection(conn)
         # Uncached, unlike get_connection_settings(): a priority changed while
         # comitup runs (the Portal reorders saved networks) must count now.
-        settings = conn.GetSettings()
+        # A profile deleted since ListConnections must not raise out of a
+        # GLib callback (that stops comitup's retries).
+        try:
+            settings = conn.GetSettings()
+        except (nm.ObjectVanished, dbus.exceptions.DBusException):
+            continue
         if (
             ssid
             and ssid not in priorities

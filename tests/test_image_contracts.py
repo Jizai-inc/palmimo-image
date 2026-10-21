@@ -639,7 +639,18 @@ import logging
 import types
 from typing import Dict, List
 log = logging.getLogger("comitup")
-nm = types.SimpleNamespace(Device=object)
+
+
+class ObjectVanished(Exception):
+    pass
+
+
+class DBusException(Exception):
+    pass
+
+
+nm = types.SimpleNamespace(Device=object, ObjectVanished=ObjectVanished)
+dbus = types.SimpleNamespace(exceptions=types.SimpleNamespace(DBusException=DBusException))
 CONNECTIONS = []
 settings_cache = {}
 
@@ -649,6 +660,8 @@ class Connection:
         self.settings = settings
 
     def GetSettings(self):
+        if self.settings is None:
+            raise nm.ObjectVanished()
         return copy.deepcopy(self.settings)
 
 
@@ -819,6 +832,11 @@ def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup:
     # A priority changed while comitup runs (the Portal reordering saved
     # networks) counts on the next call, despite comitup's settings cache.
     nm["CONNECTIONS"][-1].settings["connection"]["autoconnect-priority"] = 30
+    assert nm["get_candidate_connections"](None) == ["home", "phone", "office", "lab"]
+
+    # A profile deleted between ListConnections and GetSettings (the Portal
+    # removing a saved network) is skipped, not raised out of comitup's callback.
+    nm["CONNECTIONS"][-2].settings = None
     assert nm["get_candidate_connections"](None) == ["home", "phone", "office", "lab"]
 
 
