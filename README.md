@@ -41,6 +41,7 @@ tools/
   build_platform_bundle.py -> build the platform/ release tarball deterministically
 lib/
   patch_comitup_nm.py    -> shared WPA2/PMF nm.py patch (apply-pi.sh + pi-gen both use this)
+  patch_comitup_reconnect.py -> shared AP-fallback / candidate-order mdns.py + nm.py patch
 packages.txt             -> apt package list (shared source for apply-pi.sh and pigen/)
 platform/                -> app execution platform bundle (see "Platform bundle" below)
   manifest.json            -> version, requires_portal, and the explicit "owns" enumeration
@@ -256,6 +257,20 @@ repository's Apache-2.0 license. It necessarily quotes the two anchor lines
 it searches for in `nm.py`, a de-minimis excerpt used only to locate the
 insertion point; the lines it inserts become part of the GPL-2.0 file once
 applied.
+
+### comitup's modified mdns.py and nm.py (GPLv2 §2(a))
+
+`lib/patch_comitup_reconnect.py` changes two more comitup 1.43 files under
+the same rules. In `mdns.py` it rebuilds the avahi entry group after an
+avahi restart instead of raising, so a device whose Wi-Fi network
+disappears falls back to the setup AP; without it the AP does not come back
+until a reboot (verified on hardware). In `nm.py` it tries saved networks in
+`connection.autoconnect-priority` order. Each change carries its own dated
+`Modified by Jizai Inc.` notice, which is also that change's idempotency
+key, and a missing anchor fails loud. The modified files stay on the image
+as plain Python source. The patch script is Jizai Inc.'s own work under
+Apache-2.0; the anchor excerpts it quotes are de-minimis, used only to
+locate the changes.
 
 ### Corresponding source for the rest of the image (GPLv2 §3(a) / GPLv3 §6(a))
 

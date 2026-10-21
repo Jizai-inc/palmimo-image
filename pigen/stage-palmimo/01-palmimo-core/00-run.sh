@@ -17,6 +17,15 @@ on_chroot <<- 'EOF'
 EOF
 rm -f "${ROOTFS_DIR}/tmp/patch_comitup_nm.py"
 
+# 1b. comitup mdns.py / nm.py: fall back to the setup AP after an avahi
+#     restart, and try saved networks in autoconnect-priority order. Same
+#     copy-in, run, delete contract as step 1.
+install -m 0644 "${PALMIMO_IMAGE_DIR}/lib/patch_comitup_reconnect.py" "${ROOTFS_DIR}/tmp/patch_comitup_reconnect.py"
+on_chroot <<- 'EOF'
+	python3 /tmp/patch_comitup_reconnect.py
+EOF
+rm -f "${ROOTFS_DIR}/tmp/patch_comitup_reconnect.py"
+
 # 2. comitup-web: heal a rootfs that inherited a masked comitup-web
 #    (defensive; pi-gen's stock stages never mask it). Before the rsync,
 #    same ordering as apply-pi.sh: the mask symlink sits at the exact path

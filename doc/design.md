@@ -146,6 +146,31 @@ enable_nuke: true
   あり、「パッチ済み」であることが構造的に「通知済み」であることを含意する
   ようにしている。旧版（4 行のみでこの通知を持たない）が当たっている
   デバイスは、次回適用時に通知だけを追記する「upgrade」パスで治癒する。
+- **接続先が消えたときに AP へ戻らない**（`lib/patch_comitup_reconnect.py`）:
+  comitup 1.43 の `mdns.py` は avahi の EntryGroup プロキシを起動時に 1 つ
+  作って使い続ける。`50-palmimo-avahi`（#683）が STA up のたびに avahi を
+  再起動するため、そのプロキシは消えた D-Bus 名を指したままになる。次に
+  接続先が消えると `hotspot_start()` が AP を起動する前に
+  `mdns.clear_entries()` で `DBusException(ServiceUnknown)` を投げ、GLib
+  コールバックごと落ちて **再起動するまで AP が立たない**。例外は
+  `/var/log/comitup.log` には出ず `journalctl -u comitup` にだけ出る。
+  2026-10-20 に実機で再現（他に保存済みネットワークが無い状態で接続先を
+  消すと、4 分間 AP が一度も立たなかった）。他の候補が保存されていると
+  NetworkManager 自身の autoconnect が先に拾うため表に出ない。
+  パッチは古いプロキシを捨てて作り直し、avahi が不在でも mDNS を飛ばすだけで
+  状態遷移を止めない。#683 のフックはそのまま残す。適用後の実機確認
+  （2026-10-21）: 接続先が消えてから 42 秒で AP が立ち、接続先が戻ると
+  次の再試行（失敗後は 360 秒周期）で自動的に再接続した
+- 同じパッチで `nm.py` の `get_candidate_connections()` を
+  `connection.autoconnect-priority` の高い順（同順位は ListConnections 順）に
+  並べる。comitup 1.43 は優先度を見ず ListConnections 順に試すため、
+  ユーザーが付けた優先度が comitup の再試行順に反映されなかった。
+  優先度は comitup の設定キャッシュを通さず毎回 NetworkManager から読むので、
+  comitup の実行中に並べ替えても次の再試行から効く。
+  GPLv2 2(a) の変更通知・アンカー欠落時の fail loud は nm.py パッチと同じ。
+  冪等性の判定キーは変更ごとの通知文言。既存の nm.py パッチは
+  `Modified by Jizai Inc.` の有無で当て済みと判定するので、このパッチより
+  **先に**当てる（apply-pi.sh・pi-gen とも、順序をテストで固定）
 - avahi-daemon が enable であることの確認
 - `/etc/network/interfaces` に Wi-Fi 定義が無いことの確認（あれば fail、
   自動では消さない — 手焼き環境の意図的設定を壊さない）
@@ -428,6 +453,8 @@ pi-gen（[RPi-Distro/pi-gen](https://github.com/RPi-Distro/pi-gen)、`arm64`
 - `packages.txt` — apt パッケージリスト（1 行 1 パッケージ）
 - `lib/patch_comitup_nm.py` — WPA2/PMF nm.py パッチ（旧: apply-pi.sh に
   埋め込みだった heredoc をファイル化。冪等・fail-loud の挙動は不変）
+- `lib/patch_comitup_reconnect.py` — AP フォールバックと候補順の
+  mdns.py / nm.py パッチ（nm.py パッチと同じ「コピーして当てて消す」契約）
 - `files/`（既存） — 適用先パスをそのまま再現したツリー
 
 apply-pi.sh は `packages.txt` を読んで apt install し、
