@@ -37,6 +37,7 @@ APPLY_SCRIPT = IMAGE_DIR / "apply-pi.sh"
 MAKE_IDENTITY_SCRIPT = IMAGE_DIR / "tools" / "make_identity.py"
 PACKAGES_TXT = IMAGE_DIR / "packages.txt"
 PATCH_NM_PY_LIB = IMAGE_DIR / "lib" / "patch_comitup_nm.py"
+PATCH_RECONNECT_LIB = IMAGE_DIR / "lib" / "patch_comitup_reconnect.py"
 
 PIGEN_DIR = IMAGE_DIR / "pigen"
 PIGEN_README = PIGEN_DIR / "README.md"
@@ -594,6 +595,246 @@ def test_apply_pi_sh_pipes_the_shared_patch_script_over_ssh() -> None:
     # heredoc delimiter -- distinct from the PATCH_NM_PY_SCRIPT variable name
     # this refactor introduces).
     assert '<<"PATCH_NM_PY"' not in text
+
+
+# ---------------------------------------------------------------------------
+# lib/patch_comitup_reconnect.py: AP fallback after an avahi restart, and
+# saved networks tried in autoconnect-priority order
+# ---------------------------------------------------------------------------
+
+
+# Stand-ins for comitup 1.43's mdns.py / nm.py, written for these tests:
+# the signature lines the patch checks for, the module globals its wrappers
+# use, and the same failure shape (a cached avahi group that raises once
+# avahi has restarted; candidates in ListConnections order).
+_FAKE_MDNS_PY = """\
+import logging
+log = logging.getLogger("comitup")
+group = None
+
+
+def establish_group() -> None:
+    global group
+    if not group:
+        bus = dbus.SystemBus()
+        server = bus.get_object("org.freedesktop.Avahi", "/")
+        group = bus.get_object("org.freedesktop.Avahi", server.EntryGroupNew())
+
+
+def clear_entries(emphatic=False) -> None:
+    global group
+    if group and not group.IsEmpty():
+        group.Reset()
+    establish_group()
+
+
+if __name__ == "__main__":
+    pass
+"""
+
+_FAKE_NM_PY = """\
+import logging
+import types
+from typing import Dict, List
+log = logging.getLogger("comitup")
+nm = types.SimpleNamespace(Device=object)
+CONNECTIONS = []
+
+
+def get_all_connections():
+    return CONNECTIONS
+
+
+def get_connection_settings(conn):
+    return conn
+
+
+def get_ssid_from_connection(conn):
+    return conn["802-11-wireless"]["ssid"]
+
+
+def get_candidate_connections(device: nm.Device) -> List[str]:
+    return [
+        get_ssid_from_connection(c)
+        for c in get_all_connections()
+        if c["802-11-wireless"]["mode"] == "infrastructure"
+    ]
+
+
+if __name__ == "__main__":
+    pass
+"""
+
+
+class _FakeDBusError(Exception):
+    pass
+
+
+class _FakeAvahi:
+    """One avahi-daemon lifetime: groups it hands out die when it restarts."""
+
+    def __init__(self) -> None:
+        self.generation = 0
+        self.running = True
+
+    def restart(self) -> None:
+        self.generation += 1
+
+    def bus(self):
+        avahi = self
+
+        class Group:
+            def __init__(self) -> None:
+                self.generation = avahi.generation
+
+            def _check(self) -> None:
+                if self.generation != avahi.generation:
+                    raise _FakeDBusError("ServiceUnknown: The name :1.3 was not provided")
+
+            def IsEmpty(self) -> bool:  # noqa: N802 -- avahi D-Bus method name
+                self._check()
+                return False
+
+            def Reset(self) -> None:  # noqa: N802 -- avahi D-Bus method name
+                self._check()
+
+            def Free(self) -> None:  # noqa: N802 -- avahi D-Bus method name
+                self._check()
+
+        class Server:
+            def EntryGroupNew(self) -> str:  # noqa: N802 -- avahi D-Bus method name
+                return "/group"
+
+        class Bus:
+            def get_object(self, name: str, path: str):
+                if not avahi.running:
+                    raise _FakeDBusError("ServiceUnknown: org.freedesktop.Avahi")
+                return Server() if path == "/" else Group()
+
+        return Bus()
+
+    def dbus_module(self):
+        import types
+
+        return types.SimpleNamespace(
+            SystemBus=self.bus,
+            Interface=lambda obj, iface: obj,
+            exceptions=types.SimpleNamespace(DBusException=_FakeDBusError),
+        )
+
+
+def _run_reconnect_patch(comitup_dir: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(PATCH_RECONNECT_LIB), str(comitup_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _exec_module(path: Path, **namespace) -> dict:
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+    return namespace
+
+
+@pytest.fixture
+def fake_comitup(tmp_path: Path) -> Path:
+    # LF like the installed comitup, whatever the host platform writes.
+    (tmp_path / "mdns.py").write_text(_FAKE_MDNS_PY, encoding="utf-8", newline="\n")
+    (tmp_path / "nm.py").write_text(_FAKE_NM_PY, encoding="utf-8", newline="\n")
+    return tmp_path
+
+
+def test_reconnect_patch_clear_entries_survives_an_avahi_restart(fake_comitup: Path) -> None:
+    # The on-device failure (woody3, 2026-10-20): 50-palmimo-avahi restarts
+    # avahi on STA up, the cached group goes stale, and the next
+    # hotspot_start() dies in clear_entries() before activating the AP.
+    avahi = _FakeAvahi()
+    unpatched = _exec_module(fake_comitup / "mdns.py", dbus=avahi.dbus_module())
+    unpatched["establish_group"]()
+    avahi.restart()
+    with pytest.raises(_FakeDBusError):
+        unpatched["clear_entries"]()
+
+    result = _run_reconnect_patch(fake_comitup)
+    assert result.returncode == 0, result.stderr
+
+    avahi = _FakeAvahi()
+    mdns = _exec_module(fake_comitup / "mdns.py", dbus=avahi.dbus_module())
+    mdns["establish_group"]()
+    avahi.restart()
+    mdns["clear_entries"]()
+    assert mdns["group"] is not None
+    assert mdns["group"].generation == avahi.generation
+
+
+def test_reconnect_patch_skips_mdns_when_avahi_is_down(fake_comitup: Path) -> None:
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+
+    avahi = _FakeAvahi()
+    avahi.running = False
+    mdns = _exec_module(fake_comitup / "mdns.py", dbus=avahi.dbus_module())
+    mdns["clear_entries"]()
+    assert mdns["group"] is None
+
+
+def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup: Path) -> None:
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+
+    def conn(ssid: str, mode: str = "infrastructure", priority: int | None = None) -> dict:
+        connection = {"type": "802-11-wireless"}
+        if priority is not None:
+            connection["autoconnect-priority"] = priority
+        return {"connection": connection, "802-11-wireless": {"ssid": ssid, "mode": mode}}
+
+    nm = _exec_module(fake_comitup / "nm.py")
+    nm["CONNECTIONS"].extend(
+        [
+            conn("office"),
+            conn("palmimo-ap", mode="ap", priority=100),
+            conn("phone", priority=20),
+            conn("lab", priority=0),
+            conn("home", priority=20),
+        ]
+    )
+    # Highest first; ties keep ListConnections order; the AP is never a candidate.
+    assert nm["get_candidate_connections"](None) == ["phone", "home", "office", "lab"]
+
+
+def test_reconnect_patch_adds_dated_notices_and_is_a_noop_when_run_twice(
+    fake_comitup: Path,
+) -> None:
+    first = _run_reconnect_patch(fake_comitup)
+    assert first.returncode == 0, first.stderr
+    today = datetime.date.today().isoformat()
+    for name in ("mdns.py", "nm.py"):
+        text = (fake_comitup / name).read_text(encoding="utf-8")
+        assert f"# Modified by Jizai Inc. on {today}:" in text
+        assert "GPLv2 section 2(a) notice" in text
+    patched = {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")}
+
+    second = _run_reconnect_patch(fake_comitup)
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.count("already patched") == 2
+    assert {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")} == patched
+
+
+def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path) -> None:
+    (fake_comitup / "nm.py").write_text("def get_candidate_connections(device):\n    return []\n", encoding="utf-8")
+
+    result = _run_reconnect_patch(fake_comitup)
+    assert result.returncode == 1
+    assert "comitup 1.43" in result.stderr
+
+
+def test_reconnect_patch_is_wired_into_apply_pi_and_the_pigen_core_step() -> None:
+    apply_text = _text(APPLY_SCRIPT)
+    assert 'PATCH_RECONNECT_SCRIPT="${IMAGE_DIR}/lib/patch_comitup_reconnect.py"' in apply_text
+    assert "'sudo python3 -' <\"$PATCH_RECONNECT_SCRIPT\"" in apply_text
+
+    core_text = _text(STAGE_CORE_RUN)
+    assert "python3 /tmp/patch_comitup_reconnect.py" in core_text
+    # Patch, don't ship the patcher.
+    assert 'rm -f "${ROOTFS_DIR}/tmp/patch_comitup_reconnect.py"' in core_text
 
 
 def test_tag_validation_regex_literal_present_in_apply_pi_and_portal_stage() -> None:
