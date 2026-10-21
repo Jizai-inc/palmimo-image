@@ -96,8 +96,14 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
     priorities: Dict[str, int] = {{}}
     for conn in get_all_connections():
         ssid = get_ssid_from_connection(conn)
-        if ssid and ssid not in priorities:
-            settings = get_connection_settings(conn)
+        # Uncached, unlike get_connection_settings(): a priority changed while
+        # comitup runs (the Portal reorders saved networks) must count now.
+        settings = conn.GetSettings()
+        if (
+            ssid
+            and ssid not in priorities
+            and settings.get("802-11-wireless", {{}}).get("mode") == "infrastructure"
+        ):
             priorities[ssid] = int(settings["connection"].get("autoconnect-priority", 0))
 
     candidates = _comitup_get_candidate_connections(device)

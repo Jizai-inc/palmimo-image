@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -633,12 +634,22 @@ if __name__ == "__main__":
 """
 
 _FAKE_NM_PY = """\
+import copy
 import logging
 import types
 from typing import Dict, List
 log = logging.getLogger("comitup")
 nm = types.SimpleNamespace(Device=object)
 CONNECTIONS = []
+settings_cache = {}
+
+
+class Connection:
+    def __init__(self, settings):
+        self.settings = settings
+
+    def GetSettings(self):
+        return copy.deepcopy(self.settings)
 
 
 def get_all_connections():
@@ -646,18 +657,21 @@ def get_all_connections():
 
 
 def get_connection_settings(conn):
-    return conn
+    # Cached for comitup's lifetime, like the real one.
+    if id(conn) not in settings_cache:
+        settings_cache[id(conn)] = conn.GetSettings()
+    return settings_cache[id(conn)]
 
 
 def get_ssid_from_connection(conn):
-    return conn["802-11-wireless"]["ssid"]
+    return get_connection_settings(conn)["802-11-wireless"]["ssid"]
 
 
 def get_candidate_connections(device: nm.Device) -> List[str]:
     return [
         get_ssid_from_connection(c)
         for c in get_all_connections()
-        if c["802-11-wireless"]["mode"] == "infrastructure"
+        if get_connection_settings(c)["802-11-wireless"]["mode"] == "infrastructure"
     ]
 
 
@@ -680,7 +694,7 @@ class _FakeAvahi:
     def restart(self) -> None:
         self.generation += 1
 
-    def bus(self):
+    def bus(self) -> Any:
         avahi = self
 
         class Group:
@@ -706,14 +720,14 @@ class _FakeAvahi:
                 return "/group"
 
         class Bus:
-            def get_object(self, name: str, path: str):
+            def get_object(self, name: str, path: str) -> Any:
                 if not avahi.running:
                     raise _FakeDBusError("ServiceUnknown: org.freedesktop.Avahi")
                 return Server() if path == "/" else Group()
 
         return Bus()
 
-    def dbus_module(self):
+    def dbus_module(self) -> Any:
         import types
 
         return types.SimpleNamespace(
@@ -723,7 +737,7 @@ class _FakeAvahi:
         )
 
 
-def _run_reconnect_patch(comitup_dir: Path) -> subprocess.CompletedProcess:
+def _run_reconnect_patch(comitup_dir: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(PATCH_RECONNECT_LIB), str(comitup_dir)],
         capture_output=True,
@@ -731,7 +745,7 @@ def _run_reconnect_patch(comitup_dir: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _exec_module(path: Path, **namespace) -> dict:
+def _exec_module(path: Path, **namespace: Any) -> dict[str, Any]:
     exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
     return namespace
 
@@ -780,15 +794,18 @@ def test_reconnect_patch_skips_mdns_when_avahi_is_down(fake_comitup: Path) -> No
 def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup: Path) -> None:
     assert _run_reconnect_patch(fake_comitup).returncode == 0
 
-    def conn(ssid: str, mode: str = "infrastructure", priority: int | None = None) -> dict:
-        connection = {"type": "802-11-wireless"}
+    nm = _exec_module(fake_comitup / "nm.py")
+
+    def conn(ssid: str, mode: str = "infrastructure", priority: int | None = None) -> Any:
+        connection: dict[str, Any] = {"type": "802-11-wireless"}
         if priority is not None:
             connection["autoconnect-priority"] = priority
-        return {"connection": connection, "802-11-wireless": {"ssid": ssid, "mode": mode}}
+        return nm["Connection"]({"connection": connection, "802-11-wireless": {"ssid": ssid, "mode": mode}})
 
-    nm = _exec_module(fake_comitup / "nm.py")
     nm["CONNECTIONS"].extend(
         [
+            # An AP profile sharing a candidate's SSID must not lend it its priority.
+            conn("office", mode="ap", priority=100),
             conn("office"),
             conn("palmimo-ap", mode="ap", priority=100),
             conn("phone", priority=20),
@@ -798,6 +815,11 @@ def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup:
     )
     # Highest first; ties keep ListConnections order; the AP is never a candidate.
     assert nm["get_candidate_connections"](None) == ["phone", "home", "office", "lab"]
+
+    # A priority changed while comitup runs (the Portal reordering saved
+    # networks) counts on the next call, despite comitup's settings cache.
+    nm["CONNECTIONS"][-1].settings["connection"]["autoconnect-priority"] = 30
+    assert nm["get_candidate_connections"](None) == ["home", "phone", "office", "lab"]
 
 
 def test_reconnect_patch_adds_dated_notices_and_is_a_noop_when_run_twice(
@@ -835,6 +857,14 @@ def test_reconnect_patch_is_wired_into_apply_pi_and_the_pigen_core_step() -> Non
     assert "python3 /tmp/patch_comitup_reconnect.py" in core_text
     # Patch, don't ship the patcher.
     assert 'rm -f "${ROOTFS_DIR}/tmp/patch_comitup_reconnect.py"' in core_text
+
+    # The nm.py WPA2/PMF patch treats any "Modified by Jizai Inc." as already
+    # applied, and this patch's notice contains that phrase too: it must run
+    # first, or a fresh nm.py would ship without the hotspot-security fix.
+    assert apply_text.index('<"$PATCH_NM_PY_SCRIPT"') < apply_text.index('<"$PATCH_RECONNECT_SCRIPT"')
+    assert core_text.index("python3 /tmp/patch_comitup_nm.py") < core_text.index(
+        "python3 /tmp/patch_comitup_reconnect.py"
+    )
 
 
 def test_tag_validation_regex_literal_present_in_apply_pi_and_portal_stage() -> None:

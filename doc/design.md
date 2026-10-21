@@ -165,9 +165,12 @@ enable_nuke: true
   `connection.autoconnect-priority` の高い順（同順位は ListConnections 順）に
   並べる。comitup 1.43 は優先度を見ず ListConnections 順に試すため、
   ユーザーが付けた優先度が comitup の再試行順に反映されなかった。
+  優先度は comitup の設定キャッシュを通さず毎回 NetworkManager から読むので、
+  comitup の実行中に並べ替えても次の再試行から効く。
   GPLv2 2(a) の変更通知・アンカー欠落時の fail loud は nm.py パッチと同じ。
-  冪等性の判定キーは変更ごとの通知文言で、既存の nm.py パッチの
-  通知マーカーとは独立している
+  冪等性の判定キーは変更ごとの通知文言。既存の nm.py パッチは
+  `Modified by Jizai Inc.` の有無で当て済みと判定するので、このパッチより
+  **先に**当てる（apply-pi.sh・pi-gen とも、順序をテストで固定）
 - avahi-daemon が enable であることの確認
 - `/etc/network/interfaces` に Wi-Fi 定義が無いことの確認（あれば fail、
   自動では消さない — 手焼き環境の意図的設定を壊さない）
