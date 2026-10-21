@@ -146,7 +146,7 @@ enable_nuke: true
   あり、「パッチ済み」であることが構造的に「通知済み」であることを含意する
   ようにしている。旧版（4 行のみでこの通知を持たない）が当たっている
   デバイスは、次回適用時に通知だけを追記する「upgrade」パスで治癒する。
-- **接続先が消えたときに AP へ戻らない**（`lib/patch_comitup_reconnect.py`）:
+- **接続先が消えたときに AP へ戻らない**（`platform/lib/patch_comitup_reconnect.py`）:
   comitup 1.43 の `mdns.py` は avahi の EntryGroup プロキシを起動時に 1 つ
   作って使い続ける。`50-palmimo-avahi`（#683）が STA up のたびに avahi を
   再起動するため、そのプロキシは消えた D-Bus 名を指したままになる。次に
@@ -305,7 +305,7 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    スキップ）→ システムの `dnsmasq.service` を `disable --now`
    （comitup が自分の dnsmasq を spawn するため、システム側が port 53 を
    握っていてはいけない。バイナリだけ入っていれば comitup から呼べる）
-2. comitup の `nm.py` に WPA2/PMF パッチを当てる（`lib/patch_comitup_nm.py`
+2. comitup の `nm.py` に WPA2/PMF パッチを当てる（`platform/lib/patch_comitup_nm.py`
    を `sudo python3 -` にパイプ。GPLv2 2(a) の変更通知マーカー
    （`Modified by Jizai Inc.`）が既に含まれていれば「already patched」で
    exit 0、アンカー行が無ければ fail loud）
@@ -451,14 +451,14 @@ pi-gen（[RPi-Distro/pi-gen](https://github.com/RPi-Distro/pi-gen)、`arm64`
 実体を切り出した:
 
 - `packages.txt` — apt パッケージリスト（1 行 1 パッケージ）
-- `lib/patch_comitup_nm.py` — WPA2/PMF nm.py パッチ（旧: apply-pi.sh に
+- `platform/lib/patch_comitup_nm.py` — WPA2/PMF nm.py パッチ（旧: apply-pi.sh に
   埋め込みだった heredoc をファイル化。冪等・fail-loud の挙動は不変）
-- `lib/patch_comitup_reconnect.py` — AP フォールバックと候補順の
+- `platform/lib/patch_comitup_reconnect.py` — AP フォールバックと候補順の
   mdns.py / nm.py パッチ（nm.py パッチと同じ「コピーして当てて消す」契約）
 - `files/`（既存） — 適用先パスをそのまま再現したツリー
 
 apply-pi.sh は `packages.txt` を読んで apt install し、
-`lib/patch_comitup_nm.py` を SSH 越しに `sudo python3 -` へパイプする
+`platform/lib/patch_comitup_nm.py` を SSH 越しに `sudo python3 -` へパイプする
 （埋め込みをやめただけで、SSH 越しに当てる動作自体は不変）。
 
 pi-gen 側は Docker ビルドの構造上、pi-gen チェックアウトの外にあるファイルは
@@ -466,7 +466,7 @@ pi-gen 側は Docker ビルドの構造上、pi-gen チェックアウトの外�
 焼き込むため）。そこで `PIGEN_DOCKER_OPTS` の `--volume` でこのリポジトリを
 コンテナに `/palmimo-image` として bind mount し、`config` の
 `PALMIMO_IMAGE_DIR=/palmimo-image` 経由でステージの
-スクリプトから読む。`files/` と `lib/patch_comitup_nm.py` はチェックイン
+スクリプトから読む。`files/` と `platform/lib/patch_comitup_nm.py` はチェックイン
 コピーを作らずこの経路で直接読む。`00-packages`（pi-gen がステージ内に
 要求する固定ファイル名）だけは `stage-palmimo/prerun.sh` がビルド時に
 `packages.txt` からコピー生成する（チェックインしない — ドリフトしようが

@@ -30,7 +30,7 @@ if [ "${PALMIMO_SKIP_CORRESPONDING_SOURCE:-}" != "1" ]; then
 fi
 
 # 2. Run the collector (copy in, run, delete -- same contract as
-#    lib/patch_comitup_nm.py in 01-palmimo-core).
+#    platform/lib/patch_comitup_nm.py in 01-palmimo-core).
 install -m 0644 "${PALMIMO_IMAGE_DIR}/lib/collect_oss_compliance.py" "${COLLECTOR_TMP}"
 install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-source-exclude.txt" "${EXCLUDE_TMP}"
 install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-copyright-missing-allow.txt" "${COPYRIGHT_ALLOW_TMP}"

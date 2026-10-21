@@ -36,7 +36,7 @@ pi-gen の Docker ビルドは `docker build` 時点のチェックアウトを
 `stage-palmimo` 自身のスクリプトは小さくステージの形をしているので、
 他のステージと同様に pi-gen ツリーへ cp する（symlink は Docker ビルド内で
 dangling になる）。一方、このリポジトリが所有する大きな共有入力
-（`../packages.txt`・`../lib/patch_comitup_nm.py`・`../files/`）はこの
+（`../packages.txt`・`../platform/lib/patch_comitup_nm.py`・`../files/`）はこの
 ディレクトリへ複製しない — `stage-palmimo/prerun.sh` と
 `01-palmimo-core/00-run.sh` がビルド時に `$PALMIMO_IMAGE_DIR`
 （`/palmimo-image`、bind mount で解決）から読む。

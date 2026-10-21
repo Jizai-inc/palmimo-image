@@ -37,8 +37,8 @@ FIRSTBOOT_SCRIPT = FILES_DIR / "usr" / "local" / "lib" / "palmimo" / "firstboot.
 APPLY_SCRIPT = IMAGE_DIR / "apply-pi.sh"
 MAKE_IDENTITY_SCRIPT = IMAGE_DIR / "tools" / "make_identity.py"
 PACKAGES_TXT = IMAGE_DIR / "packages.txt"
-PATCH_NM_PY_LIB = IMAGE_DIR / "lib" / "patch_comitup_nm.py"
-PATCH_RECONNECT_LIB = IMAGE_DIR / "lib" / "patch_comitup_reconnect.py"
+PATCH_NM_PY_LIB = IMAGE_DIR / "platform" / "lib" / "patch_comitup_nm.py"
+PATCH_RECONNECT_LIB = IMAGE_DIR / "platform" / "lib" / "patch_comitup_reconnect.py"
 
 PIGEN_DIR = IMAGE_DIR / "pigen"
 PIGEN_README = PIGEN_DIR / "README.md"
@@ -444,7 +444,7 @@ def test_packages_txt_covers_every_platform_manifest_apt_package() -> None:
 
 
 # ---------------------------------------------------------------------------
-# lib/patch_comitup_nm.py: the shared WPA2/PMF nm.py patch, referenced (not
+# platform/lib/patch_comitup_nm.py: the shared WPA2/PMF nm.py patch, referenced (not
 # duplicated) by apply-pi.sh
 # ---------------------------------------------------------------------------
 
@@ -590,7 +590,7 @@ def test_patch_comitup_nm_py_fails_loud_when_anchor_missing(tmp_path: Path) -> N
 
 def test_apply_pi_sh_pipes_the_shared_patch_script_over_ssh() -> None:
     text = _text(APPLY_SCRIPT)
-    assert 'PATCH_NM_PY_SCRIPT="${IMAGE_DIR}/lib/patch_comitup_nm.py"' in text
+    assert 'PATCH_NM_PY_SCRIPT="${IMAGE_DIR}/platform/lib/patch_comitup_nm.py"' in text
     assert "'sudo python3 -' <\"$PATCH_NM_PY_SCRIPT\"" in text
     # No inline heredoc copy of the patch left over in apply-pi.sh (the old
     # heredoc delimiter -- distinct from the PATCH_NM_PY_SCRIPT variable name
@@ -599,7 +599,7 @@ def test_apply_pi_sh_pipes_the_shared_patch_script_over_ssh() -> None:
 
 
 # ---------------------------------------------------------------------------
-# lib/patch_comitup_reconnect.py: AP fallback after an avahi restart, and
+# platform/lib/patch_comitup_reconnect.py: AP fallback after an avahi restart, and
 # saved networks tried in autoconnect-priority order
 # ---------------------------------------------------------------------------
 
@@ -866,9 +866,36 @@ def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path
     assert "comitup 1.43" in result.stderr
 
 
+def test_platform_bundle_ships_both_comitup_patches(tmp_path: Path) -> None:
+    out = tmp_path / "bundle.tar.gz"
+    subprocess.run(
+        [sys.executable, str(IMAGE_DIR / "tools" / "build_platform_bundle.py"), "--out", str(out)],
+        check=True,
+        capture_output=True,
+    )
+    import tarfile
+
+    with tarfile.open(out) as tar:
+        names = tar.getnames()
+    assert "lib/patch_comitup_nm.py" in names
+    assert "lib/patch_comitup_reconnect.py" in names
+
+
+def test_platform_install_patches_comitup_after_apt_with_the_nm_patch_first() -> None:
+    # Ships the comitup fixes to devices already in the field through a
+    # Portal platform update; the nm.py patch reads any "Modified by Jizai
+    # Inc." as applied, so it must run before the reconnect patch.
+    text = _text(IMAGE_DIR / "platform" / "install.sh")
+    body = text[text.index("do_install() {") :]
+    assert body.index("install_apt_packages") < body.index("patch_comitup")
+    function = text[text.index("patch_comitup() {") :]
+    assert function.index("lib/patch_comitup_nm.py") < function.index("lib/patch_comitup_reconnect.py")
+    assert "systemctl try-restart comitup.service" in function
+
+
 def test_reconnect_patch_is_wired_into_apply_pi_and_the_pigen_core_step() -> None:
     apply_text = _text(APPLY_SCRIPT)
-    assert 'PATCH_RECONNECT_SCRIPT="${IMAGE_DIR}/lib/patch_comitup_reconnect.py"' in apply_text
+    assert 'PATCH_RECONNECT_SCRIPT="${IMAGE_DIR}/platform/lib/patch_comitup_reconnect.py"' in apply_text
     assert "'sudo python3 -' <\"$PATCH_RECONNECT_SCRIPT\"" in apply_text
 
     core_text = _text(STAGE_CORE_RUN)
