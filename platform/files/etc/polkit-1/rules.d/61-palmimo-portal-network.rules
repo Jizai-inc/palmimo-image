@@ -1,0 +1,16 @@
+// Lets the Portal's own account edit the saved Wi-Fi networks (add, delete,
+// reorder by autoconnect-priority) and switch between them through
+// NetworkManager. Kept separate from 60-palmimo-app-platform.rules so the
+// network grant can be reasoned about and revoked on its own.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "user") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (
+        action.id === "org.freedesktop.NetworkManager.settings.modify.system" ||
+        action.id === "org.freedesktop.NetworkManager.network-control"
+    ) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});
