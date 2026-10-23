@@ -105,7 +105,8 @@ jobs:
       - name: Stub uv (this check never needs a real one)
         run: |
           mkdir -p /tmp/stub-bin
-          printf '#!/bin/sh\necho fake-uv\n' >"$PALMIMO_UV_SOURCE"
+          version="$(python3 -c 'import json; print(json.load(open("platform/manifest.json"))["owns"]["external_binaries"][0]["version"])')"
+          printf '#!/bin/sh\necho uv %s\n' "$version" >"$PALMIMO_UV_SOURCE"
           chmod +x "$PALMIMO_UV_SOURCE"
 
       - name: Fresh install converges and verifies clean

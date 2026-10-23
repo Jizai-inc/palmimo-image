@@ -41,6 +41,12 @@ def cmd_external_binaries(manifest: dict) -> None:
         print(f"{entry['path']}\t{entry['mode']}\t{entry['owner']}\t{entry['group']}")
 
 
+def cmd_uv(manifest: dict) -> None:
+    entry = next(e for e in manifest["owns"]["external_binaries"] if e["path"] == "usr/local/bin/uv")
+    entry["url"] = entry["url"].format(version=entry["version"])
+    print("\t".join(entry[key] for key in ("path", "mode", "owner", "group", "version", "url", "sha256")))
+
+
 def cmd_bundle_cache(manifest: dict) -> None:
     for entry in manifest["owns"]["bundle_cache"]:
         print(f"{entry['path']}\t{entry['mode']}\t{entry['owner']}\t{entry['group']}")
@@ -49,6 +55,11 @@ def cmd_bundle_cache(manifest: dict) -> None:
 def cmd_apt_packages(manifest: dict) -> None:
     for name in manifest["owns"]["apt_packages"]:
         print(name)
+
+
+def cmd_apt_minimum_versions(manifest: dict) -> None:
+    for name, minimum in manifest["owns"].get("apt_minimum_versions", {}).items():
+        print(f"{name}\t{minimum}")
 
 
 def cmd_retired(manifest: dict) -> None:
@@ -65,12 +76,14 @@ def cmd_repair_root_owned(manifest: dict) -> None:
 
 COMMANDS = {
     "version": cmd_version,
+    "uv": cmd_uv,
     "files": cmd_files,
     "managed-directories": cmd_managed_directories,
     "state-directories": cmd_state_directories,
     "external-binaries": cmd_external_binaries,
     "bundle-cache": cmd_bundle_cache,
     "apt-packages": cmd_apt_packages,
+    "apt-minimum-versions": cmd_apt_minimum_versions,
     "retired": cmd_retired,
     "repair-root-owned": cmd_repair_root_owned,
 }
