@@ -101,10 +101,11 @@ ssh -o BatchMode=yes "$PI_HOST" 'sudo python3 -' <"$PATCH_NM_PY_SCRIPT"
 ssh -o BatchMode=yes "$PI_HOST" 'sudo python3 -' <"$PATCH_RECONNECT_SCRIPT"
 
 echo "==> [3/9] uv"
-# idempotent: only installs if ~/.local/bin/uv is missing. Single-quoted on
-# purpose: $HOME must expand on the remote (Pi) shell, not here.
-# shellcheck disable=SC2016
-ssh_run 'test -x "$HOME/.local/bin/uv" || curl -LsSf https://astral.sh/uv/install.sh | sh'
+rsync -az \
+  --rsync-path='sudo rsync' \
+  -e 'ssh -o BatchMode=yes' \
+  "${IMAGE_DIR}/platform/" "${PI_HOST}:/tmp/palmimo-platform/"
+ssh_run "sudo /tmp/palmimo-platform/install.sh uv --root /"
 
 echo "==> [4/9] palmimo-portal @ ${PORTAL_TAG}"
 # Idempotent clone-or-update: a fresh Pi gets a tagged clone; a Pi that
@@ -247,10 +248,6 @@ echo "==> [8b/9] app execution platform"
 PLATFORM_BUNDLE_TAR="$(mktemp -u).tar.gz"
 PLATFORM_BUNDLE_SHA256="$(uv run "${IMAGE_DIR}/tools/build_platform_bundle.py" --out "$PLATFORM_BUNDLE_TAR")"
 rm -f "$PLATFORM_BUNDLE_TAR"
-rsync -az \
-  --rsync-path='sudo rsync' \
-  -e 'ssh -o BatchMode=yes' \
-  "${IMAGE_DIR}/platform/" "${PI_HOST}:/tmp/palmimo-platform/"
 ssh_run "sudo /tmp/palmimo-platform/install.sh install --root / && \
   sudo /tmp/palmimo-platform/install.sh record --root / --sha '${PLATFORM_BUNDLE_SHA256}' && \
   rm -rf /tmp/palmimo-platform"

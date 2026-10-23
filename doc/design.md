@@ -72,7 +72,7 @@ WantedBy=multi-user.target
 
 - `PALMIMO_PORTAL_DIR` は既定（settings が自リポジトリルートを導出）で
   正しいため設定しない。`PALMIMO_UPDATE_REPO` も既定のまま
-- uv は Pi 側 `~/.local/bin/uv`（settings のフォールバック解決に一致）
+- uv の配置・更新方針は[uv と管理 Python](#uv-と管理-python)を参照
 - ログは journald に集約（`palmimo-portal` unit 名で引ける）。
   ファイルログは持たない
 
@@ -309,7 +309,7 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    を `sudo python3 -` にパイプ。GPLv2 2(a) の変更通知マーカー
    （`Modified by Jizai Inc.`）が既に含まれていれば「already patched」で
    exit 0、アンカー行が無ければ fail loud）
-3. uv: 無ければ導入（`~/.local/bin/uv`）
+3. uv: platform の共通 installer を呼ぶ（[更新方針](#uv-と管理-python)）
 4. palmimo-portal: `/home/user/palmimo-portal` に **タグの clone**
    （既存なら `fetch` + そのタグへ `checkout --detach`）→ uv の frozen 同期
    → venv の python で `-m palmimo_portal.fetch_static --tag $PORTAL_TAG` を実行
@@ -638,3 +638,20 @@ platform 更新の直後にも用意する。SDK はロックファイルを `06
   python-build-standalone の `licenses/` をそのまま採るかを決める
   （`collect_oss_compliance.py` は現状検出して `STATUS: INCOMPLETE` にする
   だけ — readline(GPLv3) 静的リンクの出荷可否は人間が判断）
+
+### uv と管理 Python
+
+uv の版・取得 URL・sha256 は `platform/manifest.json` の
+`owns.external_binaries` に固定する（URL の `{version}` は固定版で展開する）。platform 更新、pi-gen、apply-pi.sh は
+すべて `platform/install.sh` の同じ取得・照合・配置処理を呼ぶ。
+`/usr/local/bin/uv` は固定版に一致させ、`/home/user/.local/bin/uv`
+（Portal settings のフォールバック先）は無いか古い場合だけ更新する。
+標準ユーザー以外の home は変更しない。verify は所有者・グループ・mode を検査し、
+uv の版はアプリ起動を妨げる差分にしない。
+
+`install --root /` は uv 配置後、インタプリタがある置き場だけ
+`UV_PYTHON_INSTALL_BIN=0 uv python upgrade --no-config` を user 権限で実行する（`~/.local/bin` に実行ファイルを置かない）。対象は
+`/var/lib/palmimo/uv-python`（user:palmimo-apps、setgid）と
+`/home/user/.local/share/uv/python`。`UV_PYTHON_DOWNLOADS` を引き継がず、
+取得・照合・Python 更新の失敗は install を失敗させ、record へ進めない。
+chroot でインタプリタが未導入なら Python 更新を省略する。

@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import types
 from pathlib import Path
 
@@ -51,26 +52,200 @@ _PLATFORM_INTERNAL_MARKERS = [
 ]
 
 
-def _stub_uv(tmp_path: Path) -> Path:
+def _stub_uv(tmp_path: Path, version: str | None = None) -> Path:
     stub = tmp_path / "fake-uv"
-    stub.write_text("#!/bin/sh\necho fake-uv\n", encoding="utf-8")
+    version = version or json.loads(MANIFEST_PATH.read_text())["owns"]["external_binaries"][0]["version"]
+    stub.write_text(f'#!/bin/sh\n[ "$1" = --version ] || exit 99\necho uv {version}\n', encoding="utf-8")
     stub.chmod(0o755)
     return stub
 
 
 def _run_install(
-    root: Path, fake_accounts: Path, uv_source: Path, *, command: str = "install"
+    root: Path,
+    fake_accounts: Path,
+    uv_source: Path | None,
+    *,
+    command: str = "install",
+    installer: Path = INSTALL_SH,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(INSTALL_SH), command, "--root", str(root)],
+        ["bash", str(installer), command, "--root", str(root)],
         env={
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "PALMIMO_FAKE_ACCOUNTS": str(fake_accounts),
-            "PALMIMO_UV_SOURCE": str(uv_source),
+            **({"PALMIMO_UV_SOURCE": str(uv_source)} if uv_source else {}),
+            **(extra_env or {}),
         },
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize("installed_version", [None, "0.12.5", "0.13.5", "0.14.0"])
+def test_install_converges_system_uv_to_pin(tmp_path: Path, installed_version: str | None) -> None:
+    root = tmp_path / "root"
+    dest = root / "usr/local/bin/uv"
+    if installed_version:
+        dest.parent.mkdir(parents=True)
+        shutil.copy2(_stub_uv(tmp_path, installed_version), dest)
+        dest.chmod(0o700)
+    source = _stub_uv(tmp_path)
+    result = _run_install(root, tmp_path / "accounts", source)
+    assert result.returncode == 0, result.stderr
+    assert subprocess.check_output([str(dest), "--version"]) == subprocess.check_output([str(source), "--version"])
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o755
+
+
+@pytest.mark.skipif(
+    shutil.which("dpkg", path="/usr/bin:/bin:/usr/local/bin") is None, reason="requires Debian version comparison"
+)
+@pytest.mark.parametrize(
+    "installed_version,replace", [(None, True), ("0.12.5", True), ("0.13.5", False), ("0.14.0", False)]
+)
+def test_install_updates_only_older_user_uv(tmp_path: Path, installed_version: str | None, replace: bool) -> None:
+    root = tmp_path / "root"
+    dest = root / "home/user/.local/bin/uv"
+    member_uv = root / "home/member/.local/bin/uv"
+    member_uv.parent.mkdir(parents=True)
+    member_uv.write_text("member-owned")
+    before = b""
+    if installed_version:
+        dest.parent.mkdir(parents=True)
+        shutil.copy2(_stub_uv(tmp_path, installed_version), dest)
+        dest.chmod(0o700)
+        before = dest.read_bytes()
+    source = _stub_uv(tmp_path)
+    result = _run_install(root, tmp_path / "accounts", source)
+    assert result.returncode == 0, result.stderr
+    assert dest.read_bytes() == (source.read_bytes() if replace else before)
+    assert stat.S_IMODE(dest.stat().st_mode) == (0o755 if replace else 0o700)
+    assert member_uv.read_text() == "member-owned"
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires root to assert target account ownership")
+@pytest.mark.parametrize("existing_directories", [False, True])
+def test_install_user_uv_creates_only_missing_directories_as_user(tmp_path: Path, existing_directories: bool) -> None:
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc/passwd").write_text("root:x:0:0::/root:/bin/sh\nuser:x:1234:1234::/home/user:/bin/sh\n")
+    (root / "etc/group").write_text("root:x:0:\nuser:x:1234:\n")
+    home = root / "home/user"
+    home.mkdir(parents=True)
+    directories = (home / ".local", home / ".local/bin")
+    if existing_directories:
+        for directory in directories:
+            directory.mkdir()
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "uv", "--root", str(root)],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "PALMIMO_UV_SOURCE": str(_stub_uv(tmp_path))},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    expected_id = 0 if existing_directories else 1234
+    for directory in directories:
+        assert (directory.stat().st_uid, directory.stat().st_gid) == (expected_id, expected_id)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires root to install with target account ownership")
+def test_offline_install_keeps_newer_user_uv(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc/passwd").write_text("root:x:0:0::/root:/bin/sh\nuser:x:1234:1234::/home/user:/bin/sh\n")
+    (root / "etc/group").write_text("root:x:0:\nuser:x:1234:\n")
+    home_uv = root / "home/user/.local/bin/uv"
+    home_uv.parent.mkdir(parents=True)
+    (tmp_path / "newer").mkdir()
+    newer = _stub_uv(tmp_path / "newer", "0.14.0")
+    shutil.copy(newer, home_uv)
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "uv", "--root", str(root)],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "PALMIMO_UV_SOURCE": str(_stub_uv(tmp_path))},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert home_uv.read_bytes() == newer.read_bytes()
+
+
+@pytest.mark.parametrize("source_version", ["0.12.5", "0.14.0"])
+def test_install_rejects_unpinned_uv_source_without_replacing_binaries(tmp_path: Path, source_version: str) -> None:
+    root = tmp_path / "root"
+    dest = root / "usr/local/bin/uv"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("existing")
+    source = _stub_uv(tmp_path, source_version)
+    result = _run_install(root, tmp_path / "accounts", source)
+    assert result.returncode != 0
+    assert dest.read_text() == "existing"
+    assert not (root / "home/user/.local/bin/uv").exists()
+    assert not (root / "var/lib/palmimo/platform/installed.json").exists()
+
+
+@pytest.mark.parametrize("valid_hash", [False, True])
+def test_install_checks_uv_archive_before_placing_binaries(tmp_path: Path, valid_hash: bool) -> None:
+    bundle = tmp_path / "bundle"
+    shutil.copytree(PLATFORM_DIR, bundle)
+    archive = tmp_path / "uv.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(_stub_uv(tmp_path), arcname="uv-aarch64-unknown-linux-gnu/uv")
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    entry = manifest["owns"]["external_binaries"][0]
+    entry["url"] = archive.as_uri()
+    entry["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest() if valid_hash else "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "root"
+    result = _run_install(root, tmp_path / "accounts", None, installer=bundle / "install.sh")
+    assert (result.returncode == 0) == valid_hash, result.stderr
+    for path in ("usr/local/bin/uv", "home/user/.local/bin/uv"):
+        dest = root / path
+        if valid_hash:
+            assert dest.read_bytes() == (tmp_path / "fake-uv").read_bytes()
+        else:
+            assert not dest.exists()
+
+
+def test_offline_install_does_not_upgrade_managed_python(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    for path in ("var/lib/palmimo/uv-python", "home/user/.local/share/uv/python"):
+        interpreter = root / path / "cpython-3.12.14-linux-aarch64-gnu/bin/python3.12"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text("existing interpreter")
+    result = _run_install(root, tmp_path / "accounts", _stub_uv(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert len(list(root.rglob("python3.12"))) == 2
+
+
+def test_install_upgrades_only_populated_python_stores_without_bin_or_user_config(tmp_path: Path) -> None:
+    stores = [tmp_path / name for name in ("shared-python", "user-python", "empty-python", "missing-python")]
+    for store in stores[:2]:
+        interpreter = store / "cpython-3.12.14-linux-aarch64-gnu/bin/python3.12"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+    stores[2].mkdir()
+    source = _stub_uv(tmp_path)
+    version_script = source.read_text().replace(
+        '[ "$1" = --version ] || exit 99',
+        'if [ "$1" != --version ]; then\n  printf \'%s|%s|%s|%s\\n\' "$*" "$UV_PYTHON_INSTALL_DIR" "${UV_PYTHON_DOWNLOADS-unset}" "${UV_PYTHON_INSTALL_BIN-unset}" >> "$UPGRADE_LOG"\n  exit 0\nfi',
+    )
+    source.write_text(version_script)
+    upgrade_log = tmp_path / "upgrades"
+    result = _run_install(
+        tmp_path / "root",
+        tmp_path / "accounts",
+        source,
+        extra_env={
+            "PALMIMO_UV_PYTHON_DIRS": "\n".join(map(str, stores)),
+            "UV_PYTHON_DOWNLOADS": "never",
+            "UPGRADE_LOG": str(upgrade_log),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert upgrade_log.read_text().splitlines() == [
+        f"python upgrade --no-config|{store}|unset|0" for store in stores[:2]
+    ]
 
 
 def _tree_hash(root: Path) -> str:
@@ -372,12 +547,13 @@ def test_install_converges_stale_leftovers_to_a_fresh_install_tree_hash(tmp_path
     assert _tree_hash(stale_root) == _tree_hash(fresh_root)
 
 
-def test_install_writes_only_paths_the_manifest_owns(tmp_path: Path) -> None:
+def test_install_writes_only_declared_paths_and_standard_user_uv(tmp_path: Path) -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     owned_prefixes = [entry["path"] for entry in manifest["owns"]["files"]]
     owned_prefixes += [entry["path"] for entry in manifest["owns"]["managed_directories"]]
     owned_prefixes += [entry["path"] for entry in manifest["owns"]["state_directories"]]
     owned_prefixes += [entry["path"] for entry in manifest["owns"]["external_binaries"]]
+    owned_prefixes.append("home/user/.local/bin/uv")
     owned_prefixes.append("var/log/journal")  # mkdir'd directly, not chowned/tracked as state
 
     root = tmp_path / "root"

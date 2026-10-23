@@ -14,11 +14,17 @@ PORTAL_HOME="/home/${FIRST_USER_NAME}"
 PORTAL_DEST="${PORTAL_HOME}/palmimo-portal"
 UV_BIN="${PORTAL_HOME}/.local/bin/uv"
 
+: "${PALMIMO_IMAGE_DIR:?PALMIMO_IMAGE_DIR is unset -- see pigen/README.md}"
+UV_BUNDLE_TMP="${ROOTFS_DIR}/tmp/palmimo-uv-platform"
+trap 'rm -rf "$UV_BUNDLE_TMP"' EXIT
+mkdir -p "$UV_BUNDLE_TMP"
+cp -a "${PALMIMO_IMAGE_DIR}/platform/." "$UV_BUNDLE_TMP/"
+
 # All paths below are resolved here (host side, at pi-gen build time), not
 # re-derived from $HOME inside the chroot -- avoids the multi-level heredoc
 # escaping a chroot-time ${HOME} expansion would need.
 on_chroot <<- EOF
-	su - "${FIRST_USER_NAME}" -c "test -x '${UV_BIN}' || curl -LsSf https://astral.sh/uv/install.sh | sh"
+	/tmp/palmimo-uv-platform/install.sh uv --root /
 	su - "${FIRST_USER_NAME}" -c "git clone --branch '${PALMIMO_PORTAL_TAG}' --depth 1 '${PORTAL_REPO_URL}' '${PORTAL_DEST}'"
 	su - "${FIRST_USER_NAME}" -c "cd '${PORTAL_DEST}' && '${UV_BIN}' sync --frozen --no-dev"
 	su - "${FIRST_USER_NAME}" -c "cd '${PORTAL_DEST}' && .venv/bin/python -m palmimo_portal.fetch_static --tag '${PALMIMO_PORTAL_TAG}'"
