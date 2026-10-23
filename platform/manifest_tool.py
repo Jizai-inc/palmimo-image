@@ -57,6 +57,11 @@ def cmd_apt_packages(manifest: dict) -> None:
         print(name)
 
 
+def cmd_apt_minimum_versions(manifest: dict) -> None:
+    for name, minimum in manifest["owns"].get("apt_minimum_versions", {}).items():
+        print(f"{name}\t{minimum}")
+
+
 def cmd_retired(manifest: dict) -> None:
     for path in manifest.get("retired", []):
         print(path)
@@ -78,6 +83,7 @@ COMMANDS = {
     "external-binaries": cmd_external_binaries,
     "bundle-cache": cmd_bundle_cache,
     "apt-packages": cmd_apt_packages,
+    "apt-minimum-versions": cmd_apt_minimum_versions,
     "retired": cmd_retired,
     "repair-root-owned": cmd_repair_root_owned,
 }

@@ -92,29 +92,52 @@ _apt_root_run() {
 
 # --- apt packages -------------------------------------------------------
 
-install_apt_packages() {
-  # Apps run as palmimo-app with no permission to install system
-  # libraries themselves (see doc/design/palmimo-app-platform.md); shared
-  # libraries an app's own dependencies need (e.g. opencv-python's
-  # libGL/libglib) can only reach a field device through this bundle.
+apt_package_status() {
+  # Query the target database directly so offline/fake roots never read
+  # the host's installed package versions.
+  # shellcheck disable=SC2016
+  dpkg-query --admindir="${ROOT%/}/var/lib/dpkg" -W -f='${Status}' "$1" 2>/dev/null || true
+}
+
+apt_package_version() {
+  local pkg="$1" status
+  status="$(apt_package_status "$pkg")"
+  case "$status" in
+    ""|*" not-installed"|*" config-files") return 0 ;;
+  esac
+  # shellcheck disable=SC2016
+  dpkg-query --admindir="${ROOT%/}/var/lib/dpkg" -W -f='${Version}' "$pkg"
+}
+
+prepare_apt() {
+  [ "$APT_PREPARED" = 0 ] || return 0
   if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
-    local rows
-    rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)"
-    while IFS= read -r pkg; do
-      [ -n "$pkg" ] || continue
-      record_account_intent "apt-get install ${pkg}"
-    done <<< "$rows"
+    record_account_intent "dpkg --configure -a --force-confold"
+    record_account_intent "apt-get update"
+  else
+    # comitup can be left unpacked by the image build; apt refuses further
+    # installs until configuration is finished. Keep the image's conffiles
+    # because platform updates have no interactive terminal.
+    _apt_root_run env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold
+    _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get update
+  fi
+  APT_PREPARED=1
+}
+
+install_apt_packages() {
+  # Apps run as palmimo-app and cannot install shared system libraries.
+  if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && [ -n "${PALMIMO_SKIP_APT:-}" ]; then
     return 0
   fi
-  # Used only by the root-owned-target convergence check.  That check makes
-  # a deliberately minimal target tree, where apt cannot run.
-  [ -n "${PALMIMO_SKIP_APT:-}" ] && return 0
 
-  local missing="" pkg status
-  local rows
+  local missing="" pkg status rows
   rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-packages)"
   while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
+    if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+      record_account_intent "apt-get install ${pkg}"
+      continue
+    fi
     # shellcheck disable=SC2016  # dpkg-query's own format string, not shell expansion
     status="$(_apt_root_run dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)"
     case "$status" in
@@ -122,19 +145,65 @@ install_apt_packages() {
       *) missing="${missing}${missing:+ }${pkg}" ;;
     esac
   done <<< "$rows"
-
   [ -n "$missing" ] || return 0
-
-  # Devices flashed from the shipped image carry a package left unpacked
-  # but unconfigured by the image build (comitup); apt refuses to run until
-  # that is finished. Idempotent and quick when nothing is pending. The
-  # image ships its own /etc/comitup.conf, so keep installed conffiles
-  # instead of prompting (there is no terminal here).
-  _apt_root_run env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold
-  _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get update
-  # shellcheck disable=SC2086  # $missing is a controlled, space-joined package-name list
+  prepare_apt
+  # shellcheck disable=SC2086  # controlled, space-joined package-name list
   _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     -o Dpkg::Options::=--force-confold $missing
+}
+
+upgrade_apt_packages() {
+  if [ -z "${PALMIMO_FAKE_ACCOUNTS:-}" ] && [ -n "${PALMIMO_SKIP_APT:-}" ]; then
+    return 0
+  fi
+  local upgrades="" checks="" pkg status minimum version rows comparison needs_check
+  rows="$(python3 "${MANIFEST_TOOL}" "${MANIFEST}" apt-minimum-versions)"
+  while IFS=$'\t' read -r pkg minimum; do
+    [ -n "$pkg" ] || continue
+    version="$(apt_package_version "$pkg")"
+    [ -n "$version" ] || continue
+    status="$(apt_package_status "$pkg")"
+    needs_check=0
+    [[ "$status" = *" ok installed" ]] || needs_check=1
+    comparison=0
+    dpkg --compare-versions "$version" lt "$minimum" || comparison=$?
+    case "$comparison" in
+      0) upgrades="${upgrades}${upgrades:+ }${pkg}"; needs_check=1 ;;
+      1) ;;
+      *) return "$comparison" ;;
+    esac
+    if [ "$needs_check" = 1 ]; then
+      checks="${checks}${checks:+ }${pkg}"
+    fi
+  done <<< "$rows"
+  [ -n "$checks" ] || return 0
+  prepare_apt
+  if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+    for pkg in $upgrades; do
+      record_account_intent "apt-get install --only-upgrade ${pkg}"
+    done
+    [ -n "${PALMIMO_FAKE_APT_VERIFY:-}" ] || return 0
+  elif [ -n "$upgrades" ]; then
+    # shellcheck disable=SC2086  # controlled, space-joined package-name list
+    _apt_root_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade --no-install-recommends \
+      -o Dpkg::Options::=--force-confold $upgrades
+  fi
+
+  local failed=0
+  while IFS=$'\t' read -r pkg minimum; do
+    [ -n "$pkg" ] || continue
+    case " $checks " in
+      *" $pkg "*) ;;
+      *) continue ;;
+    esac
+    version="$(apt_package_version "$pkg")"
+    status="$(apt_package_status "$pkg")"
+    if [ -z "$version" ] || [[ "$status" != *" ok installed" ]] || ! dpkg --compare-versions "$version" ge "$minimum"; then
+      echo "install.sh: ${pkg}: installed=${version:-not installed}, status=${status}, minimum=${minimum}" >&2
+      failed=1
+    fi
+  done <<< "$rows"
+  [ "$failed" = 0 ]
 }
 
 add_user_to_group() {
@@ -482,6 +551,7 @@ do_install() {
   mkdir -p "${ROOT%/}/var/log/journal"
   install_uv
   upgrade_uv_python
+  upgrade_apt_packages
   install_bundle_cache
   remove_retired_paths
   repair_root_owned_paths
@@ -569,6 +639,7 @@ PYEOF
 [ $# -ge 1 ] || usage
 command="$1"; shift
 ROOT="/"
+APT_PREPARED=0
 
 case "$command" in
   install|verify|uv)

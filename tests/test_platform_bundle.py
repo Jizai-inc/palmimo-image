@@ -1528,6 +1528,77 @@ def test_install_records_an_apt_intent_for_each_manifest_apt_package(
         assert f"apt-get install {pkg}" in recorded
 
 
+@pytest.fixture()
+def minimum_apt_root(tmp_path: Path) -> tuple[Path, Path, Path]:
+    if shutil.which("dpkg-query", path="/usr/bin:/bin:/usr/local/bin") is None:
+        pytest.skip("requires Debian package database queries")
+    bundle = tmp_path / "bundle"
+    shutil.copytree(PLATFORM_DIR, bundle)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["owns"]["apt_minimum_versions"] = {"ca-certificates": "2.0"}
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "root"
+    database = root / "var/lib/dpkg"
+    database.mkdir(parents=True)
+    return bundle, root, database / "status"
+
+
+def _write_certificate_status(path: Path, version: str | None, status: str) -> None:
+    path.write_text(
+        f"Package: ca-certificates\nStatus: {status}\nArchitecture: all\n"
+        f"Version: {version}\nDescription: test package\n\n"
+        if version
+        else ""
+    )
+
+
+@pytest.mark.parametrize(
+    "installed_version,package_status,upgrade,configure",
+    [
+        (None, "", False, False),
+        ("1.0", "install ok installed", True, True),
+        ("2.0", "install ok installed", False, False),
+        ("3.0", "install ok installed", False, False),
+        ("1.0", "deinstall ok config-files", False, False),
+        ("1.0", "hold ok installed", True, True),
+        ("2.0", "install ok unpacked", False, True),
+    ],
+)
+def test_install_records_apt_actions_for_package_state(
+    tmp_path: Path,
+    minimum_apt_root: tuple[Path, Path, Path],
+    installed_version: str | None,
+    package_status: str,
+    upgrade: bool,
+    configure: bool,
+) -> None:
+    bundle, root, status_path = minimum_apt_root
+    _write_certificate_status(status_path, installed_version, package_status)
+    accounts = tmp_path / "accounts"
+    result = _run_install(root, accounts, _stub_uv(tmp_path), installer=bundle / "install.sh")
+    assert result.returncode == 0, result.stderr
+    intents = accounts.read_text().splitlines()
+    assert ("apt-get install --only-upgrade ca-certificates" in intents) == upgrade
+    assert ("dpkg --configure -a --force-confold" in intents) == configure
+
+
+@pytest.mark.parametrize("version,status", [("1.0", "install ok installed"), ("2.0", "install ok unpacked")])
+def test_install_fails_when_apt_minimum_remains_unsatisfied(
+    tmp_path: Path, minimum_apt_root: tuple[Path, Path, Path], version: str, status: str
+) -> None:
+    bundle, root, status_path = minimum_apt_root
+    _write_certificate_status(status_path, version, status)
+    result = _run_install(
+        root,
+        tmp_path / "accounts",
+        _stub_uv(tmp_path),
+        installer=bundle / "install.sh",
+        extra_env={"PALMIMO_FAKE_APT_VERIFY": "1"},
+    )
+    assert result.returncode != 0
+
+
 # ---------------------------------------------------------------------------
 # polkit unit-name patterns: 60-palmimo-app-platform.rules grants
 # manage-units only to app IDs (<namespace>.<name>, doc/design/

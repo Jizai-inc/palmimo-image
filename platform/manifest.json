@@ -178,7 +178,10 @@
       "etc/cloud/cloud.cfg.d/99-palmimo.cfg",
       "usr/local/lib/palmimo/firstboot.sh",
       "etc/polkit-1/rules.d/50-palmimo-portal.rules"
-    ]
+    ],
+    "apt_minimum_versions": {
+      "ca-certificates": "20250419+deb13u1"
+    }
   },
   "retired": [],
   "reflash_required": false

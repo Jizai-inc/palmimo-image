@@ -655,3 +655,15 @@ uv の版はアプリ起動を妨げる差分にしない。
 `/home/user/.local/share/uv/python`。`UV_PYTHON_DOWNLOADS` を引き継がず、
 取得・照合・Python 更新の失敗は install を失敗させ、record へ進めない。
 chroot でインタプリタが未導入なら Python 更新を省略する。
+
+### platform の apt 導入と最低版
+
+`platform/manifest.json` の `owns.apt_packages` は未導入の共有ライブラリを
+導入する一覧。`owns.apt_minimum_versions` は、導入済みパッケージに必要な最低版を
+指定する別の一覧であり、未導入のものは対象にしない。既存機に必須の
+セキュリティ修正や互換性修正を届ける必要があるときに最低版を追加する。
+最低版の更新処理は uv と管理 Python の更新後に実行する。
+最低版未満だけを `--only-upgrade` で更新し、不足パッケージの導入処理と前処理・
+`apt-get update` を共有する。未構成のパッケージは configure も対象とし、
+事後検査で構成完了かつ最低版以上でなければ install を失敗させる。
+verify はパッケージの版のずれを起動を止める差分として扱わない。
