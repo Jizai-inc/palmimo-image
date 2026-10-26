@@ -150,22 +150,46 @@ class Hardware:
     monotonic = staticmethod(time.monotonic)
     sleep = staticmethod(time.sleep)
 
-    def cdc(self) -> list[tuple[str, str]]:
-        from serial.tools import list_ports
+    def __init__(
+        self,
+        usb_root: Path = Path("/sys/bus/usb/devices"),
+        tty_root: Path = Path("/sys/class/tty"),
+        dev_root: Path = Path("/dev"),
+    ) -> None:
+        self.usb_root, self.tty_root, self.dev_root = usb_root, tty_root, dev_root
 
-        return [(p.device, p.serial_number or "") for p in list_ports.comports() if p.vid == 0x2E8A]
-
-    def bootsel_count(self) -> int:
-        count = 0
-        for device in Path("/sys/bus/usb/devices").iterdir():
+    def usb_devices(self, product_id: str) -> list[tuple[Path, str, str]]:
+        devices = []
+        for device in self.usb_root.iterdir():
             try:
-                if (device / "idVendor").read_text().strip() == "2e8a" and (
-                    device / "idProduct"
-                ).read_text().strip() == "000f":
-                    count += 1
+                vendor = (device / "idVendor").read_text().strip().lower()
+                product = (device / "idProduct").read_text().strip().lower()
             except FileNotFoundError:
                 continue
-        return count
+            if vendor != "2e8a" or product != product_id:
+                continue
+            serial, name = "", ""
+            with contextlib.suppress(FileNotFoundError):
+                serial = (device / "serial").read_text().strip()
+            with contextlib.suppress(FileNotFoundError):
+                name = (device / "product").read_text().strip()
+            devices.append((device.resolve(), serial, name))
+        return devices
+
+    def cdc(self) -> list[tuple[str, str]]:
+        devices = self.usb_devices("0009")
+        return [
+            (str(self.dev_root / tty.name), serial)
+            for tty in self.tty_root.iterdir()
+            for device, serial, _ in devices
+            if device in (tty / "device").resolve().parents
+        ]
+
+    def bootsel_serials(self) -> list[str]:
+        return [serial if name == "RP2350 Boot" else "" for _, serial, name in self.usb_devices("000f")]
+
+    def bootsel_count(self) -> int:
+        return len(self.bootsel_serials())
 
     def port_busy(self, port: str) -> bool:
         target = Path(port).resolve()
@@ -240,6 +264,7 @@ class Updater:
         self.paths, self.hw = paths, hardware
         self.end = 0.0
         self.writing = False
+        self.recovery_chip: str | None = None
         self.before: str | None = None
         self.after: str | None = None
 
@@ -299,10 +324,21 @@ class Updater:
         ports, usb = self.wait_mode(True, 15)
         if ports or usb != 1:
             raise FirmwareError("Cannot identify a single BOOTSEL display")
-        info = self.pico("info", "-d", maximum=10)
-        match = re.search(r"chipid:\s*(0x[0-9a-fA-F]+)", info)
-        if not match or chip_id(match[1]) != expected:
+        # picotool 2.1.1 info fails on BOOTSEL with a valid image; USB serial remains readable.
+        serials = self.hw.bootsel_serials()
+        if len(serials) != 1 or chip_id(serials[0]) != expected:
             raise FirmwareError("BOOTSEL chipid does not match the known display")
+
+    def restore_application(self) -> None:
+        expected, self.recovery_chip = self.recovery_chip, None
+        if expected is None:
+            return
+        try:
+            serials = self.hw.bootsel_serials()
+            if len(serials) == 1 and chip_id(serials[0]) == expected:
+                self.pico("reboot", "-a", maximum=10)
+        except (FirmwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(f"Cannot restore display application: {error}", file=sys.stderr, flush=True)
 
     def update(self, declared: dict[str, str], state: dict[str, Any], boot: bool) -> str:
         ports, usb = self.devices(15 if boot else 0)
@@ -330,6 +366,7 @@ class Updater:
                 return "current"
         else:
             expected = chip_id(state.get("chip_id", ""))
+            state["chip_id"] = expected
             self.match_bootsel(expected)
             self.before = self.after = "bootsel"
         if boot and state["consecutive_failures"] >= 3:
@@ -345,6 +382,7 @@ class Updater:
             power_on = bool(re.search(r"\bpower=ON\b", power)) and not power.startswith("ERR")
         self.writing = True
         if port:
+            self.recovery_chip = expected
             try:
                 self.pico("reboot", "-u", "-f", maximum=10)
             except DeadlineError:
@@ -369,6 +407,7 @@ class Updater:
             target = self.paths.work / name
             target.write_bytes(payload)
             # RP2350 bootrom stays in BOOTSEL while the first flash sector is blank.
+            self.recovery_chip = None
             self.pico("load", "-v", str(target), "-t", "bin", "-o", offset)
         self.pico("reboot", "-a", maximum=10)
         ports, usb = self.wait_mode(False, 30)
@@ -386,6 +425,7 @@ class Updater:
         self.end = self.hw.monotonic() + 540
         self.before = self.after = None
         self.writing = False
+        self.recovery_chip = None
         state: dict[str, Any] = {}
         result, reason, code = "failed", None, 1
         if not (self.paths.firmware / "firmware.json").exists():
@@ -425,6 +465,7 @@ class Updater:
                     reason = str(error)
                     if self.writing and boot:
                         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+                    self.restore_application()
                 finally:
                     if self.paths.work.exists() and not self.paths.work.is_symlink():
                         shutil.rmtree(self.paths.work)
