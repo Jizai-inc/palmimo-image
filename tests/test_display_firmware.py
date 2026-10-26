@@ -435,3 +435,23 @@ def test_bad_compressed_image_never_reaches_flash(rig: tuple[Any, Fake], case: s
     assert updater.ensure()[0]["result"] == "failed"
     assert not hw.payloads
     assert not updater.paths.work.exists()
+
+
+def test_sigterm_during_usb_transition_does_not_fall_back(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    original = hw.picotool
+
+    def pico(args: list[str], timeout: float) -> str:
+        if args == ["reboot", "-u", "-f"]:
+            return ""
+        return original(args, timeout)
+
+    def sleep(seconds: float) -> None:
+        fw.terminate(15, None)
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    hw.sleep = sleep  # type: ignore[method-assign]
+    result, code = updater.ensure(boot=True)
+    assert (result["result"], code) == ("failed", 1)
+    assert not hw.payloads
+    assert hw.usb == 0

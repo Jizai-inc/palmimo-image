@@ -355,6 +355,8 @@ class Updater:
             else:
                 try:
                     self.wait_mode(True, 5)
+                except DeadlineError:
+                    raise
                 except FirmwareError:
                     self.budget()
                     self.hw.touch(port)
