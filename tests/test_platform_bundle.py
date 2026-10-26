@@ -37,6 +37,7 @@ BUILD_BUNDLE_SCRIPT = REPO_ROOT / "tools" / "build_platform_bundle.py"
 APP_UNIT = PLATFORM_DIR / "files" / "etc" / "systemd" / "system" / "palmimo-app@.service"
 APP_SYNC_UNIT = PLATFORM_DIR / "files" / "etc" / "systemd" / "system" / "palmimo-app-sync@.service"
 POLKIT_RULES = PLATFORM_DIR / "files" / "etc" / "polkit-1" / "rules.d" / "60-palmimo-app-platform.rules"
+POLKIT_COMITUP_RULES = PLATFORM_DIR / "files" / "etc" / "polkit-1" / "rules.d" / "62-palmimo-portal-comitup.rules"
 APP_SYNC_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-sync"
 APP_LAUNCH_HELPER = PLATFORM_DIR / "files" / "usr" / "lib" / "palmimo" / "app-launch"
 PREVIOUS_RELEASE_FILTER = REPO_ROOT / ".github" / "scripts" / "previous-platform-release.jq"
@@ -1656,6 +1657,12 @@ def test_polkit_rules_grant_only_the_intended_unit_names(unit: str, expect_allow
 )
 def test_polkit_rules_grant_only_the_intended_unit_verbs(verb: str, expect_allowed: bool) -> None:
     assert (verb in _polkit_allowed_verbs()) is expect_allowed
+
+
+def test_polkit_comitup_rule_grants_only_start_and_stop_of_comitup() -> None:
+    text = POLKIT_COMITUP_RULES.read_text(encoding="utf-8")
+    assert re.findall(r'action\.lookup\("unit"\) !== "([^"]+)"', text) == ["comitup.service"]
+    assert set(re.findall(r'verb === "([^"]+)"', text)) == {"start", "stop"}
 
 
 @pytest.mark.skipif(shutil.which("dpkg-query") is None, reason="dpkg-query not installed")
