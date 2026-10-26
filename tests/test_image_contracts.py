@@ -420,6 +420,8 @@ def test_packages_txt_is_the_one_list_apply_pi_sh_references() -> None:
         "libglib2.0-0t64",
         "libportaudio2",
         "v4l-utils",
+        "picotool",
+        "python3-serial",
     ]
 
     apply_text = _text(APPLY_SCRIPT)
@@ -1205,8 +1207,9 @@ def test_every_enabled_unit_ships_an_install_section() -> None:
     # `systemctl enable` on a unit with no [Install] is a silent no-op, and
     # `is-enabled` exits 0 for the resulting "static" -- palmimo-firstboot
     # shipped exactly this way and would never have run on a virgin image.
-    for unit in ("palmimo-portal.service", "palmimo-firstboot.service"):
-        text = _text(FILES_DIR / "etc/systemd/system" / unit)
+    for unit in ("palmimo-portal.service", "palmimo-firstboot.service", "palmimo-display-firmware.service"):
+        unit_root = REPO_ROOT / "platform/files" if unit == "palmimo-display-firmware.service" else FILES_DIR
+        text = _text(unit_root / "etc/systemd/system" / unit)
         assert "[Install]" in text and "WantedBy=multi-user.target" in text, unit
 
 
@@ -1346,3 +1349,17 @@ def test_root_gitignore_does_not_also_ignore_workspace() -> None:
     # mechanism.
     text = _text(REPO_ROOT / ".gitignore")
     assert ".workspace" not in text
+
+
+def test_display_firmware_boot_unit_contract() -> None:
+    text = _text(REPO_ROOT / "platform/files/etc/systemd/system/palmimo-display-firmware.service")
+    assert "After=systemd-udevd.service palmimo-firstboot.service" in text
+    assert "Before=palmimo-portal.service" in text
+    assert "Requires=palmimo-portal" not in text
+    assert "ExecStart=/usr/local/libexec/palmimo/palmimo-display-firmware ensure --boot --json" in text
+    assert "ConditionPathExists=!/etc/palmimo/display-firmware.disabled" in text
+    assert "TimeoutStartSec=660" in text and "KillMode=control-group" in text
+    assert "Type=oneshot" in text
+    match = re.search(r'^expected_enabled="([^"]+)"', _text(APPLY_SCRIPT), re.MULTILINE)
+    assert match is not None
+    assert "palmimo-display-firmware" in match.group(1).split()

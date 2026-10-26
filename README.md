@@ -357,3 +357,24 @@ decisions, the identity file spec, the pi-gen stage structure, and the
 on-device verification history. See [`pigen/README.md`](pigen/README.md)
 for pi-gen stage implementation notes and the manual (non-`make_image.py`)
 build recipe.
+
+### Face display firmware
+
+Platform installs enable `palmimo-display-firmware.service`, which runs before
+Portal and retries interrupted face updates. No firmware binary is included yet:
+without a declaration it returns `undeclared` and makes no device changes.
+Firmware binaries distributed separately are Jizai's copyrighted work, excluded
+from this repository's license; third-party notices accompany those binaries.
+
+Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --json` to
+retry manually. The tool reserves the display, checks its identity and version,
+and restores an awake face after an update. Progress goes to stderr/journal;
+the final JSON and `/var/lib/palmimo/display-firmware/state.json` report results.
+Boot retries wait up to 15 seconds for USB and stop writing after three consecutive
+write failures for the same declared version. A manual retry resets that count.
+
+If a previously seen face disappears, check USB and use its BOOT + RST buttons
+to enter BOOTSEL for recovery. After intentionally removing or replacing a face,
+stop display users and remove `state.json` to forget its identity. To disable boot
+updates, create `/etc/palmimo/display-firmware.disabled`; platform verification
+checks the unit file, not whether the unit is enabled.

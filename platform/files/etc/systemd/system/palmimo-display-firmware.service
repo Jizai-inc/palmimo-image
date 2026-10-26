@@ -1,0 +1,15 @@
+[Unit]
+Description=Ensure Palmimo face display firmware
+After=systemd-udevd.service palmimo-firstboot.service
+Before=palmimo-portal.service
+ConditionPathExists=!/etc/palmimo/display-firmware.disabled
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/libexec/palmimo/palmimo-display-firmware ensure --boot --json
+TimeoutStartSec=660
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

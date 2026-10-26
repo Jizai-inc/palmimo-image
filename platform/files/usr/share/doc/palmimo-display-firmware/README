@@ -1,0 +1,8 @@
+Palmimo face display firmware
+
+No firmware binary is included yet. Without firmware.json the updater returns
+undeclared and leaves connected hardware alone.
+
+Firmware binaries distributed here are Jizai's copyrighted work and are excluded
+from this repository's license. Their third-party notices and full license texts
+will accompany the binaries in this directory.

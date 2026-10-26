@@ -48,6 +48,8 @@ jobs:
       - run: uv run mypy
 
   test:
+    env:
+      PALMIMO_FIRMWARE_FORBIDDEN_TERMS: ${{ secrets.PALMIMO_FIRMWARE_FORBIDDEN_TERMS }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

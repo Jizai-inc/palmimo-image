@@ -1,0 +1,457 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Jizai Inc.
+"""Ensure the attached face runs the root-installed firmware declaration."""
+
+import argparse
+import contextlib
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+import pwd
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+class FirmwareError(Exception):
+    pass
+
+
+class DeadlineError(FirmwareError):
+    pass
+
+
+class BusyError(FirmwareError):
+    pass
+
+
+class ConfigurationError(FirmwareError):
+    pass
+
+
+class Paths:
+    def __init__(
+        self,
+        firmware: Path = Path("/usr/local/lib/palmimo/display-firmware"),
+        state: Path = Path("/var/lib/palmimo/display-firmware/state.json"),
+        work: Path = Path("/run/palmimo-display-firmware"),
+        locks: Path = Path("/run/lock/palmimo"),
+    ) -> None:
+        self.firmware, self.state, self.work, self.locks = firmware, state, work, locks
+
+
+def declaration(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+        version, digest = data.get("version"), data.get("sha256")
+        if not isinstance(version, str) or not version or re.search(r"[\s\x00-\x1f]", version):
+            raise ValueError("invalid version")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+            raise ValueError("invalid sha256")
+        return {"version": version, "sha256": digest.lower()}
+    except (OSError, ValueError) as error:
+        raise ConfigurationError(f"Invalid firmware declaration: {error}") from error
+
+
+def unpack(source: Path, target: Path, limit: int) -> bytes:
+    with gzip.open(source, "rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise FirmwareError("Expanded firmware exceeds size limit")
+    target.write_bytes(data)
+    return data
+
+
+def validate_artifact(directory: Path, forbidden: list[str]) -> None:
+    """Validate release assets; forbidden terms are supplied privately by CI."""
+    declared = declaration(directory / "firmware.json")
+    with tempfile.TemporaryDirectory() as temporary:
+        data = unpack(directory / "face_serial.bin.gz", Path(temporary) / "firmware.bin", 10 * 1024 * 1024)
+    if len(data) >= 10 * 1024 * 1024:
+        raise FirmwareError("Release firmware must be smaller than 10 MiB")
+    if hashlib.sha256(data).hexdigest() != declared["sha256"]:
+        raise FirmwareError("Firmware checksum mismatch")
+    version = declared["version"].encode()
+    if any(marker in version or marker in data for marker in (b".dirty", b"+unknown")):
+        raise FirmwareError("Unreleased firmware version")
+    if version + b"\0" not in data:
+        raise FirmwareError("Declared version is missing from firmware")
+    if any(term.encode().lower() in data.lower() for term in forbidden if term):
+        raise FirmwareError("Firmware contains a forbidden source identifier")
+
+
+@contextlib.contextmanager
+def reservation(directory: Path) -> Iterator[None]:
+    if not directory.exists():
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".palmimo-locks-", dir=directory.parent))
+        try:
+            temporary.chmod(0o1777)
+            try:
+                temporary.rename(directory)
+            except OSError:
+                if not directory.is_dir():
+                    raise
+        finally:
+            if temporary.exists():
+                temporary.rmdir()
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise FirmwareError("Reservation directory is not a directory")
+    path = directory / "display.lock"
+    if not path.exists():
+        fd, name = tempfile.mkstemp(prefix=".palmimo-lock-", dir=directory)
+        try:
+            os.fchmod(fd, 0o666)
+            with contextlib.suppress(FileExistsError):
+                os.link(name, path)
+        finally:
+            os.close(fd)
+            os.unlink(name)
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FirmwareError("Reservation is not a regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise BusyError("Display reservation is held by another process") from error
+        metadata = {
+            "pid": os.getpid(),
+            "user": pwd.getpwuid(os.geteuid()).pw_name,
+            "app": "palmimo-display-firmware",
+            "acquired_at": datetime.now(UTC).isoformat(),
+        }
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps(metadata).encode())
+        yield
+    finally:
+        os.close(fd)
+
+
+class Hardware:
+    monotonic = staticmethod(time.monotonic)
+    sleep = staticmethod(time.sleep)
+
+    def cdc(self) -> list[tuple[str, str]]:
+        from serial.tools import list_ports
+
+        return [(p.device, p.serial_number or "") for p in list_ports.comports() if p.vid == 0x2E8A]
+
+    def bootsel_count(self) -> int:
+        count = 0
+        for device in Path("/sys/bus/usb/devices").iterdir():
+            try:
+                if (device / "idVendor").read_text().strip() == "2e8a" and (
+                    device / "idProduct"
+                ).read_text().strip() == "000f":
+                    count += 1
+            except FileNotFoundError:
+                continue
+        return count
+
+    def port_busy(self, port: str) -> bool:
+        target = Path(port).resolve()
+        for process in Path("/proc").iterdir():
+            if not process.name.isdigit() or int(process.name) == os.getpid():
+                continue
+            try:
+                for fd in (process / "fd").iterdir():
+                    with contextlib.suppress(FileNotFoundError):
+                        if fd.resolve() == target:
+                            return True
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        return False
+
+    def exchange(self, port: str, command: str, timeout: float) -> str:
+        import serial
+
+        end = self.monotonic() + timeout
+        with serial.Serial(port, 115200, timeout=min(timeout, 0.2), write_timeout=timeout) as connection:
+            connection.reset_input_buffer()
+            connection.write((command + "\n").encode())
+            buffer = b""
+            while self.monotonic() < end:
+                buffer += connection.read(1)
+                if len(buffer) > 65536:
+                    raise FirmwareError("Serial response exceeds limit")
+                if buffer.endswith(b"\n"):
+                    line = buffer.decode("ascii", errors="replace").strip()
+                    buffer = b""
+                    if line and not line.startswith("EVT ") and line.startswith(("ERR", command.split()[0], "OK")):
+                        return line
+        return ""
+
+    def touch(self, port: str) -> None:
+        import serial
+
+        with serial.Serial(port, 1200, timeout=1, write_timeout=1):
+            pass
+
+    def picotool(self, args: list[str], timeout: float) -> str:
+        print("picotool " + " ".join(args), file=sys.stderr, flush=True)
+        process = subprocess.Popen(
+            ["picotool", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+        )
+        try:
+            output, errors = process.communicate(timeout=timeout)
+        except BaseException:
+            # timeout may already have signalled the child process group.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+        if errors:
+            print(errors.decode(errors="replace").strip(), file=sys.stderr, flush=True)
+        if process.returncode:
+            raise FirmwareError(f"picotool exited {process.returncode}")
+        return output.decode(errors="replace")
+
+
+def chip_id(value: str) -> str:
+    if not isinstance(value, str):
+        raise FirmwareError("No previously identified display chipid")
+    value = value.lower().removeprefix("0x")
+    if not re.fullmatch(r"[0-9a-f]{16}", value):
+        raise FirmwareError("Display USB serial is missing or invalid")
+    return value
+
+
+class Updater:
+    def __init__(self, paths: Paths, hardware: Hardware) -> None:
+        self.paths, self.hw = paths, hardware
+        self.end = 0.0
+        self.writing = False
+        self.before: str | None = None
+        self.after: str | None = None
+
+    def budget(self, maximum: float = 540) -> float:
+        remaining = self.end - self.hw.monotonic()
+        if remaining <= 0:
+            raise DeadlineError("Firmware update deadline exceeded")
+        return min(maximum, remaining)
+
+    def save(self, state: dict[str, Any]) -> None:
+        self.paths.state.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        fd, name = tempfile.mkstemp(dir=self.paths.state.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o644)
+                json.dump(state, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.paths.state)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name)
+
+    def pico(self, *args: str, maximum: float = 540) -> str:
+        return self.hw.picotool(list(args), self.budget(maximum))
+
+    def version(self, port: str) -> str:
+        for _ in range(2):
+            line = self.hw.exchange(port, "VERSION", self.budget(3))
+            if line == "ERR VERSION (try LIST)":
+                return "legacy"
+            if line.startswith("VERSION ") and line[8:].strip():
+                return line[8:].strip()
+        raise FirmwareError("Cannot identify display: no VERSION response")
+
+    def devices(self, wait: float = 0) -> tuple[list[tuple[str, str]], int]:
+        end = self.hw.monotonic() + wait
+        while True:
+            ports, usb = self.hw.cdc(), self.hw.bootsel_count()
+            if ports or usb or self.hw.monotonic() >= end:
+                return ports, usb
+            self.hw.sleep(min(0.25, end - self.hw.monotonic(), self.budget()))
+
+    def wait_mode(self, bootsel: bool, seconds: float) -> tuple[list[tuple[str, str]], int]:
+        end = self.hw.monotonic() + seconds
+        while True:
+            ports, usb = self.devices()
+            if len(ports) > 1 or usb > 1 or (ports and usb):
+                raise FirmwareError("Multiple USB devices appeared during update")
+            if (usb == 1 and not ports) if bootsel else (len(ports) == 1 and not usb):
+                return ports, usb
+            if self.hw.monotonic() >= end:
+                raise FirmwareError("Display did not enter the requested USB mode")
+            self.hw.sleep(min(0.25, end - self.hw.monotonic(), self.budget()))
+
+    def match_bootsel(self, expected: str) -> None:
+        ports, usb = self.wait_mode(True, 15)
+        if ports or usb != 1:
+            raise FirmwareError("Cannot identify a single BOOTSEL display")
+        info = self.pico("info", "-d", maximum=10)
+        match = re.search(r"chipid:\s*(0x[0-9a-fA-F]+)", info)
+        if not match or chip_id(match[1]) != expected:
+            raise FirmwareError("BOOTSEL chipid does not match the known display")
+
+    def update(self, declared: dict[str, str], state: dict[str, Any], boot: bool) -> str:
+        ports, usb = self.devices(15 if boot else 0)
+        if len(ports) > 1 or usb > 1 or (ports and usb):
+            raise FirmwareError("Cannot identify display among multiple USB devices")
+        if not ports and not usb:
+            if state.get("seen"):
+                raise FirmwareError(
+                    "Known display is missing; check USB or use BOOT + RST; clear state only after removing/replacing the face"
+                )
+            return "absent"
+        port = ""
+        power_on = False
+        if ports:
+            port, serial = ports[0]
+            if self.hw.port_busy(port):
+                raise BusyError("Display port is open in another process")
+            self.before = self.version(port)
+            self.after = self.before
+            expected = chip_id(serial)
+            state.update(seen=True, chip_id=expected)
+            self.save(state)
+            if self.before == declared["version"]:
+                state["consecutive_failures"] = 0
+                return "current"
+        else:
+            expected = chip_id(state.get("chip_id", ""))
+            self.match_bootsel(expected)
+            self.before = self.after = "bootsel"
+        if boot and state["consecutive_failures"] >= 3:
+            print("WARNING: automatic display writes suspended after repeated failures", file=sys.stderr)
+            return "skipped"
+        data = unpack(self.paths.firmware / "face_serial.bin.gz", self.paths.work / "firmware.bin", 12 * 1024 * 1024)
+        if len(data) <= 4096:
+            raise FirmwareError("Firmware must contain a header and body")
+        if hashlib.sha256(data).hexdigest() != declared["sha256"]:
+            raise FirmwareError("Firmware checksum mismatch")
+        if port:
+            power = self.hw.exchange(port, "STAT", self.budget(3))
+            power_on = bool(re.search(r"\bpower=ON\b", power)) and not power.startswith("ERR")
+        self.writing = True
+        if port:
+            try:
+                self.pico("reboot", "-u", "-f", maximum=10)
+            except DeadlineError:
+                raise
+            except (FirmwareError, OSError, subprocess.TimeoutExpired):
+                self.budget()
+                self.hw.touch(port)
+            else:
+                try:
+                    self.wait_mode(True, 5)
+                except FirmwareError:
+                    self.budget()
+                    self.hw.touch(port)
+        self.match_bootsel(expected)
+        for name, payload, offset in (
+            ("blank.bin", b"\xff" * 4096, "0x10000000"),
+            ("body.bin", data[4096:], "0x10001000"),
+            ("header.bin", data[:4096], "0x10000000"),
+        ):
+            target = self.paths.work / name
+            target.write_bytes(payload)
+            # RP2350 bootrom stays in BOOTSEL while the first flash sector is blank.
+            self.pico("load", "-v", str(target), "-t", "bin", "-o", offset)
+        self.pico("reboot", "-a", maximum=10)
+        ports, usb = self.wait_mode(False, 30)
+        if len(ports) != 1 or usb or chip_id(ports[0][1]) != expected:
+            raise FirmwareError("Updated display did not return with the same USB serial")
+        self.after = self.version(ports[0][0])
+        if self.after != declared["version"]:
+            raise FirmwareError("Updated VERSION does not match declaration")
+        if power_on:
+            self.hw.exchange(ports[0][0], "POWER ON", self.budget(3))
+        state["consecutive_failures"] = 0
+        return "updated"
+
+    def ensure(self, boot: bool = False) -> tuple[dict[str, Any], int]:
+        self.end = self.hw.monotonic() + 540
+        self.before = self.after = None
+        self.writing = False
+        state: dict[str, Any] = {}
+        result, reason, code = "failed", None, 1
+        if not (self.paths.firmware / "firmware.json").exists():
+            return {"result": "undeclared", "before": None, "after": None, "reason": None}, 0
+        try:
+            with reservation(self.paths.locks):
+                if self.paths.state.exists():
+                    loaded = json.loads(self.paths.state.read_text())
+                    if not isinstance(loaded, dict):
+                        raise FirmwareError("Invalid saved display state")
+                    state = loaded
+                state.setdefault("seen", False)
+                state.setdefault("chip_id", None)
+                failures = state.setdefault("consecutive_failures", 0)
+                if type(failures) is not int or failures < 0 or type(state["seen"]) is not bool:
+                    raise FirmwareError("Invalid saved display state")
+                try:
+                    declared = declaration(self.paths.firmware / "firmware.json")
+                    if not boot or state.get("declared_version") != declared["version"]:
+                        state["consecutive_failures"] = 0
+                    state["declared_version"] = declared["version"]
+                    if self.paths.work.is_symlink():
+                        raise FirmwareError("Working directory must not be a symlink")
+                    if self.paths.work.exists():
+                        shutil.rmtree(self.paths.work)
+                    self.paths.work.mkdir(mode=0o700, parents=True)
+                    self.save(state)
+                    result = self.update(declared, state, boot)
+                    if result == "skipped":
+                        reason = state.get("last_reason") or "Repeated boot write failures; retry manually"
+                    code = 0
+                except BusyError as error:
+                    result, reason, code = "busy", str(error), 75
+                except ConfigurationError as error:
+                    reason, code = str(error), 78
+                except (FirmwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+                    reason = str(error)
+                    if self.writing and boot:
+                        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+                finally:
+                    if self.paths.work.exists() and not self.paths.work.is_symlink():
+                        shutil.rmtree(self.paths.work)
+                state.update(last_result=result, last_reason=reason, at=datetime.now(UTC).isoformat())
+                self.save(state)
+        except BusyError as error:
+            result, reason, code = "busy", str(error), 75
+        except (OSError, ValueError, FirmwareError) as error:
+            result, reason, code = "failed", str(error), 1
+        response = {"result": result, "before": self.before, "after": self.after, "reason": reason}
+        print(json.dumps(response), file=sys.stderr, flush=True)
+        return response, code
+
+
+def terminate(signum: int, frame: Any) -> None:
+    raise DeadlineError("Firmware update deadline exceeded (SIGTERM)")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["ensure"])
+    parser.add_argument("--boot", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    signal.signal(signal.SIGTERM, terminate)
+    if os.geteuid() != 0:
+        result, code = {"result": "failed", "before": None, "after": None, "reason": "Root is required"}, 1
+    else:
+        result, code = Updater(Paths(), Hardware()).ensure(args.boot)
+    if args.json:
+        print(json.dumps(result), flush=True)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

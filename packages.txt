@@ -6,3 +6,5 @@ libgl1
 libglib2.0-0t64
 libportaudio2
 v4l-utils
+picotool
+python3-serial

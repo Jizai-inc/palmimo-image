@@ -1695,3 +1695,26 @@ def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(t
 
     apt_diffs = [d for d in diffs if d["path"] in manifest["owns"]["apt_packages"]]
     assert apt_diffs == [{"kind": "missing", "path": pkg} for pkg in absent_pkgs]
+
+
+def test_install_records_offline_display_unit_enable(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    assert f"systemctl --root={root} enable palmimo-display-firmware.service" in accounts.read_text().splitlines()
+    unit_link = root / "etc/systemd/system/multi-user.target.wants/palmimo-display-firmware.service"
+    unit_link.parent.mkdir(parents=True, exist_ok=True)
+    unit_link.symlink_to("/not-required-by-verification")
+    assert _run_install(root, accounts, None, command="verify").returncode == 0
+
+
+@pytest.mark.parametrize("root", ["/", "/offline"])
+def test_display_enable_normalizes_root(root: str) -> None:
+    text = INSTALL_SH.read_text()
+    function = text[text.index("enable_display_firmware() {") : text.index("\ndo_install() {")]
+    result = subprocess.run(
+        ["bash", "-c", function + '\nsystemctl() { printf "%s\\n" "$@"; }; enable_display_firmware'],
+        env={"PATH": "/usr/bin:/bin", "ROOT": root},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"--root={root}", "enable", "palmimo-display-firmware.service"]
