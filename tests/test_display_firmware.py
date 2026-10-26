@@ -756,3 +756,31 @@ def test_failed_update_reports_bootsel_when_left_there(
     result, code = updater.ensure()
     assert (result["result"], result["before"], result["after"], code) == ("failed", "old", "bootsel", 1)
     assert hw.usb == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(TimeoutError("Write timeout"), id="write-timeout"),
+        pytest.param(TimeoutError("Read timeout"), id="read-timeout"),
+        pytest.param(None, id="empty-response"),
+    ],
+)
+def test_unresponsive_version_explains_identification_failure(rig: tuple[Any, Fake], error: OSError | None) -> None:
+    updater, hw = rig
+
+    def exchange(port: str, command: str, timeout: float) -> str:
+        assert command == "VERSION"
+        if error is not None:
+            raise error
+        return ""
+
+    hw.exchange = exchange  # type: ignore[method-assign]
+    result, code = updater.ensure()
+    assert (result["result"], code) == ("failed", 1)
+    reason = result["reason"]
+    assert "VERSION" in reason and "cannot identify" in reason.lower() and "not be written" in reason
+    if error is not None:
+        assert reason.endswith(f"({error})")
+    assert json.loads(updater.paths.state.read_text())["last_reason"] == reason
+    assert not hw.commands and not hw.payloads

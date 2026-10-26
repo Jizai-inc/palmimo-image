@@ -320,13 +320,17 @@ class Updater:
         return self.hw.picotool([*args, "--bus", str(bus), "--address", str(address)], self.budget(maximum))
 
     def version(self, port: str) -> str:
+        reason = "Face display does not respond to VERSION; cannot identify it, so firmware will not be written"
         for _ in range(2):
-            line = self.hw.exchange(port, "VERSION", self.budget(3))
+            try:
+                line = self.hw.exchange(port, "VERSION", self.budget(3))
+            except OSError as error:
+                raise FirmwareError(f"{reason} ({error})") from error
             if line == "ERR VERSION (try LIST)":
                 return "legacy"
             if line.startswith("VERSION ") and line[8:].strip():
                 return line[8:].strip()
-        raise FirmwareError("Cannot identify display: no VERSION response")
+        raise FirmwareError(reason)
 
     def devices(self, wait: float = 0) -> tuple[list[tuple[str, str]], int]:
         end = self.hw.monotonic() + wait
