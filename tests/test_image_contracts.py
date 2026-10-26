@@ -422,6 +422,8 @@ def test_packages_txt_is_the_one_list_apply_pi_sh_references() -> None:
         "v4l-utils",
         "picotool",
         "python3-serial",
+        "python3-zbar",
+        "libturbojpeg0",
     ]
 
     apply_text = _text(APPLY_SCRIPT)
