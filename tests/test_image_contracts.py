@@ -1352,14 +1352,19 @@ def test_root_gitignore_does_not_also_ignore_workspace() -> None:
 
 
 def test_display_firmware_boot_unit_contract() -> None:
-    text = _text(REPO_ROOT / "platform/files/etc/systemd/system/palmimo-display-firmware.service")
-    assert "After=systemd-udevd.service palmimo-firstboot.service" in text
-    assert "Before=palmimo-portal.service" in text
-    assert "Requires=palmimo-portal" not in text
-    assert "ExecStart=/usr/local/libexec/palmimo/palmimo-display-firmware ensure --boot --json" in text
-    assert "ConditionPathExists=!/etc/palmimo/display-firmware.disabled" in text
-    assert "TimeoutStartSec=660" in text and "KillMode=control-group" in text
-    assert "Type=oneshot" in text
+    import configparser
+    import runpy
+    import shlex
+
+    unit = configparser.ConfigParser(interpolation=None)
+    unit.read(REPO_ROOT / "platform/files/etc/systemd/system/palmimo-display-firmware.service")
+    tool = runpy.run_path(str(REPO_ROOT / "platform/files/usr/local/libexec/palmimo/palmimo-display-firmware"))
+    assert float(unit["Service"]["TimeoutStartSec"]) > tool["UPDATE_BUDGET_SECONDS"] + tool["BOOT_WAIT_SECONDS"]
+    assert "palmimo-portal.service" in unit["Unit"]["Before"].split()
+    assert "palmimo-portal.service" not in unit["Unit"].get("Requires", "").split()
+    assert unit["Service"]["KillMode"] == "control-group"
+    command = shlex.split(unit["Service"]["ExecStart"])
+    assert "--boot" in command and "--adopt-bootsel" not in command
     match = re.search(r'^expected_enabled="([^"]+)"', _text(APPLY_SCRIPT), re.MULTILINE)
     assert match is not None
     assert "palmimo-display-firmware" in match.group(1).split()

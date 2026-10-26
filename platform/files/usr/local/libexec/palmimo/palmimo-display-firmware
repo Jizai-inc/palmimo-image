@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any
 
 
+UPDATE_BUDGET_SECONDS = 540
+BOOT_WAIT_SECONDS = 15
+
+
 class FirmwareError(Exception):
     pass
 
@@ -82,6 +86,8 @@ def unpack(source: Path, target: Path, limit: int) -> bytes:
 
 def validate_artifact(directory: Path, forbidden: list[str]) -> None:
     """Validate release assets; forbidden terms are supplied privately by CI."""
+    if not any(term.strip() for term in forbidden):
+        raise FirmwareError("Private firmware forbidden terms must be configured")
     declared = declaration(directory / "firmware.json")
     with tempfile.TemporaryDirectory() as temporary:
         data = unpack(directory / "face_serial.bin.gz", Path(temporary) / "firmware.bin", 10 * 1024 * 1024)
@@ -191,6 +197,23 @@ class Hardware:
     def bootsel_count(self) -> int:
         return len(self.bootsel_serials())
 
+    def usb_target(self, expected: str, bootsel: bool) -> tuple[int, int]:
+        matches = [
+            device
+            for device, serial, name in self.usb_devices("000f" if bootsel else "0009")
+            if serial.lower().removeprefix("0x") == expected and (not bootsel or name == "RP2350 Boot")
+        ]
+        if len(matches) != 1:
+            raise FirmwareError("Cannot locate the identified face USB device; disconnect other Pico boards")
+        try:
+            bus = int((matches[0] / "busnum").read_text())
+            address = int((matches[0] / "devnum").read_text())
+        except (OSError, ValueError) as error:
+            raise FirmwareError(f"Cannot read face USB bus/address: {error}") from error
+        if not 0 < bus <= 255 or not 0 < address <= 127:
+            raise FirmwareError("Invalid face USB bus/address")
+        return bus, address
+
     def port_busy(self, port: str) -> bool:
         target = Path(port).resolve()
         for process in Path("/proc").iterdir():
@@ -265,10 +288,12 @@ class Updater:
         self.end = 0.0
         self.writing = False
         self.recovery_chip: str | None = None
+        self.target_chip: str | None = None
+        self.in_bootsel = False
         self.before: str | None = None
         self.after: str | None = None
 
-    def budget(self, maximum: float = 540) -> float:
+    def budget(self, maximum: float = UPDATE_BUDGET_SECONDS) -> float:
         remaining = self.end - self.hw.monotonic()
         if remaining <= 0:
             raise DeadlineError("Firmware update deadline exceeded")
@@ -288,8 +313,11 @@ class Updater:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(name)
 
-    def pico(self, *args: str, maximum: float = 540) -> str:
-        return self.hw.picotool(list(args), self.budget(maximum))
+    def pico(self, *args: str, maximum: float = UPDATE_BUDGET_SECONDS) -> str:
+        if self.target_chip is None:
+            raise FirmwareError("No identified face USB target")
+        bus, address = self.hw.usb_target(self.target_chip, self.in_bootsel)
+        return self.hw.picotool([*args, "--bus", str(bus), "--address", str(address)], self.budget(maximum))
 
     def version(self, port: str) -> str:
         for _ in range(2):
@@ -313,7 +341,9 @@ class Updater:
         while True:
             ports, usb = self.devices()
             if len(ports) > 1 or usb > 1 or (ports and usb):
-                raise FirmwareError("Multiple USB devices appeared during update")
+                raise FirmwareError(
+                    "Multiple USB devices appeared during update; disconnect Pico boards other than the face display"
+                )
             if (usb == 1 and not ports) if bootsel else (len(ports) == 1 and not usb):
                 return ports, usb
             if self.hw.monotonic() >= end:
@@ -323,11 +353,17 @@ class Updater:
     def match_bootsel(self, expected: str) -> None:
         ports, usb = self.wait_mode(True, 15)
         if ports or usb != 1:
-            raise FirmwareError("Cannot identify a single BOOTSEL display")
+            raise FirmwareError(
+                "Cannot identify a single BOOTSEL display; disconnect Pico boards other than the face display"
+            )
         # picotool 2.1.1 info fails on BOOTSEL with a valid image; USB serial remains readable.
         serials = self.hw.bootsel_serials()
         if len(serials) != 1 or chip_id(serials[0]) != expected:
-            raise FirmwareError("BOOTSEL chipid does not match the known display")
+            raise FirmwareError(
+                "BOOTSEL chipid does not match the known display; for a replaced face, disconnect other Pico boards and run ensure --adopt-bootsel"
+            )
+        self.in_bootsel = True
+        self.after = "bootsel"
 
     def restore_application(self) -> None:
         expected, self.recovery_chip = self.recovery_chip, None
@@ -336,14 +372,24 @@ class Updater:
         try:
             serials = self.hw.bootsel_serials()
             if len(serials) == 1 and chip_id(serials[0]) == expected:
+                self.in_bootsel = True
+                self.after = "bootsel"
                 self.pico("reboot", "-a", maximum=10)
+                ports, usb = self.wait_mode(False, 30)
+                if len(ports) == 1 and not usb and chip_id(ports[0][1]) == expected:
+                    self.in_bootsel = False
+                    self.after = self.before
         except (FirmwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
             print(f"Cannot restore display application: {error}", file=sys.stderr, flush=True)
 
-    def update(self, declared: dict[str, str], state: dict[str, Any], boot: bool) -> str:
-        ports, usb = self.devices(15 if boot else 0)
+    def update(self, declared: dict[str, str], state: dict[str, Any], boot: bool, adopt_bootsel: bool) -> str:
+        ports, usb = self.devices(BOOT_WAIT_SECONDS if boot else 0)
         if len(ports) > 1 or usb > 1 or (ports and usb):
-            raise FirmwareError("Cannot identify display among multiple USB devices")
+            raise FirmwareError(
+                "Cannot identify display among multiple USB devices; disconnect Pico boards other than the face display"
+            )
+        if adopt_bootsel and (ports or usb != 1):
+            raise FirmwareError("--adopt-bootsel requires no CDC and one RP2350 BOOTSEL; disconnect other Pico boards")
         if not ports and not usb:
             if state.get("seen"):
                 raise FirmwareError(
@@ -359,16 +405,30 @@ class Updater:
             self.before = self.version(port)
             self.after = self.before
             expected = chip_id(serial)
+            self.target_chip = expected
             state.update(seen=True, chip_id=expected)
             self.save(state)
             if self.before == declared["version"]:
                 state["consecutive_failures"] = 0
                 return "current"
         else:
-            expected = chip_id(state.get("chip_id", ""))
-            state["chip_id"] = expected
-            self.match_bootsel(expected)
             self.before = self.after = "bootsel"
+            if adopt_bootsel:
+                serials = self.hw.bootsel_serials()
+                if len(serials) != 1:
+                    raise FirmwareError("Cannot adopt multiple BOOTSEL devices; disconnect other Pico boards")
+                expected = chip_id(serials[0])
+                state.update(seen=True, chip_id=expected)
+            else:
+                if not state.get("chip_id"):
+                    raise FirmwareError(
+                        "BOOTSEL face has no recorded chip ID; disconnect other Pico boards and run ensure --adopt-bootsel manually"
+                    )
+                expected = chip_id(state["chip_id"])
+                state["chip_id"] = expected
+            self.target_chip = expected
+            self.match_bootsel(expected)
+            self.save(state)
         if boot and state["consecutive_failures"] >= 3:
             print("WARNING: automatic display writes suspended after repeated failures", file=sys.stderr)
             return "skipped"
@@ -413,6 +473,7 @@ class Updater:
         ports, usb = self.wait_mode(False, 30)
         if len(ports) != 1 or usb or chip_id(ports[0][1]) != expected:
             raise FirmwareError("Updated display did not return with the same USB serial")
+        self.in_bootsel = False
         self.after = self.version(ports[0][0])
         if self.after != declared["version"]:
             raise FirmwareError("Updated VERSION does not match declaration")
@@ -421,11 +482,13 @@ class Updater:
         state["consecutive_failures"] = 0
         return "updated"
 
-    def ensure(self, boot: bool = False) -> tuple[dict[str, Any], int]:
-        self.end = self.hw.monotonic() + 540
+    def ensure(self, boot: bool = False, adopt_bootsel: bool = False) -> tuple[dict[str, Any], int]:
+        self.end = self.hw.monotonic() + UPDATE_BUDGET_SECONDS
         self.before = self.after = None
         self.writing = False
         self.recovery_chip = None
+        self.target_chip = None
+        self.in_bootsel = False
         state: dict[str, Any] = {}
         result, reason, code = "failed", None, 1
         if not (self.paths.firmware / "firmware.json").exists():
@@ -443,6 +506,8 @@ class Updater:
                 if type(failures) is not int or failures < 0 or type(state["seen"]) is not bool:
                     raise FirmwareError("Invalid saved display state")
                 try:
+                    if boot and adopt_bootsel:
+                        raise ConfigurationError("BOOTSEL adoption is a manual operation; omit --boot")
                     declared = declaration(self.paths.firmware / "firmware.json")
                     if not boot or state.get("declared_version") != declared["version"]:
                         state["consecutive_failures"] = 0
@@ -453,7 +518,7 @@ class Updater:
                         shutil.rmtree(self.paths.work)
                     self.paths.work.mkdir(mode=0o700, parents=True)
                     self.save(state)
-                    result = self.update(declared, state, boot)
+                    result = self.update(declared, state, boot, adopt_bootsel)
                     if result == "skipped":
                         reason = state.get("last_reason") or "Repeated boot write failures; retry manually"
                     code = 0
@@ -461,8 +526,12 @@ class Updater:
                     result, reason, code = "busy", str(error), 75
                 except ConfigurationError as error:
                     reason, code = str(error), 78
-                except (FirmwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
-                    reason = str(error)
+                except (FirmwareError, OSError, ValueError, ImportError, subprocess.TimeoutExpired) as error:
+                    reason = (
+                        "python3-serial is not installed; install python3-serial and retry"
+                        if isinstance(error, ImportError)
+                        else str(error)
+                    )
                     if self.writing and boot:
                         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
                     self.restore_application()
@@ -487,14 +556,16 @@ def terminate(signum: int, frame: Any) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["ensure"])
-    parser.add_argument("--boot", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--boot", action="store_true")
+    mode.add_argument("--adopt-bootsel", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, terminate)
     if os.geteuid() != 0:
         result, code = {"result": "failed", "before": None, "after": None, "reason": "Root is required"}, 1
     else:
-        result, code = Updater(Paths(), Hardware()).ensure(args.boot)
+        result, code = Updater(Paths(), Hardware()).ensure(args.boot, args.adopt_bootsel)
     if args.json:
         print(json.dumps(result), flush=True)
     return code

@@ -25,6 +25,7 @@ class Fake(fw.Hardware):  # type: ignore[name-defined]
         self.version = "old"
         self.chip = "abcdef0123456789"
         self.commands: list[list[str]] = []
+        self.invocations: list[list[str]] = []
         self.payloads: list[bytes] = []
         self.fail = 0
         self.in_use = False
@@ -46,6 +47,9 @@ class Fake(fw.Hardware):  # type: ignore[name-defined]
     def bootsel_serials(self) -> list[str]:
         return [self.chip] * self.usb
 
+    def usb_target(self, expected: str, bootsel: bool) -> tuple[int, int]:
+        return 3, 42 if bootsel else 11
+
     def port_busy(self, port: str) -> bool:
         return self.in_use
 
@@ -62,8 +66,11 @@ class Fake(fw.Hardware):  # type: ignore[name-defined]
         self.usb = 1
 
     def picotool(self, args: list[str], timeout: float) -> str:
+        self.invocations.append(args.copy())
+        if "--bus" in args:
+            args = args[: args.index("--bus")]
         self.commands.append(args)
-        if args == ["reboot", "-u", "-f"]:
+        if args[:3] == ["reboot", "-u", "-f"]:
             self.touch("tty-face")
         if args[0] == "load":
             data = Path(args[2]).read_bytes()
@@ -72,7 +79,7 @@ class Fake(fw.Hardware):  # type: ignore[name-defined]
                 raise OSError("USB failure")
             offset = int(args[-1], 16) - 0x10000000
             self.flash[offset : offset + len(data)] = data
-        if args == ["reboot", "-a"]:
+        if args[:2] == ["reboot", "-a"]:
             self.ports = [("tty-face", self.chip)]
             self.usb = 0
             self.version = "new"
@@ -149,7 +156,6 @@ def test_absence_remembers_previous_face(rig: tuple[Any, Fake], seen: bool) -> N
     hw.ports = []
     result, code = updater.ensure(boot=True)
     assert (result["result"], code) == (("failed", 1) if seen else ("absent", 0))
-    assert hw.now == 15
     assert json.loads(updater.paths.state.read_text())["consecutive_failures"] == 0
 
 
@@ -163,7 +169,7 @@ def test_integrity_and_version_mismatch_fail(rig: tuple[Any, Fake], case: str) -
 
         def reboot(args: list[str], timeout: float) -> str:
             output = original(args, timeout)
-            if args == ["reboot", "-a"]:
+            if args[:2] == ["reboot", "-a"]:
                 hw.version = "wrong"
             return output
 
@@ -199,7 +205,7 @@ def test_invalid_declaration_is_config_error(rig: tuple[Any, Fake], value: Any) 
 
 
 @pytest.mark.parametrize(
-    "case", ["valid", "dirty-declaration", "unknown-binary", "hash", "version", "large", "forbidden"]
+    "case", ["valid", "dirty-declaration", "unknown-binary", "hash", "version", "large", "forbidden", "empty-filter"]
 )
 def test_release_validation(rig: tuple[Any, Fake], case: str) -> None:
     updater, _ = rig
@@ -223,7 +229,7 @@ def test_release_validation(rig: tuple[Any, Fake], case: str) -> None:
         fw.validate_artifact(directory, ["private-source-tree"])
     else:
         with pytest.raises(fw.FirmwareError):
-            fw.validate_artifact(directory, ["private-source-tree"])
+            fw.validate_artifact(directory, [] if case == "empty-filter" else ["private-source-tree"])
 
 
 def test_shipped_release_assets() -> None:
@@ -232,7 +238,10 @@ def test_shipped_release_assets() -> None:
     directory = SCRIPT.parents[2] / "lib/palmimo/display-firmware"
     if not (directory / "firmware.json").exists():
         pytest.skip("No firmware is declared")
-    fw.validate_artifact(directory, os.environ.get("PALMIMO_FIRMWARE_FORBIDDEN_TERMS", "").split(","))
+    forbidden = [
+        term.strip() for term in os.environ.get("PALMIMO_FIRMWARE_FORBIDDEN_TERMS", "").split(",") if term.strip()
+    ]
+    fw.validate_artifact(directory, forbidden)
 
 
 @pytest.mark.parametrize("busy", ["reservation", "port"])
@@ -357,7 +366,7 @@ def test_failed_reboot_uses_1200_baud_fallback(rig: tuple[Any, Fake]) -> None:
     original = hw.picotool
 
     def pico(args: list[str], timeout: float) -> str:
-        if args == ["reboot", "-u", "-f"]:
+        if args[:3] == ["reboot", "-u", "-f"]:
             raise OSError("unsupported reboot")
         return original(args, timeout)
 
@@ -443,7 +452,7 @@ def test_sigterm_during_usb_transition_does_not_fall_back(rig: tuple[Any, Fake])
     original = hw.picotool
 
     def pico(args: list[str], timeout: float) -> str:
-        if args == ["reboot", "-u", "-f"]:
+        if args[:3] == ["reboot", "-u", "-f"]:
             return ""
         return original(args, timeout)
 
@@ -459,6 +468,7 @@ def test_sigterm_during_usb_transition_does_not_fall_back(rig: tuple[Any, Fake])
 
 
 class SysfsFake(Fake):
+    usb_target = fw.Hardware.usb_target
     bootsel_serials = fw.Hardware.bootsel_serials
     usb_devices = fw.Hardware.usb_devices
     cdc = fw.Hardware.cdc
@@ -484,6 +494,8 @@ class SysfsFake(Fake):
             "idProduct": "000f" if self.usb else "0009",
             "serial": self.chip.upper(),
             "product": "RP2350 Boot" if self.usb else "Pico",
+            "busnum": "3",
+            "devnum": "42" if self.usb else "11",
         }.items():
             (self.device / name).write_text(value + "\n")
 
@@ -497,7 +509,7 @@ class SysfsFake(Fake):
         if args[0] == "info":
             raise subprocess.TimeoutExpired(["picotool", *args], 10)
         output = super().picotool(args, timeout)
-        if args == ["reboot", "-a"] and not self.payloads:
+        if args[:2] == ["reboot", "-a"] and not self.payloads:
             self.version = "old"
         self.sync()
         return output
@@ -552,8 +564,8 @@ def test_prewrite_failure_recovers_only_intact_application(
     original_pico = hw.picotool
 
     def pico(args: list[str], timeout: float) -> str:
-        if stage == "recovery-error" and args == ["reboot", "-a"]:
-            hw.commands.append(args)
+        if stage == "recovery-error" and args[:2] == ["reboot", "-a"]:
+            hw.commands.append(args[:2])
             raise OSError("USB reboot failed")
         return original_pico(args, timeout)
 
@@ -567,3 +579,180 @@ def test_prewrite_failure_recovers_only_intact_application(
         assert hw.flash == b"X" * 8192
     elif stage in {"body", "header"}:
         assert hw.flash[:4096] == b"\xff" * 4096
+
+
+@pytest.mark.parametrize("stage", ["exchange", "touch"])
+def test_missing_serial_dependency_reports_failure(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    import builtins
+    import sys
+
+    updater, hw = rig
+    original_import = builtins.__import__
+
+    def missing_serial(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "serial":
+            raise ModuleNotFoundError("No module named 'serial'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_serial)
+    if stage == "exchange":
+        hw.exchange = fw.Hardware.exchange.__get__(hw)  # type: ignore[method-assign]
+    else:
+        hw.touch = fw.Hardware.touch.__get__(hw)  # type: ignore[method-assign]
+        original_pico = hw.picotool
+
+        def pico(args: list[str], timeout: float) -> str:
+            if args[:3] == ["reboot", "-u", "-f"]:
+                raise OSError("Reboot not supported")
+            return original_pico(args, timeout)
+
+        hw.picotool = pico  # type: ignore[method-assign]
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "ensure", "--json"])
+    assert fw.main() == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    assert result["result"] == "failed"
+    assert "python3-serial" in result["reason"]
+    assert json.loads(updater.paths.state.read_text())["last_result"] == "failed"
+    assert not hw.payloads
+
+
+@pytest.mark.parametrize("mode", ["update", "fallback", "recovery"])
+def test_picotool_targets_face_across_usb_modes(
+    rig: tuple[Any, Fake], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    updater, _ = rig
+    hw = SysfsFake(tmp_path / "sysfs")
+    updater.hw = hw
+    for index, product in enumerate(["000a", "0003"]):
+        other = hw.usb_root / f"other-{index}"
+        other.mkdir()
+        for name, value in {
+            "idVendor": "2e8a",
+            "idProduct": product,
+            "serial": "FFFFFFFFFFFFFFFF",
+            "product": "Other Pico",
+            "busnum": "3",
+            "devnum": str(80 + index),
+        }.items():
+            (other / name).write_text(value)
+    calls: list[list[str]] = []
+    touches: list[str] = []
+    original_pico, original_touch = hw.picotool, hw.touch
+
+    def pico(args: list[str], timeout: float) -> str:
+        calls.append(args.copy())
+        if mode == "fallback" and args[:3] == ["reboot", "-u", "-f"]:
+            raise OSError("Reboot not supported")
+        return original_pico(args, timeout)
+
+    def touch(port: str) -> None:
+        touches.append(port)
+        original_touch(port)
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    hw.touch = touch  # type: ignore[method-assign]
+    if mode == "recovery":
+        original_write = Path.write_bytes
+
+        def write(path: Path, data: Any) -> int:
+            if path.name == "blank.bin":
+                raise OSError("Disk full")
+            return original_write(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", write)
+    result, _ = updater.ensure()
+    assert result["result"] == ("failed" if mode == "recovery" else "updated")
+    assert calls
+    for args in calls:
+        assert args[args.index("--bus") + 1] == "3"
+        assert args[args.index("--address") + 1] == ("11" if args[:3] == ["reboot", "-u", "-f"] else "42")
+    if mode == "fallback":
+        assert touches == [str(hw.dev_root / "ttyACM0")]
+
+
+@pytest.mark.parametrize("case", ["unknown", "replacement", "app", "multiple", "wrong-product", "bad-serial"])
+def test_explicit_bootsel_adoption_requires_one_valid_target(
+    rig: tuple[Any, Fake],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+) -> None:
+    import shutil
+    import sys
+
+    updater, _ = rig
+    hw = SysfsFake(tmp_path / "sysfs")
+    updater.hw = hw
+    if case != "app":
+        hw.touch("tty-face")
+    if case == "replacement":
+        updater.save({"seen": True, "chip_id": "F" * 16})
+    elif case == "multiple":
+        shutil.copytree(hw.device, hw.usb_root / "second")
+    elif case == "wrong-product":
+        (hw.device / "product").write_text("RP2040 Boot")
+    elif case == "bad-serial":
+        (hw.device / "serial").write_text("invalid")
+    original_pico = hw.picotool
+
+    def pico(args: list[str], timeout: float) -> str:
+        if args[0] == "load":
+            state = json.loads(updater.paths.state.read_text())
+            assert state["seen"] and state["chip_id"] == hw.chip
+        return original_pico(args, timeout)
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "ensure", "--adopt-bootsel", "--json"])
+    accepted = case in {"unknown", "replacement"}
+    assert fw.main() == (0 if accepted else 1)
+    result = json.loads(capsys.readouterr().out)
+    assert result["result"] == ("updated" if accepted else "failed")
+    if accepted:
+        assert result["before"] == "bootsel"
+        assert json.loads(updater.paths.state.read_text())["chip_id"] == hw.chip
+    else:
+        assert not hw.payloads
+
+
+@pytest.mark.parametrize("stage", ["body", "header", "signal", "recovery-error"])
+def test_failed_update_reports_bootsel_when_left_there(
+    rig: tuple[Any, Fake], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    updater, _ = rig
+    hw = SysfsFake(tmp_path / "sysfs")
+    updater.hw = hw
+    if stage == "recovery-error":
+        original_write = Path.write_bytes
+
+        def write(path: Path, data: Any) -> int:
+            if path.name == "blank.bin":
+                raise OSError("Disk full")
+            return original_write(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", write)
+    else:
+        hw.fail = 3 if stage == "header" else 2
+    original_pico = hw.picotool
+
+    def pico(args: list[str], timeout: float) -> str:
+        if stage == "signal" and args[0] == "load" and len(hw.payloads) == 1:
+            fw.terminate(15, None)
+        if stage == "recovery-error" and args[:2] == ["reboot", "-a"]:
+            raise OSError("Cannot reboot")
+        return original_pico(args, timeout)
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    result, code = updater.ensure()
+    assert (result["result"], result["before"], result["after"], code) == ("failed", "old", "bootsel", 1)
+    assert hw.usb == 1

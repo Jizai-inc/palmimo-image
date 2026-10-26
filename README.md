@@ -374,7 +374,11 @@ Boot retries wait up to 15 seconds for USB and stop writing after three consecut
 write failures for the same declared version. A manual retry resets that count.
 
 If a previously seen face disappears, check USB and use its BOOT + RST buttons
-to enter BOOTSEL for recovery. After intentionally removing or replacing a face,
+to enter BOOTSEL for recovery. If the SD card was reimaged and the face is already
+in BOOTSEL, disconnect every Pico except the face and explicitly adopt it with
+`sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --adopt-bootsel --json`.
+This records that single RP2350's identity before writing; boot updates and Portal
+never adopt an unrecorded device automatically. After intentionally removing or replacing a face,
 stop display users and remove `state.json` to forget its identity. To disable boot
 updates, create `/etc/palmimo/display-firmware.disabled`; platform verification
 checks the unit file, not whether the unit is enabled.

@@ -134,6 +134,12 @@
         "owner": "root",
         "group": "root",
         "mode": "0755"
+      },
+      {
+        "path": "usr/local/lib/palmimo/display-firmware",
+        "owner": "root",
+        "group": "root",
+        "mode": "0755"
       }
     ],
     "external_binaries": [

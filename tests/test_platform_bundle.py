@@ -1450,7 +1450,6 @@ def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "comitup.conf").write_text("x", encoding="utf-8")
-    # "usr/local/lib/palmimo" and "etc/cloud" are left absent.
     fake_accounts = tmp_path / "fake_accounts.txt"
     fake_accounts.touch()
     uv_source = _stub_uv(tmp_path)
@@ -1461,7 +1460,10 @@ def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_
     recorded = fake_accounts.read_text(encoding="utf-8")
     assert f"chown root:root {root / 'etc'}" in recorded
     assert f"chown root:root {root / 'etc' / 'comitup.conf'}" in recorded
-    assert f"chown root:root {root / 'usr' / 'local' / 'lib' / 'palmimo'}" not in recorded
+    firmware_directory = root / "usr/local/lib/palmimo/display-firmware"
+    assert firmware_directory.is_dir()
+    assert stat.S_IMODE(firmware_directory.stat().st_mode) == 0o755
+    assert f"chown root:root {root / 'usr' / 'local' / 'lib' / 'palmimo'}" in recorded
     assert f"chown root:root {root / 'etc' / 'cloud'}" not in recorded
 
 
