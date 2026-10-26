@@ -424,11 +424,14 @@ def test_cli_emits_one_json_line(
     assert json.loads(lines[0])["result"] == "updated"
 
 
-@pytest.mark.parametrize("case", ["oversized", "corrupt"])
+@pytest.mark.parametrize("case", ["oversized", "corrupt", "truncated"])
 def test_bad_compressed_image_never_reaches_flash(rig: tuple[Any, Fake], case: str) -> None:
     updater, hw = rig
     source = updater.paths.firmware / "face_serial.bin.gz"
-    source.write_bytes(gzip.compress(b"X" * (12 * 1024 * 1024 + 1)) if case == "oversized" else b"not gzip")
+    payload = gzip.compress(b"X" * (12 * 1024 * 1024 + 1)) if case == "oversized" else b"not gzip"
+    if case == "truncated":
+        payload = gzip.compress(b"X" * 8192)[:-8]
+    source.write_bytes(payload)
     assert updater.ensure()[0]["result"] == "failed"
     assert not hw.payloads
     assert not updater.paths.work.exists()

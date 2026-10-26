@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,8 +69,11 @@ def declaration(path: Path) -> dict[str, str]:
 
 
 def unpack(source: Path, target: Path, limit: int) -> bytes:
-    with gzip.open(source, "rb") as stream:
-        data = stream.read(limit + 1)
+    try:
+        with gzip.open(source, "rb") as stream:
+            data = stream.read(limit + 1)
+    except (OSError, EOFError, zlib.error) as error:
+        raise FirmwareError(f"Cannot decompress firmware: {error}") from error
     if len(data) > limit:
         raise FirmwareError("Expanded firmware exceeds size limit")
     target.write_bytes(data)
