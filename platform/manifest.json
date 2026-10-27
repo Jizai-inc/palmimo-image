@@ -70,6 +70,54 @@
         "owner": "root",
         "group": "root",
         "mode": "0644"
+      },
+      {
+        "path": "usr/local/lib/palmimo/display-firmware/face_serial.bin.gz",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/lib/palmimo/display-firmware/firmware.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/NOTICE",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/licenses/Apache-2.0.txt",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/licenses/BSD-3-Clause-STMicroelectronics.txt",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/licenses/BSD-3-Clause.txt",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/licenses/MIT-TinyUSB.txt",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/licenses/OFL-1.1.txt",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
       }
     ],
     "managed_directories": [

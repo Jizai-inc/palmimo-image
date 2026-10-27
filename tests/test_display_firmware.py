@@ -244,6 +244,19 @@ def test_shipped_release_assets() -> None:
     fw.validate_artifact(directory, forbidden)
 
 
+def test_shipped_notices_match_canonical() -> None:
+    root = Path(__file__).resolve().parents[1]
+    canonical = root / "files/boot/firmware/licenses/display-firmware"
+    shipped = root / "platform/files/usr/share/doc/palmimo-display-firmware"
+    expected = {path.relative_to(canonical): path.read_bytes() for path in canonical.rglob("*") if path.is_file()}
+    actual = {
+        path.relative_to(shipped): path.read_bytes()
+        for path in shipped.rglob("*")
+        if path.is_file() and path.name != "README"
+    }
+    assert actual == expected
+
+
 @pytest.mark.parametrize("busy", ["reservation", "port"])
 def test_busy_never_touches_firmware(rig: tuple[Any, Fake], busy: str) -> None:
     updater, hw = rig

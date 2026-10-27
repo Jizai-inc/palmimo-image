@@ -322,8 +322,9 @@ on the boot (FAT32) partition, readable from any PC, with one subdirectory
 per source of static third-party software:
 
 - `display-firmware/` — the RP2350 face-display firmware's third-party
-  notices; see `NOTICE` there. Meant to become the canonical copy once a
-  follow-up monorepo PR symlinks `firmware/display/NOTICE` to it.
+  notices and full license texts; see `NOTICE` there. This is the canonical
+  copy, also shipped in platform bundles under
+  `/usr/share/doc/palmimo-display-firmware/`.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
 - `pi/`, `portal/` — apt package and Palmimo Portal dependency license
   trees, generated at build time by the `04-oss-compliance` pi-gen stage.
@@ -361,10 +362,11 @@ build recipe.
 ### Face display firmware
 
 Platform installs enable `palmimo-display-firmware.service`, which runs before
-Portal and retries interrupted face updates. No firmware binary is included yet:
-without a declaration it returns `undeclared` and makes no device changes.
-Firmware binaries distributed separately are Jizai's copyrighted work, excluded
-from this repository's license; third-party notices accompany those binaries.
+Portal and retries interrupted face updates. The platform bundle includes
+firmware `0.1.3+6ea1932` in `/usr/local/lib/palmimo/display-firmware/` for boot
+and Portal platform updates. Firmware binaries are Jizai's copyrighted work,
+excluded from this repository's license; third-party notices and full license
+texts are in `/usr/share/doc/palmimo-display-firmware/`.
 
 Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --json` to
 retry manually. The tool reserves the display, checks its identity and version,
