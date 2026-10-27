@@ -103,7 +103,8 @@ jobs:
       PALMIMO_UV_SOURCE: /tmp/stub-bin/uv
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y --no-install-recommends rsync python3
+      # systemd provides the offline `systemctl --root=... enable` install.sh runs.
+      - run: apt-get update && apt-get install -y --no-install-recommends rsync python3 systemd
       - name: Stub uv (this check never needs a real one)
         run: |
           mkdir -p /tmp/stub-bin
