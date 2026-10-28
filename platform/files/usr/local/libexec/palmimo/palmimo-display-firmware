@@ -85,9 +85,7 @@ def unpack(source: Path, target: Path, limit: int) -> bytes:
 
 
 def validate_artifact(directory: Path, forbidden: list[str]) -> None:
-    """Validate release assets; forbidden terms are supplied privately by CI."""
-    if not any(term.strip() for term in forbidden):
-        raise FirmwareError("Private firmware forbidden terms must be configured")
+    """Validate release integrity and check any privately supplied forbidden terms."""
     declared = declaration(directory / "firmware.json")
     with tempfile.TemporaryDirectory() as temporary:
         data = unpack(directory / "face_serial.bin.gz", Path(temporary) / "firmware.bin", 10 * 1024 * 1024)

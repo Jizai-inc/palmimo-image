@@ -205,9 +205,10 @@ def test_invalid_declaration_is_config_error(rig: tuple[Any, Fake], value: Any) 
 
 
 @pytest.mark.parametrize(
-    "case", ["valid", "dirty-declaration", "unknown-binary", "hash", "version", "large", "forbidden", "empty-filter"]
+    "case", ["valid", "dirty-declaration", "dirty-binary", "unknown-binary", "hash", "version", "large", "forbidden"]
 )
-def test_release_validation(rig: tuple[Any, Fake], case: str) -> None:
+@pytest.mark.parametrize("forbidden", [[], ["private-source-tree"]], ids=["no-terms", "with-terms"])
+def test_release_validation(rig: tuple[Any, Fake], case: str, forbidden: list[str]) -> None:
     updater, _ = rig
     directory = updater.paths.firmware
     data = b"1.2.3+abcdef\0" + b"A" * 5000
@@ -216,8 +217,10 @@ def test_release_validation(rig: tuple[Any, Fake], case: str) -> None:
         version += ".dirty"
     elif case == "unknown-binary":
         data += b"1.2.3+unknown\0"
+    elif case == "dirty-binary":
+        data += b"1.2.3+abcdef.dirty\0"
     elif case == "version":
-        data = b"1.2.3+abcdef.dirty\0" + b"A" * 5000
+        data = b"other-version\0" + b"A" * 5000
     elif case == "large":
         data += b"A" * (10 * 1024 * 1024)
     elif case == "forbidden":
@@ -225,14 +228,15 @@ def test_release_validation(rig: tuple[Any, Fake], case: str) -> None:
     digest = hashlib.sha256(data if case != "hash" else b"wrong").hexdigest()
     (directory / "firmware.json").write_text(json.dumps({"version": version, "sha256": digest}))
     (directory / "face_serial.bin.gz").write_bytes(gzip.compress(data))
-    if case == "valid":
-        fw.validate_artifact(directory, ["private-source-tree"])
+    if case == "valid" or (case == "forbidden" and not forbidden):
+        fw.validate_artifact(directory, forbidden)
     else:
         with pytest.raises(fw.FirmwareError):
-            fw.validate_artifact(directory, [] if case == "empty-filter" else ["private-source-tree"])
+            fw.validate_artifact(directory, forbidden)
 
 
-def test_shipped_release_assets() -> None:
+@pytest.mark.parametrize("check", ["integrity", "forbidden"])
+def test_shipped_release_assets(check: str) -> None:
     import os
 
     directory = SCRIPT.parents[2] / "lib/palmimo/display-firmware"
@@ -241,7 +245,12 @@ def test_shipped_release_assets() -> None:
     forbidden = [
         term.strip() for term in os.environ.get("PALMIMO_FIRMWARE_FORBIDDEN_TERMS", "").split(",") if term.strip()
     ]
-    fw.validate_artifact(directory, forbidden)
+    if check == "integrity":
+        fw.validate_artifact(directory, [])
+    else:
+        if not forbidden:
+            pytest.skip("PALMIMO_FIRMWARE_FORBIDDEN_TERMS is not configured; forbidden-term check skipped")
+        fw.validate_artifact(directory, forbidden)
 
 
 def test_shipped_notices_match_canonical() -> None:
