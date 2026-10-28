@@ -300,6 +300,11 @@ class Updater:
         return min(maximum, remaining)
 
     def save(self, state: dict[str, Any]) -> None:
+        missing = []
+        directory = self.paths.state.parent
+        while not directory.exists():
+            missing.append(directory)
+            directory = directory.parent
         self.paths.state.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
         fd, name = tempfile.mkstemp(dir=self.paths.state.parent)
         try:
@@ -309,6 +314,12 @@ class Updater:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(name, self.paths.state)
+            for directory in [self.paths.state.parent, *(parent.parent for parent in missing)]:
+                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(name)

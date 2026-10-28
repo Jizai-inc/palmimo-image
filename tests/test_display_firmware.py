@@ -311,14 +311,38 @@ def test_deadline_stops_without_reboot_and_cleans_work(rig: tuple[Any, Fake], ca
     assert not updater.paths.work.exists()
 
 
-@pytest.mark.parametrize("case", ["unwritable", "corrupt"])
+def test_chip_id_is_saved_before_flashing(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    original = hw.picotool
+
+    def pico(args: list[str], timeout: float) -> str:
+        if args[0] == "load" and not hw.payloads:
+            assert json.loads(updater.paths.state.read_text())["chip_id"] == hw.chip
+        return original(args, timeout)
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    result, code = updater.ensure()
+    assert (result["result"], code) == ("updated", 0)
+    assert hw.payloads
+
+
+@pytest.mark.parametrize("case", ["unwritable", "corrupt", "chip_save"])
 def test_state_failure_prevents_flashing(rig: tuple[Any, Fake], case: str) -> None:
     updater, hw = rig
     if case == "unwritable":
         updater.paths.state.parent.write_text("not a directory")
-    else:
+    elif case == "corrupt":
         updater.paths.state.parent.mkdir()
         updater.paths.state.write_text("{invalid json")
+    else:
+        original = updater.save
+
+        def save(state: dict[str, Any]) -> None:
+            if state["chip_id"] is not None:
+                raise OSError("Cannot persist chip identity")
+            original(state)
+
+        updater.save = save
     assert updater.ensure()[0]["result"] == "failed"
     assert not hw.payloads
     if case == "corrupt":
