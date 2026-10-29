@@ -1,0 +1,11 @@
+Palmimo face display firmware
+
+This bundle includes firmware 0.1.3+6ea1932, declared by firmware.json in
+/usr/local/lib/palmimo/display-firmware alongside face_serial.bin.gz.
+The updater installs it during boot and Portal platform updates.
+
+Firmware binaries installed in /usr/local/lib/palmimo/display-firmware are
+Jizai's copyrighted work and are excluded from this repository's license.
+Their third-party notices and full license texts are in NOTICE and licenses/
+in this directory. The canonical copies are in the repository's
+files/boot/firmware/licenses/display-firmware/; tests require byte equality.

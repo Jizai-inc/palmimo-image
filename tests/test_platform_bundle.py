@@ -1450,7 +1450,6 @@ def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "comitup.conf").write_text("x", encoding="utf-8")
-    # "usr/local/lib/palmimo" and "etc/cloud" are left absent.
     fake_accounts = tmp_path / "fake_accounts.txt"
     fake_accounts.touch()
     uv_source = _stub_uv(tmp_path)
@@ -1461,7 +1460,10 @@ def test_install_records_chown_intent_only_for_repair_paths_present_in_root(tmp_
     recorded = fake_accounts.read_text(encoding="utf-8")
     assert f"chown root:root {root / 'etc'}" in recorded
     assert f"chown root:root {root / 'etc' / 'comitup.conf'}" in recorded
-    assert f"chown root:root {root / 'usr' / 'local' / 'lib' / 'palmimo'}" not in recorded
+    firmware_directory = root / "usr/local/lib/palmimo/display-firmware"
+    assert firmware_directory.is_dir()
+    assert stat.S_IMODE(firmware_directory.stat().st_mode) == 0o755
+    assert f"chown root:root {root / 'usr' / 'local' / 'lib' / 'palmimo'}" in recorded
     assert f"chown root:root {root / 'etc' / 'cloud'}" not in recorded
 
 
@@ -1695,3 +1697,26 @@ def test_verify_reports_missing_for_an_apt_package_not_in_the_dpkg_status_file(t
 
     apt_diffs = [d for d in diffs if d["path"] in manifest["owns"]["apt_packages"]]
     assert apt_diffs == [{"kind": "missing", "path": pkg} for pkg in absent_pkgs]
+
+
+def test_install_records_offline_display_unit_enable(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    assert f"systemctl --root={root} enable palmimo-display-firmware.service" in accounts.read_text().splitlines()
+    unit_link = root / "etc/systemd/system/multi-user.target.wants/palmimo-display-firmware.service"
+    unit_link.parent.mkdir(parents=True, exist_ok=True)
+    unit_link.symlink_to("/not-required-by-verification")
+    assert _run_install(root, accounts, None, command="verify").returncode == 0
+
+
+@pytest.mark.parametrize("root", ["/", "/offline"])
+def test_display_enable_normalizes_root(root: str) -> None:
+    text = INSTALL_SH.read_text()
+    function = text[text.index("enable_display_firmware() {") : text.index("\ndo_install() {")]
+    result = subprocess.run(
+        ["bash", "-c", function + '\nsystemctl() { printf "%s\\n" "$@"; }; enable_display_firmware'],
+        env={"PATH": "/usr/bin:/bin", "ROOT": root},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"--root={root}", "enable", "palmimo-display-firmware.service"]

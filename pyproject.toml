@@ -27,6 +27,7 @@ include = [
     "lib/**/*.py",
     "tests/**/*.py",
     "platform/**/*.py",
+    "**/palmimo-display-firmware",
 ]
 exclude = [
     ".venv",
@@ -89,6 +90,7 @@ files = [
     "lib/",
     "tests/",
     "platform/",
+    "platform/files/usr/local/libexec/palmimo/palmimo-display-firmware",
 ]
 exclude = [
     "\\.venv",

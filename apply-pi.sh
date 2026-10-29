@@ -201,7 +201,7 @@ echo "    ok: no ~/.asoundrc shadowing /etc/asound.conf"
 ssh_run "sudo raspi-config nonint do_wifi_country JP"
 echo "    ok: Wi-Fi country set to JP"
 
-expected_enabled="comitup avahi-daemon palmimo-portal palmimo-firstboot"
+expected_enabled="comitup avahi-daemon palmimo-portal palmimo-firstboot palmimo-display-firmware"
 for unit in $expected_enabled; do
   # String-compare, not exit code: is-enabled exits 0 for "static" too,
   # which silently passed a unit whose [Install] section was missing.

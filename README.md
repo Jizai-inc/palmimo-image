@@ -322,8 +322,9 @@ on the boot (FAT32) partition, readable from any PC, with one subdirectory
 per source of static third-party software:
 
 - `display-firmware/` — the RP2350 face-display firmware's third-party
-  notices; see `NOTICE` there. Meant to become the canonical copy once a
-  follow-up monorepo PR symlinks `firmware/display/NOTICE` to it.
+  notices and full license texts; see `NOTICE` there. This is the canonical
+  copy, also shipped in platform bundles under
+  `/usr/share/doc/palmimo-display-firmware/`.
 - `tools/uv/` — license texts for the `uv` binary this image installs.
 - `pi/`, `portal/` — apt package and Palmimo Portal dependency license
   trees, generated at build time by the `04-oss-compliance` pi-gen stage.
@@ -357,3 +358,31 @@ decisions, the identity file spec, the pi-gen stage structure, and the
 on-device verification history. See [`pigen/README.md`](pigen/README.md)
 for pi-gen stage implementation notes and the manual (non-`make_image.py`)
 build recipe.
+
+### Face display firmware
+
+Platform installs enable `palmimo-display-firmware.service`, which runs before
+Portal and retries interrupted face updates. The platform bundle includes
+firmware `0.1.3+6ea1932` in `/usr/local/lib/palmimo/display-firmware/` for boot
+and Portal platform updates. Firmware binaries are Jizai's copyrighted work,
+excluded from this repository's license; third-party notices and full license
+texts are in `/usr/share/doc/palmimo-display-firmware/`.
+
+Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --json` to
+retry manually. The tool reserves the display, checks its identity and version,
+and restores an awake face after an update. Progress goes to stderr/journal;
+the final JSON and `/var/lib/palmimo/display-firmware/state.json` report results.
+Boot retries wait up to 15 seconds for USB and stop writing after three consecutive
+write failures for the same declared version. A manual retry resets that count.
+
+If a previously seen face disappears, check USB and use its BOOT + RST buttons
+to enter BOOTSEL for recovery. If the SD card was reimaged and the face is already
+in BOOTSEL, disconnect every Pico except the face and explicitly adopt it with
+`sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --adopt-bootsel --json`.
+For a CDC face that does not respond to VERSION, disconnect other Picos, run
+`sudo picotool reboot -u -f`, then use `ensure --adopt-bootsel` as above.
+This records that single RP2350's identity before writing; boot updates and Portal
+never adopt an unrecorded device automatically. After intentionally removing or replacing a face,
+stop display users and remove `state.json` to forget its identity. To disable boot
+updates, create `/etc/palmimo/display-firmware.disabled`; platform verification
+checks the unit file, not whether the unit is enabled.

@@ -538,6 +538,16 @@ upgrade_uv_python() {
 
 # --- subcommands --------------------------------------------------------------
 
+enable_display_firmware() {
+  local root="${ROOT%/}"
+  [ -n "$root" ] || root=/
+  if [ -n "${PALMIMO_FAKE_ACCOUNTS:-}" ]; then
+    record_account_intent "systemctl --root=$root enable palmimo-display-firmware.service"
+  else
+    systemctl --root="$root" enable palmimo-display-firmware.service
+  fi
+}
+
 do_install() {
   ensure_group palmimo-apps
   ensure_user palmimo-app "video,audio,dialout,palmimo-apps"
@@ -546,6 +556,7 @@ do_install() {
   patch_comitup
 
   install_owned_files
+  enable_display_firmware
   install_managed_directories
   install_state_directories
   mkdir -p "${ROOT%/}/var/log/journal"

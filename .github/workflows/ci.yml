@@ -48,6 +48,8 @@ jobs:
       - run: uv run mypy
 
   test:
+    env:
+      PALMIMO_FIRMWARE_FORBIDDEN_TERMS: ${{ secrets.PALMIMO_FIRMWARE_FORBIDDEN_TERMS }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -58,6 +60,16 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Require firmware forbidden terms for trusted events
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import sys
+
+          if not any(term.strip() for term in os.environ["PALMIMO_FIRMWARE_FORBIDDEN_TERMS"].split(",")):
+              sys.exit("::error::PALMIMO_FIRMWARE_FORBIDDEN_TERMS must be configured")
+          PYTHON
       - run: uv sync --dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} pytest
 
@@ -101,7 +113,8 @@ jobs:
       PALMIMO_UV_SOURCE: /tmp/stub-bin/uv
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y --no-install-recommends rsync python3
+      # systemd provides the offline `systemctl --root=... enable` install.sh runs.
+      - run: apt-get update && apt-get install -y --no-install-recommends rsync python3 systemd
       - name: Stub uv (this check never needs a real one)
         run: |
           mkdir -p /tmp/stub-bin
