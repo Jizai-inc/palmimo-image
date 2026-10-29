@@ -8,3 +8,5 @@ libportaudio2
 v4l-utils
 picotool
 python3-serial
+python3-zbar
+libturbojpeg0

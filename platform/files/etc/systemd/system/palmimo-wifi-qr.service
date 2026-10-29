@@ -1,0 +1,20 @@
+[Unit]
+Description=Palmimo Wi-Fi QR reader
+StopPropagatedFrom=palmimo-portal.service
+After=palmimo-portal.service
+
+[Service]
+DynamicUser=yes
+SupplementaryGroups=video dialout
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+DeviceAllow=char-ttyACM rw
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/lock/palmimo
+RuntimeDirectory=palmimo-wifi-qr
+BindReadOnlyPaths=/home/user/palmimo-portal/palmimo_portal/wifi_qr_reader:/run/palmimo-wifi-qr-code
+ExecStart=/usr/bin/python3 -I /run/palmimo-wifi-qr-code/reader.py
+TimeoutStopSec=5
+Restart=no
+Environment=PALMIMO_WIFI_QR_PEER_USER=user

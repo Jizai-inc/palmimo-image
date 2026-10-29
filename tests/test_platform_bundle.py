@@ -1708,6 +1708,14 @@ def test_install_records_offline_display_unit_enable(installed_root: tuple[Path,
     assert _run_install(root, accounts, None, command="verify").returncode == 0
 
 
+def test_install_keeps_wifi_qr_reader_disabled(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    unit = "palmimo-wifi-qr.service"
+    assert (root / "etc/systemd/system" / unit).is_file()
+    assert not any("enable" in line and unit in line for line in accounts.read_text().splitlines())
+    assert not list((root / "etc/systemd/system").glob(f"*.wants/{unit}"))
+
+
 @pytest.mark.parametrize("root", ["/", "/offline"])
 def test_display_enable_normalizes_root(root: str) -> None:
     text = INSTALL_SH.read_text()
