@@ -401,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--portal-tag",
         default=None,
-        help="palmimo-portal tag to bake in (default: pi-gen config's own default, currently v0.2.3).",
+        help="palmimo-portal tag to bake in (default: pi-gen config's own default, currently v0.2.5).",
     )
     parser.add_argument(
         "--pigen-ref",
