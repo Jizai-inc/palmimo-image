@@ -137,3 +137,46 @@ def test_relocate_keeps_boot_copy_until_portal_path_can_be_published(tmp_path: P
     assert json.loads(identity.read_text()) == IDENTITY
     assert env.read_text() == f"PALMIMO_IDENTITY_FILE={identity}\n"
     assert set(directory.iterdir()) == {identity, env}
+
+
+def test_relocate_preserves_all_inputs_when_boot_identity_cannot_be_read(tmp_path: Path) -> None:
+    boot = tmp_path / "boot/palmimo-identity.json"
+    boot.mkdir(parents=True)
+    sentinel = boot / "manufacturing-input"
+    sentinel.write_text("keep manufacturing input")
+    directory = tmp_path / "etc/palmimo"
+    directory.mkdir(parents=True)
+    identity = directory / "identity.json"
+    env = directory / "identity.env"
+    identity.write_text(json.dumps(OTHER))
+    env.write_text(f"PALMIMO_IDENTITY_FILE={identity}\n# retained configuration\n")
+    for path in (boot, sentinel, identity, env):
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (sentinel, identity, env)}
+    boot_mtime = boot.stat().st_mtime_ns
+    result = run_relocate(boot, directory, tmp_path)
+    assert result.returncode == 1
+    assert boot.is_dir()
+    assert boot.stat().st_mtime_ns == boot_mtime
+    assert set(boot.iterdir()) == {sentinel}
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
+    assert set(directory.iterdir()) == {identity, env}
+
+
+def test_relocate_leaves_protected_files_unchanged_when_boot_identity_is_absent(tmp_path: Path) -> None:
+    boot = tmp_path / "boot/palmimo-identity.json"
+    boot.parent.mkdir()
+    directory = tmp_path / "etc/palmimo"
+    directory.mkdir(parents=True)
+    identity = directory / "identity.json"
+    env = directory / "identity.env"
+    identity.write_text(json.dumps(IDENTITY))
+    env.write_text(f"PALMIMO_IDENTITY_FILE={identity}\n")
+    for path in (identity, env):
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (identity, env)}
+    result = run_relocate(boot, directory, tmp_path)
+    assert result.returncode == 0
+    assert not boot.exists()
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
+    assert set(directory.iterdir()) == {identity, env}

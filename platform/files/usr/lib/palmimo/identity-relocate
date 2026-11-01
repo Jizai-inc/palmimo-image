@@ -55,13 +55,15 @@ def group_id(value: str) -> int:
 def relocate(args: argparse.Namespace) -> None:
     directory: Path = args.identity_dir
     identity = directory / "identity.json"
+    try:
+        data = read_identity(args.boot_identity)
+    except FileNotFoundError:
+        return
+    except ValueError:
+        data = read_identity(identity)
     for pattern in (".identity.json.*", ".identity.env.*"):
         for temporary in directory.glob(pattern):
             temporary.unlink()
-    try:
-        data = read_identity(args.boot_identity)
-    except (OSError, ValueError):
-        data = read_identity(identity)
     directory.mkdir(mode=0o755, parents=True, exist_ok=True)
     atomic_write(identity, data, args.owner_uid, group_id(args.identity_group), 0o640)
     if read_identity(identity) != data:
