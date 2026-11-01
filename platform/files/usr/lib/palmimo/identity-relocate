@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Relocate a device identity and publish its path for the Portal."""
+
+from __future__ import annotations
+
+import argparse
+import grp
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def read_identity(path: Path) -> bytes:
+    data = path.read_bytes()
+    value = json.loads(data)
+    if not isinstance(value, dict) or not all(
+        isinstance(value.get(key), str) for key in ("device_id", "initial_password")
+    ):
+        raise ValueError("invalid identity")
+    return data
+
+
+def sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: Path, data: bytes, uid: int, gid: int, mode: int) -> None:
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def group_id(value: str) -> int:
+    return int(value) if value.isdecimal() else grp.getgrnam(value).gr_gid
+
+
+def relocate(args: argparse.Namespace) -> None:
+    directory: Path = args.identity_dir
+    identity = directory / "identity.json"
+    for pattern in (".identity.json.*", ".identity.env.*"):
+        for temporary in directory.glob(pattern):
+            temporary.unlink()
+    try:
+        data = read_identity(args.boot_identity)
+    except (OSError, ValueError):
+        data = read_identity(identity)
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    atomic_write(identity, data, args.owner_uid, group_id(args.identity_group), 0o640)
+    if read_identity(identity) != data:
+        raise ValueError("identity verification failed")
+    atomic_write(
+        directory / "identity.env",
+        f"PALMIMO_IDENTITY_FILE={identity}\n".encode(),
+        args.owner_uid,
+        group_id(args.root_group),
+        0o644,
+    )
+    # Keep the boot copy until both the protected copy and its pointer are durable.
+    args.boot_identity.unlink()
+    subprocess.run(
+        ["sync", "-f", str(args.boot_identity.parent)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--boot-identity", type=Path, default=Path("/boot/firmware/palmimo-identity.json"))
+    parser.add_argument("--identity-dir", type=Path, default=Path("/etc/palmimo"))
+    parser.add_argument("--owner-uid", type=int, default=0)
+    parser.add_argument("--identity-group", default="user")
+    parser.add_argument("--root-group", default="root")
+    args = parser.parse_args()
+    try:
+        relocate(args)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        # Parser and filesystem exceptions can contain input data; keep it out of the journal.
+        print("identity-relocate: relocation failed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -5,6 +5,7 @@ After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
+InaccessiblePaths=-/boot -/etc/palmimo/identity.json
 Type=exec
 User=palmimo-app
 Group=palmimo-apps

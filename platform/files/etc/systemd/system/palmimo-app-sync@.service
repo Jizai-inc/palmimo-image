@@ -3,6 +3,7 @@ Description=Palmimo app dependency sync %i
 StartLimitIntervalSec=0
 
 [Service]
+InaccessiblePaths=-/boot -/etc/palmimo/identity.json
 Type=oneshot
 RemainAfterExit=no
 User=palmimo-app
