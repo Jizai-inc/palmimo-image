@@ -2,7 +2,8 @@
 Description=Palmimo first-boot personalization
 Before=comitup.service avahi-daemon.service palmimo-portal.service
 RequiresMountsFor=/boot/firmware
-ConditionPathExists=/boot/firmware/palmimo-identity.json
+ConditionPathExists=|/boot/firmware/palmimo-identity.json
+ConditionPathExists=|/etc/palmimo/identity.json
 ConditionPathExists=!/var/lib/palmimo/firstboot-done
 
 [Service]

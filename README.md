@@ -106,13 +106,16 @@ byte is written.
 
 ### 3. What happens at first boot
 
-`palmimo-firstboot.service` reads the identity file and:
+`palmimo-firstboot.service` reads the manufacturing identity input, or the
+protected identity when the boot copy is absent, and:
 
 - sets the hostname to `palmimo-<device-id>` (this becomes the AP's SSID)
 - sets comitup's AP password to the sticker's initial password
 
-From there the buyer joins the AP with the sticker password, hits the
-captive portal, and completes setup in Palmimo Portal.
+After personalization, `palmimo-identity-relocate.service` protects the identity
+for Palmimo Portal ([storage and handoff](doc/design.md#識別ファイルの保管と移動)).
+The buyer joins the AP with the sticker password, hits the captive portal,
+and completes setup in Palmimo Portal.
 
 A unit with no identity file injected (a DIY build) keeps hostname
 `palmimo` and Portal falls back to the open first-setup flow — this is an
@@ -334,12 +337,12 @@ explanation, written for whoever is holding the SD card.
 
 ## Security model
 
-The identity file (`palmimo-identity.json`) holds the device's initial login
-password in plaintext and is written to the boot FAT partition, where it
-stays readable after first boot — this lets Palmimo Portal reset login
-credentials back to the factory value on request. The threat model treats
-whoever holds the physical SD card as the device's owner; theft of the SD
-card itself is out of scope (see `doc/design.md` for the full reasoning).
+The identity file holds the device's initial login password in plaintext
+and is retained in protected device storage for factory credential recovery.
+See [identity storage](doc/design.md#識別ファイルの保管と移動) for the manufacturing
+input, final path, permissions, and Portal configuration. The threat model
+treats whoever holds the physical SD card as the device's owner; theft of
+the SD card itself is out of scope.
 SSH ships key-only (`PasswordAuthentication no` +
 `KbdInteractiveAuthentication no`); the `user` account ships password-locked
 with NOPASSWD sudo, since Palmimo Portal — not SSH — is the key-registration

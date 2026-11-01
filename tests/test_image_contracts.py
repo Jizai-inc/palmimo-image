@@ -87,7 +87,8 @@ def test_portal_unit_pins_the_confirmed_contract() -> None:
 
 def test_firstboot_unit_has_both_conditions_and_before_ordering() -> None:
     text = _text(FIRSTBOOT_UNIT)
-    assert "ConditionPathExists=/boot/firmware/palmimo-identity.json" in text
+    assert "ConditionPathExists=|/boot/firmware/palmimo-identity.json" in text
+    assert "ConditionPathExists=|/etc/palmimo/identity.json" in text
     assert "ConditionPathExists=!/var/lib/palmimo/firstboot-done" in text
 
     before_match = re.search(r"^Before=(.+)$", text, re.MULTILINE)
@@ -1369,4 +1370,4 @@ def test_display_firmware_boot_unit_contract() -> None:
     assert "--boot" in command and "--adopt-bootsel" not in command
     match = re.search(r'^expected_enabled="([^"]+)"', _text(APPLY_SCRIPT), re.MULTILINE)
     assert match is not None
-    assert "palmimo-display-firmware" in match.group(1).split()
+    assert {"palmimo-display-firmware", "palmimo-identity-relocate"} <= set(match.group(1).split())
