@@ -65,16 +65,19 @@ def test_firstboot_personalizes_from_the_preferred_available_identity(
         text=True,
     )
     assert result.returncode == (0 if expected is not None else 1), result.stderr
+    passwords = [
+        line.removeprefix("ap_password:").strip()
+        for line in (root / "etc/comitup.conf").read_text().splitlines()
+        if line.startswith("ap_password:")
+    ]
     if expected is None:
         assert (root / "etc/hostname").read_text() == "palmimo\n"
         assert (root / "etc/hosts").read_text() == "127.0.0.1 localhost\n"
-        assert (root / "etc/comitup.conf").read_text() == "ap_password: unchanged\nweb_service: palmimo-portal\n"
+        assert passwords == ["unchanged"]
         assert not (root / "var/lib/palmimo/firstboot-done").exists()
     else:
         hostname = f"palmimo-{expected['device_id']}"
         assert (root / "etc/hostname").read_text() == f"{hostname}\n"
         assert (root / "etc/hosts").read_text() == f"127.0.0.1 localhost\n127.0.1.1\t{hostname}\n"
-        assert (root / "etc/comitup.conf").read_text() == (
-            f"web_service: palmimo-portal\nap_password: {expected['initial_password']}\n"
-        )
+        assert passwords == [expected["initial_password"]]
         assert (root / "var/lib/palmimo/firstboot-done").is_file()

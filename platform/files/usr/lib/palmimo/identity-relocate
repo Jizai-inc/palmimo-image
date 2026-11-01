@@ -52,54 +52,77 @@ def group_id(value: str) -> int:
     return int(value) if value.isdecimal() else grp.getgrnam(value).gr_gid
 
 
-def relocate(args: argparse.Namespace) -> None:
+def relocate(args: argparse.Namespace) -> int:
     directory: Path = args.identity_dir
     identity = directory / "identity.json"
+    stage = "read-boot"
+    recovered = False
     try:
-        data = read_identity(args.boot_identity)
-    except FileNotFoundError:
-        return
-    except ValueError:
-        data = read_identity(identity)
-    for pattern in (".identity.json.*", ".identity.env.*"):
-        for temporary in directory.glob(pattern):
-            temporary.unlink()
-    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-    atomic_write(identity, data, args.owner_uid, group_id(args.identity_group), 0o640)
-    if read_identity(identity) != data:
-        raise ValueError("identity verification failed")
-    atomic_write(
-        directory / "identity.env",
-        f"PALMIMO_IDENTITY_FILE={identity}\n".encode(),
-        args.owner_uid,
-        group_id(args.root_group),
-        0o644,
-    )
-    # Keep the boot copy until both the protected copy and its pointer are durable.
-    args.boot_identity.unlink()
-    subprocess.run(
-        ["sync", "-f", str(args.boot_identity.parent)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        try:
+            data = read_identity(args.boot_identity)
+        except FileNotFoundError:
+            print("identity-relocate: no boot identity; protected storage unchanged")
+            return 0
+        except ValueError:
+            stage = "read-protected"
+            data = read_identity(identity)
+            recovered = True
+            print(
+                "identity-relocate: WARNING: invalid boot identity; using verified protected identity", file=sys.stderr
+            )
+        stage = "remove-temporary"
+        for pattern in (".identity.json.*", ".identity.env.*"):
+            for temporary in directory.glob(pattern):
+                temporary.unlink()
+        stage = "write-identity"
+        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        atomic_write(identity, data, args.owner_uid, group_id(args.identity_group), 0o640)
+        stage = "verify-identity"
+        if read_identity(identity) != data:
+            raise ValueError("identity verification failed")
+        stage = "write-environment"
+        atomic_write(
+            directory / "identity.env",
+            f"PALMIMO_IDENTITY_FILE={identity}\n".encode(),
+            args.owner_uid,
+            group_id(args.root_group),
+            0o644,
+        )
+        # Keep the boot copy until both the protected copy and its pointer are durable.
+        stage = "remove-boot"
+        args.boot_identity.unlink()
+    except (OSError, ValueError, KeyError) as exc:
+        # Parser and filesystem exceptions can contain input data; keep it out of the journal.
+        print(f"identity-relocate: failed at {stage}: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    try:
+        subprocess.run(
+            ["sync", "-f", str(args.boot_identity.parent)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"identity-relocate: WARNING: sync-boot: {type(exc).__name__}", file=sys.stderr)
+    if recovered:
+        print("identity-relocate: retained protected identity and removed invalid boot identity")
+    else:
+        print("identity-relocate: moved boot identity to protected storage")
+    return 0
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--boot-identity", type=Path, default=Path("/boot/firmware/palmimo-identity.json"))
     parser.add_argument("--identity-dir", type=Path, default=Path("/etc/palmimo"))
     parser.add_argument("--owner-uid", type=int, default=0)
     parser.add_argument("--identity-group", default="user")
     parser.add_argument("--root-group", default="root")
-    args = parser.parse_args()
-    try:
-        relocate(args)
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-        # Parser and filesystem exceptions can contain input data; keep it out of the journal.
-        print("identity-relocate: relocation failed", file=sys.stderr)
-        return 1
-    return 0
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    return relocate(parse_args())
 
 
 if __name__ == "__main__":

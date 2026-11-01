@@ -258,7 +258,8 @@ if [ -n "$identity_path" ]; then
   ssh_run "sudo mv /tmp/palmimo-identity.json /boot/firmware/palmimo-identity.json"
   ssh_run "sudo systemctl start palmimo-firstboot"
   ssh_run "sudo systemctl start palmimo-identity-relocate"
-  echo "    identity applied, firstboot and identity relocation completed"
+  ssh_run "sudo systemctl restart palmimo-portal"
+  echo "    identity applied, firstboot and identity relocation completed, Portal restarted"
 else
   echo "    --identity not given: skipped (device stays a DIY/unindividualized 'palmimo')"
 fi

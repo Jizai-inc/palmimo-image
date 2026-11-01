@@ -264,15 +264,18 @@ Unix のパーミッションを持たないため、そこで秘密の読み手
 Portal の `user` グループに読み取りだけを許可する。移動先を検証してから
 `/etc/palmimo/identity.env`（`root:root`、`0644`）に
 `PALMIMO_IDENTITY_FILE=/etc/palmimo/identity.json` を書き、最後にブート側を
-削除する。Portal の drop-in `20-identity.conf` は relocate を起動順序の前段に
-要求し、`EnvironmentFile=-/etc/palmimo/identity.env` を通して移動先を渡す。
+削除する。Portal の drop-in `20-identity.conf` は `Wants=` で relocate を
+引き込み、relocate の `Before=` で Portal より先に実行する。relocate が
+失敗しても Portal は起動する。`EnvironmentFile=-/etc/palmimo/identity.env` を
+通して移動先を渡す。
 移動が完了せず env が無ければ、Portal は既定のブート側を読む。
 
 relocate は毎起動と Portal の起動時にブート側があれば実行される。
 ブート側を製造工程の正として扱い、移動先があっても上書きする。
 firstboot の成否とは独立して移すため、初回の個体化に失敗した実機は
 次回の firstboot で移動先から再試行する。app・app-sync・wifi-qr unit は
-`InaccessiblePaths` でブート側と移動先の識別ファイルを隠す。
+`InaccessiblePaths` で `/boot` 全体と移動先の識別ファイルを隠す。
+この隔離により `/boot/firmware/config.txt` などを読むアプリも読めなくなる。
 
 出荷済みの実機には platform バンドルの適用後、Portal の再起動時に届く。
 バンドルはイメージ側の firstboot を更新しないため、移動先からの再個体化は
@@ -364,7 +367,8 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    display-firmware と identity-relocate を含む各 unit の
    `systemctl is-enabled` が `enabled` か検査する
 9. `--identity` 指定時はブート側に識別ファイルを配置し、firstboot、
-   identity-relocate の順に今すぐ実行する（再起動までブート側に残さない）
+   identity-relocate の順に今すぐ実行し、Portal を再起動して env を読み直す
+   （再起動までブート側に残さない）
 
 失敗マトリクス（設計時に埋める表。実装 PR に対応テスト/挙動を明記）:
 

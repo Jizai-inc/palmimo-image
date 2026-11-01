@@ -1371,3 +1371,64 @@ def test_display_firmware_boot_unit_contract() -> None:
     match = re.search(r'^expected_enabled="([^"]+)"', _text(APPLY_SCRIPT), re.MULTILINE)
     assert match is not None
     assert {"palmimo-display-firmware", "palmimo-identity-relocate"} <= set(match.group(1).split())
+
+
+def test_identity_handoff_paths_and_ordering_agree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import runpy
+
+    platform_files = REPO_ROOT / "platform/files"
+    units = platform_files / "etc/systemd/system"
+    tool = runpy.run_path(str(platform_files / "usr/lib/palmimo/identity-relocate"))
+    defaults = tool["parse_args"]([])
+    boot = tmp_path / "boot" / defaults.boot_identity.name
+    boot.parent.mkdir()
+    payload = {"device_id": "406", "initial_password": "ContractSecret406"}
+    boot.write_text(json.dumps(payload))
+    directory = tmp_path / "protected"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sync = bin_dir / "sync"
+    sync.write_text("#!/bin/sh\nexit 0\n")
+    sync.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    args = tool["parse_args"](
+        [
+            "--boot-identity",
+            str(boot),
+            "--identity-dir",
+            str(directory),
+            "--owner-uid",
+            str(os.getuid()),
+            "--identity-group",
+            str(os.getgid()),
+            "--root-group",
+            str(os.getgid()),
+        ]
+    )
+    tool["relocate"](args)
+    environment = next(directory.glob("*.env"))
+    identity = Path(dict(line.split("=", 1) for line in environment.read_text().splitlines())["PALMIMO_IDENTITY_FILE"])
+    assert json.loads(identity.read_text()) == payload
+    protected_path = defaults.identity_dir / identity.relative_to(directory)
+    environment_path = defaults.identity_dir / environment.relative_to(directory)
+
+    def values(path: Path, key: str) -> list[str]:
+        return [line.split("=", 1)[1] for line in _text(path).splitlines() if line.startswith(f"{key}=")]
+
+    drop_in = units / "palmimo-portal.service.d/20-identity.conf"
+    relocate_unit = units / "palmimo-identity-relocate.service"
+    assert values(drop_in, "EnvironmentFile") == [f"-{environment_path}"]
+    assert "palmimo-identity-relocate.service" in " ".join(values(drop_in, "Wants")).split()
+    assert "palmimo-portal.service" in " ".join(values(relocate_unit, "Before")).split()
+    assert values(relocate_unit, "ConditionPathExists") == [str(defaults.boot_identity)]
+    firstboot_paths = re.findall(r'IDENTITY_FILE="\$\{ROOT\}([^"]+)"', _text(FIRSTBOOT_SCRIPT))
+    assert firstboot_paths == [str(defaults.boot_identity), str(protected_path)]
+    conditions = values(FIRSTBOOT_UNIT, "ConditionPathExists")
+    assert f"|{defaults.boot_identity}" in conditions
+    assert f"|{protected_path}" in conditions
+    for name in ("palmimo-app@.service", "palmimo-app-sync@.service", "palmimo-wifi-qr.service"):
+        inaccessible = {
+            value.removeprefix("-") for value in " ".join(values(units / name, "InaccessiblePaths")).split()
+        }
+        assert {"/boot", str(protected_path)} <= inaccessible

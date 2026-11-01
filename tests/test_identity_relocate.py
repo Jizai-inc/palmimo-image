@@ -15,12 +15,14 @@ IDENTITY = {"device_id": "406", "initial_password": "StickerSecret406"}
 OTHER = {"device_id": "407", "initial_password": "OtherSecret407"}
 
 
-def run_relocate(boot: Path, directory: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def run_relocate(
+    boot: Path, directory: Path, tmp_path: Path, *, sync_exit_code: int = 0
+) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     # macOS sync has no -f; persistence on vfat requires a device test.
     sync = bin_dir / "sync"
-    sync.write_text("#!/bin/sh\nexit 0\n")
+    sync.write_text(f"#!/bin/sh\nexit {sync_exit_code}\n")
     sync.chmod(0o755)
     return subprocess.run(
         [
@@ -180,3 +182,17 @@ def test_relocate_leaves_protected_files_unchanged_when_boot_identity_is_absent(
     assert not boot.exists()
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
     assert set(directory.iterdir()) == {identity, env}
+
+
+def test_relocate_succeeds_when_boot_sync_fails_after_removal(tmp_path: Path) -> None:
+    boot = tmp_path / "boot/palmimo-identity.json"
+    boot.parent.mkdir()
+    boot.write_text(json.dumps(IDENTITY))
+    directory = tmp_path / "etc/palmimo"
+    result = run_relocate(boot, directory, tmp_path, sync_exit_code=1)
+    assert result.returncode == 0
+    assert not boot.exists()
+    identity = directory / "identity.json"
+    assert json.loads(identity.read_text()) == IDENTITY
+    assert (directory / "identity.env").read_text() == f"PALMIMO_IDENTITY_FILE={identity}\n"
+    assert IDENTITY["initial_password"] not in result.stdout + result.stderr
