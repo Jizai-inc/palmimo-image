@@ -1421,7 +1421,10 @@ def test_identity_handoff_paths_and_ordering_agree(tmp_path: Path, monkeypatch: 
     assert values(drop_in, "EnvironmentFile") == [f"-{environment_path}"]
     assert "palmimo-identity-relocate.service" in " ".join(values(drop_in, "Wants")).split()
     assert "palmimo-portal.service" in " ".join(values(relocate_unit, "Before")).split()
-    assert values(relocate_unit, "ConditionPathExists") == [str(defaults.boot_identity)]
+    done_marker = re.search(r'^DONE_MARKER="\$\{ROOT\}([^"]+)"', _text(FIRSTBOOT_SCRIPT), re.MULTILINE)
+    assert done_marker is not None
+    assert values(relocate_unit, "ConditionPathExists") == [str(defaults.boot_identity), done_marker.group(1)]
+    assert "palmimo-firstboot.service" in " ".join(values(relocate_unit, "After")).split()
     firstboot_paths = re.findall(r'IDENTITY_FILE="\$\{ROOT\}([^"]+)"', _text(FIRSTBOOT_SCRIPT))
     assert firstboot_paths == [str(defaults.boot_identity), str(protected_path)]
     conditions = values(FIRSTBOOT_UNIT, "ConditionPathExists")
@@ -1432,3 +1435,14 @@ def test_identity_handoff_paths_and_ordering_agree(tmp_path: Path, monkeypatch: 
             value.removeprefix("-") for value in " ".join(values(units / name, "InaccessiblePaths")).split()
         }
         assert {"/boot", str(protected_path)} <= inaccessible
+
+
+def test_apply_identity_relocates_only_with_portal_restart_and_checks_completion() -> None:
+    step = _text(APPLY_SCRIPT).split('echo "==> [9/9] identity"', 1)[1]
+    assert not re.search(r"systemctl\s+start\s+palmimo-identity-relocate(?:\.service)?", step)
+    restart = step.index('ssh_run "sudo systemctl restart palmimo-portal"')
+    check = step.index('if ! ssh_run "sudo test ! -e /boot/firmware/palmimo-identity.json"; then')
+    assert restart < check
+    failure = step[check:].split("\n  fi", 1)[0]
+    assert "journalctl -u palmimo-identity-relocate -u palmimo-firstboot" in failure
+    assert "exit 1" in failure

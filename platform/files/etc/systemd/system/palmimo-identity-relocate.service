@@ -4,6 +4,7 @@ After=palmimo-firstboot.service
 Before=palmimo-portal.service
 RequiresMountsFor=/boot/firmware
 ConditionPathExists=/boot/firmware/palmimo-identity.json
+ConditionPathExists=/var/lib/palmimo/firstboot-done
 
 [Service]
 Type=oneshot

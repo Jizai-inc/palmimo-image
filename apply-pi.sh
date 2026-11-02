@@ -257,8 +257,11 @@ if [ -n "$identity_path" ]; then
   scp -o BatchMode=yes "$identity_path" "${PI_HOST}:/tmp/palmimo-identity.json"
   ssh_run "sudo mv /tmp/palmimo-identity.json /boot/firmware/palmimo-identity.json"
   ssh_run "sudo systemctl start palmimo-firstboot"
-  ssh_run "sudo systemctl start palmimo-identity-relocate"
   ssh_run "sudo systemctl restart palmimo-portal"
+  if ! ssh_run "sudo test ! -e /boot/firmware/palmimo-identity.json"; then
+    echo "identity relocation incomplete; inspect: sudo journalctl -u palmimo-identity-relocate -u palmimo-firstboot" >&2
+    exit 1
+  fi
   echo "    identity applied, firstboot and identity relocation completed, Portal restarted"
 else
   echo "    --identity not given: skipped (device stays a DIY/unindividualized 'palmimo')"

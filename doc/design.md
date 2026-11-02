@@ -270,17 +270,32 @@ Portal の `user` グループに読み取りだけを許可する。移動先�
 通して移動先を渡す。
 移動が完了せず env が無ければ、Portal は既定のブート側を読む。
 
-relocate は毎起動と Portal の起動時にブート側があれば実行される。
+relocate は毎起動と Portal の起動時に、ブート側の識別ファイルと
+`/var/lib/palmimo/firstboot-done` の両方があれば実行される。
+`After=palmimo-firstboot.service` により、初回起動では firstboot が成功して
+印を書いた後に条件を評価する。
 ブート側を製造工程の正として扱い、移動先があっても上書きする。
-firstboot の成否とは独立して移すため、初回の個体化に失敗した実機は
-次回の firstboot で移動先から再試行する。app・app-sync・wifi-qr unit は
+firstboot が未完了ならブート側を残し、次回起動で同じ入力から個体化を再試行する。
+app・app-sync・wifi-qr unit は
 `InaccessiblePaths` で `/boot` 全体と移動先の識別ファイルを隠す。
 この隔離により `/boot/firmware/config.txt` などを読むアプリも読めなくなる。
 
 出荷済みの実機には platform バンドルの適用後、Portal の再起動時に届く。
-バンドルはイメージ側の firstboot を更新しないため、移動先からの再個体化は
-対応する firstboot を含むイメージ、または `apply-pi.sh` で更新した実機が対象。
+バンドルはイメージ側の firstboot を更新しないが、出荷済みのすべての版も
+成功時に同じ印を書く。ブート側だけを入力とする版でも、未完了なら移動せず
+入力を保持するため、次回起動で firstboot を再試行できる。
+移動後の出荷リセットによる再個体化には、移動先から読める firstboot を含む
+イメージ、または `apply-pi.sh` での更新が必要。
 出荷リセットでも `/etc/palmimo/identity.json` と `identity.env` は保持する。
+
+| ブート側 | firstboot の印 | relocate と次回の動作 |
+|---|---|---|
+| あり | なし | 移動せず保持。次回起動で firstboot を再試行 |
+| あり | あり | 移動先と env を確定してからブート側を削除 |
+| なし | なし | relocate は実行しない。移動先対応の firstboot は保持された識別ファイルで再個体化 |
+| なし | あり | relocate は実行しない。Portal は保持された env から移動先を読む |
+
+受け入れた限界: firstboot が成功するまでブート側に秘密が残る（アプリからは見えない）。
 
 ## palmimo-firstboot.service + firstboot.sh
 
@@ -366,9 +381,12 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    続く step 8b で platform の `install.sh install` と `record` を実行し、
    display-firmware と identity-relocate を含む各 unit の
    `systemctl is-enabled` が `enabled` か検査する
-9. `--identity` 指定時はブート側に識別ファイルを配置し、firstboot、
-   identity-relocate の順に今すぐ実行し、Portal を再起動して env を読み直す
-   （再起動までブート側に残さない）
+9. `--identity` 指定時はブート側に識別ファイルを配置して firstboot を実行し、
+   Portal を再起動する。同じ systemd トランザクションの `Wants=` と `Before=`
+   により relocate が Portal より先に走り、Portal は env を読み直す。
+   SSH が切れても投入済みのジョブは続く。再起動後にブート側が無いことを検査し、
+   残っていれば `journalctl -u palmimo-identity-relocate -u palmimo-firstboot` を
+   案内して非ゼロ終了する（`Wants=` 自体は relocate の失敗を返さない）
 
 失敗マトリクス（設計時に埋める表。実装 PR に対応テスト/挙動を明記）:
 
