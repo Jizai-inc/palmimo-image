@@ -730,7 +730,7 @@ def test_install_creates_staging_and_trash_setgid_for_the_apps_group(
 # `uv run` does for the app itself
 # ---------------------------------------------------------------------------
 
-_SANDBOX_KEYS = ["ProtectSystem", "ProtectHome", "PrivateTmp", "NoNewPrivileges", "ProtectProc"]
+_SANDBOX_KEYS = ["ProtectSystem", "ProtectHome", "PrivateTmp", "NoNewPrivileges", "ProtectProc", "InaccessiblePaths"]
 
 
 def _parse_service_section(unit_path: Path) -> dict[str, list[str]]:
@@ -1728,3 +1728,12 @@ def test_display_enable_normalizes_root(root: str) -> None:
     )
     assert result.returncode == 0
     assert result.stdout.splitlines() == [f"--root={root}", "enable", "palmimo-display-firmware.service"]
+
+
+def test_install_records_offline_identity_relocate_unit_enable(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    assert f"systemctl --root={root} enable palmimo-identity-relocate.service" in accounts.read_text().splitlines()
+    unit_link = root / "etc/systemd/system/multi-user.target.wants/palmimo-identity-relocate.service"
+    unit_link.parent.mkdir(parents=True, exist_ok=True)
+    unit_link.symlink_to("/not-required-by-verification")
+    assert _run_install(root, accounts, None, command="verify").returncode == 0

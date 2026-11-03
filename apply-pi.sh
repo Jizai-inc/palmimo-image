@@ -201,17 +201,6 @@ echo "    ok: no ~/.asoundrc shadowing /etc/asound.conf"
 ssh_run "sudo raspi-config nonint do_wifi_country JP"
 echo "    ok: Wi-Fi country set to JP"
 
-expected_enabled="comitup avahi-daemon palmimo-portal palmimo-firstboot palmimo-display-firmware"
-for unit in $expected_enabled; do
-  # String-compare, not exit code: is-enabled exits 0 for "static" too,
-  # which silently passed a unit whose [Install] section was missing.
-  if [ "$(ssh_run "systemctl is-enabled '$unit'" || true)" != "enabled" ]; then
-    echo "    FAIL: $unit is not enabled" >&2
-    exit 1
-  fi
-done
-echo "    ok: units enabled: $expected_enabled"
-
 if ! ssh_run "curl -fsS -o /dev/null -w '%{http_code}' http://localhost:80/api/v1/system/status" | grep -q '^200$'; then
   echo "    FAIL: http://localhost:80/api/v1/system/status did not return 200" >&2
   exit 1
@@ -252,12 +241,28 @@ ssh_run "sudo /tmp/palmimo-platform/install.sh install --root / && \
   sudo /tmp/palmimo-platform/install.sh record --root / --sha '${PLATFORM_BUNDLE_SHA256}' && \
   rm -rf /tmp/palmimo-platform"
 
+expected_enabled="comitup avahi-daemon palmimo-portal palmimo-firstboot palmimo-display-firmware palmimo-identity-relocate"
+for unit in $expected_enabled; do
+  # String-compare, not exit code: is-enabled exits 0 for "static" too,
+  # which silently passed a unit whose [Install] section was missing.
+  if [ "$(ssh_run "systemctl is-enabled '$unit'" || true)" != "enabled" ]; then
+    echo "    FAIL: $unit is not enabled" >&2
+    exit 1
+  fi
+done
+echo "    ok: units enabled: $expected_enabled"
+
 echo "==> [9/9] identity"
 if [ -n "$identity_path" ]; then
   scp -o BatchMode=yes "$identity_path" "${PI_HOST}:/tmp/palmimo-identity.json"
-  ssh_run "sudo mv /tmp/palmimo-identity.json /boot/firmware/palmimo-identity.json && sudo chmod 0600 /boot/firmware/palmimo-identity.json"
+  ssh_run "sudo mv /tmp/palmimo-identity.json /boot/firmware/palmimo-identity.json"
   ssh_run "sudo systemctl start palmimo-firstboot"
-  echo "    identity applied, palmimo-firstboot started"
+  ssh_run "sudo systemctl restart palmimo-portal"
+  if ! ssh_run "sudo test ! -e /boot/firmware/palmimo-identity.json"; then
+    echo "identity relocation incomplete; inspect: sudo journalctl -u palmimo-identity-relocate -u palmimo-firstboot" >&2
+    exit 1
+  fi
+  echo "    identity applied, firstboot and identity relocation completed, Portal restarted"
 else
   echo "    --identity not given: skipped (device stays a DIY/unindividualized 'palmimo')"
 fi

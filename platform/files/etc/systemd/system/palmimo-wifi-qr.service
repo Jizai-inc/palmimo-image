@@ -4,6 +4,7 @@ StopPropagatedFrom=palmimo-portal.service
 After=palmimo-portal.service
 
 [Service]
+InaccessiblePaths=-/boot -/etc/palmimo/identity.json
 DynamicUser=yes
 SupplementaryGroups=video dialout
 DevicePolicy=closed

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IDENTITY_FILE="/boot/firmware/palmimo-identity.json"
-DONE_MARKER="/var/lib/palmimo/firstboot-done"
-COMITUP_CONF="/etc/comitup.conf"
+ROOT="${PALMIMO_ROOT:-}"
+IDENTITY_FILE="${ROOT}/boot/firmware/palmimo-identity.json"
+if [ ! -f "$IDENTITY_FILE" ]; then
+  IDENTITY_FILE="${ROOT}/etc/palmimo/identity.json"
+fi
+DONE_MARKER="${ROOT}/var/lib/palmimo/firstboot-done"
+COMITUP_CONF="${ROOT}/etc/comitup.conf"
 DEVICE_ID_REGEX='^[a-z0-9-]{1,32}$'
 PASSWORD_REGEX='^[A-Za-z0-9]{8,63}$'
 
@@ -73,13 +77,13 @@ fi
 
 HOSTNAME="palmimo-${DEVICE_ID}"
 log_info "setting hostname to $HOSTNAME"
-printf '%s\n' "$HOSTNAME" >/etc/hostname
+printf '%s\n' "$HOSTNAME" >"${ROOT}/etc/hostname"
 hostnamectl set-hostname --transient "$HOSTNAME"
 
-if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts 2>/dev/null; then
-  sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${HOSTNAME}/" /etc/hosts
+if grep -q '^127\.0\.1\.1[[:space:]]' "${ROOT}/etc/hosts" 2>/dev/null; then
+  sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${HOSTNAME}/" "${ROOT}/etc/hosts"
 else
-  printf '127.0.1.1\t%s\n' "$HOSTNAME" >>/etc/hosts
+  printf '127.0.1.1\t%s\n' "$HOSTNAME" >>"${ROOT}/etc/hosts"
 fi
 
 log_info "setting comitup ap_password"

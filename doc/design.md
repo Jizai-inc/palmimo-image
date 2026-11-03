@@ -252,6 +252,51 @@ ctl.!default {
   `90-alsa-restore.rules` の警告は `alsa-utils` 自身の記述ミスで、
   `udevadm verify` で単体再現する既存事象（この設定とは無関係）
 
+## 識別ファイルの保管と移動
+
+製造工程と `apply-pi.sh --identity` は、共通イメージに個体情報を混ぜずに
+`/boot/firmware/palmimo-identity.json` を入力として置く。ブート側の vfat は
+Unix のパーミッションを持たないため、そこで秘密の読み手を制限できない。
+
+初回起動では firstboot による個体化の後、platform バンドルの
+`palmimo-identity-relocate.service` が識別ファイルを
+`/etc/palmimo/identity.json`（`root:user`、`0640`）へ移す。root が所有し、
+Portal の `user` グループに読み取りだけを許可する。移動先を検証してから
+`/etc/palmimo/identity.env`（`root:root`、`0644`）に
+`PALMIMO_IDENTITY_FILE=/etc/palmimo/identity.json` を書き、最後にブート側を
+削除する。Portal の drop-in `20-identity.conf` は `Wants=` で relocate を
+引き込み、relocate の `Before=` で Portal より先に実行する。relocate が
+失敗しても Portal は起動する。`EnvironmentFile=-/etc/palmimo/identity.env` を
+通して移動先を渡す。
+移動が完了せず env が無ければ、Portal は既定のブート側を読む。
+
+relocate は毎起動と Portal の起動時に、ブート側の識別ファイルと
+`/var/lib/palmimo/firstboot-done` の両方があれば実行される。
+`After=palmimo-firstboot.service` により、初回起動では firstboot が成功して
+印を書いた後に条件を評価する。
+ブート側を製造工程の正として扱い、移動先があっても上書きする。
+firstboot が未完了ならブート側を残し、次回起動で同じ入力から個体化を再試行する。
+app・app-sync・wifi-qr unit は
+`InaccessiblePaths` で `/boot` 全体と移動先の識別ファイルを隠す。
+この隔離により `/boot/firmware/config.txt` などを読むアプリも読めなくなる。
+
+出荷済みの実機には platform バンドルの適用後、Portal の再起動時に届く。
+バンドルはイメージ側の firstboot を更新しないが、出荷済みのすべての版も
+成功時に同じ印を書く。ブート側だけを入力とする版でも、未完了なら移動せず
+入力を保持するため、次回起動で firstboot を再試行できる。
+移動後の出荷リセットによる再個体化には、移動先から読める firstboot を含む
+イメージ、または `apply-pi.sh` での更新が必要。
+出荷リセットでも `/etc/palmimo/identity.json` と `identity.env` は保持する。
+
+| ブート側 | firstboot の印 | relocate と次回の動作 |
+|---|---|---|
+| あり | なし | 移動せず保持。次回起動で firstboot を再試行 |
+| あり | あり | 移動先と env を確定してからブート側を削除 |
+| なし | なし | relocate は実行しない。移動先対応の firstboot は保持された識別ファイルで再個体化 |
+| なし | あり | relocate は実行しない。Portal は保持された env から移動先を読む |
+
+受け入れた限界: firstboot が成功するまでブート側に秘密が残る（アプリからは見えない）。
+
 ## palmimo-firstboot.service + firstboot.sh
 
 ワンショット（`Type=oneshot` + `ConditionPathExists`）。**個体化の情報源は
@@ -262,7 +307,8 @@ ctl.!default {
 Description=Palmimo first-boot personalization
 Before=comitup.service avahi-daemon.service palmimo-portal.service
 RequiresMountsFor=/boot/firmware
-ConditionPathExists=/boot/firmware/palmimo-identity.json
+ConditionPathExists=|/boot/firmware/palmimo-identity.json
+ConditionPathExists=|/etc/palmimo/identity.json
 ConditionPathExists=!/var/lib/palmimo/firstboot-done
 
 [Service]
@@ -273,7 +319,8 @@ RemainAfterExit=yes
 
 firstboot.sh の仕様:
 
-1. `/boot/firmware/palmimo-identity.json` から `device_id` を読む
+1. ブート側の識別ファイルがあればそれを、無ければ移動先から読む
+   （[保管と移動](#識別ファイルの保管と移動)）。両方にあればブート側を優先する
    （JSON 破損・`device_id` 欠落は **エラー終了 + journal に ERROR**。
    hostname を変えずに終わる — 中途半端な個体化をしない）
 2. `device_id` を検証（`[a-z0-9-]{1,32}` 程度の許可正規表現。hostname に
@@ -283,7 +330,8 @@ firstboot.sh の仕様:
    （「識別ファイル仕様 v2」参照）
 4. 成功時のみ `/var/lib/palmimo/firstboot-done` を作成（冪等マーカー。
    出荷リセット（nuke + state 初期化）では `/var/lib/palmimo/` ごと
-   消えるので、リセット後の再個体化も同じ経路で走る）
+   消える。ブート側が無くても保持された移動先から読めるので、
+   リセット後の再個体化も同じ経路で走る）
 
 DIY 機（識別ファイル不在）: `ConditionPathExists` で unit ごとスキップ。
 hostname は `palmimo` のまま、Portal はオープン初回セットアップ経路。
@@ -325,13 +373,20 @@ PI_HOST=user@<addr> PORTAL_TAG=v0.1.0-rc1 apply-pi.sh
    十分）
 8. 検査（apply 自身のセルフチェック）: `/etc/network/interfaces` に Wi-Fi
    定義が無い / `~/.asoundrc` が無い（あると `/etc/asound.conf` より後に
-   読まれて既定を上書きしてしまう。手適用機でしか起きない）/ 国コード設定済み / `systemctl is-enabled` が期待どおり /
+   読まれて既定を上書きしてしまう。手適用機でしか起きない）/ 国コード設定済み /
    `curl -fsS localhost:80/api/v1/system/status` が 200 / `dnsmasq`
    バイナリが存在する / `systemctl cat comitup-web` に
    `ExecStart=/bin/true` がある（no-op unit に置き換わっている） /
    `nm.py` に `pmf` の行がある
-9. `--identity` 指定時は識別ファイルを配置して firstboot を今すぐ実行
-   （`systemctl start palmimo-firstboot`）
+   続く step 8b で platform の `install.sh install` と `record` を実行し、
+   display-firmware と identity-relocate を含む各 unit の
+   `systemctl is-enabled` が `enabled` か検査する
+9. `--identity` 指定時はブート側に識別ファイルを配置して firstboot を実行し、
+   Portal を再起動する。同じ systemd トランザクションの `Wants=` と `Before=`
+   により relocate が Portal より先に走り、Portal は env を読み直す。
+   SSH が切れても投入済みのジョブは続く。再起動後にブート側が無いことを検査し、
+   残っていれば `journalctl -u palmimo-identity-relocate -u palmimo-firstboot` を
+   案内して非ゼロ終了する（`Wants=` 自体は relocate の失敗を返さない）
 
 失敗マトリクス（設計時に埋める表。実装 PR に対応テスト/挙動を明記）:
 
@@ -362,7 +417,7 @@ update 検証だけできない）。
 | V6 | polkit 越し: UI から reboot / shutdown が通り、他の systemd 操作は拒否される | 新規 |
 | V7 | update 一連: check → apply(rc2) → restart → done。rollback も 1 回 | 新規（systemd 常駐で初） |
 | V8 | 誤パスワード → HOTSPOT 復帰 → 再入力成功（Portal 画面での失敗表示含む） | T4 + 未確認だった UI 表示 |
-| V9 | nuke（出荷リセット相当）→ 初期ログイン情報モード復帰 → firstboot 再実行 | T7（新仕様） |
+| V9 | nuke（出荷リセット相当、done マーカー削除）→ 保持された識別ファイルで初期ログイン情報モード復帰 → firstboot が移動先から読み再個体化 | T7（新仕様） |
 
 証拠は journal（`palmimo-portal` / `palmimo-firstboot`）とスクリーンショットで
 回収し、結果を本書に追記する。
@@ -573,17 +628,14 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 { "device_id": "405", "initial_password": "<シール記載の平文>" }
 ```
 
-- **初期パスワードは平文 1 フィールド**（ユーザー決定）。旧
-  `initial_password_hash` は廃止 — 平文があればハッシュは冗長で、二重に
-  持つと印字値との不一致事故の元。シールに書いてある値なので boot
-  パーティション平文は脅威モデル上許容（SD 窃取は守備範囲外、の既存判断と
-  同じ線）
+- **初期パスワードは平文 1 フィールド**。印字したシールの値と
+  `initial_password` を一致させる。注入後の保管先と読み手の制限は
+  [識別ファイルの保管と移動](#識別ファイルの保管と移動)を参照。
 - firstboot は同じ値を comitup `ap_password` に設定（シール 1 値の原則が
   ファイル上も 1 フィールドで成立）。なお `/etc/comitup.conf` を焼き込み時に
   直接書く案は不採用: rootfs は ext4 で macOS/Windows から書けず、共通
   ファイルに個体値を混ぜると「共通イメージ + FAT 注入」の分離も崩れる。
-  firstboot が FAT 上の識別ファイルを /etc 側へ反映するのが「外から
-  書き込む」の実装形
+  firstboot が注入された識別情報を comitup に反映する
 - **palmimo-portal 側の追随（小 PR）**: 識別ファイル読取りを新仕様に変更し、
   初期ログイン照合を argon2 検証から定数時間比較
   （`secrets.compare_digest`、または読み取り時ハッシュ化）へ。既存のテスト

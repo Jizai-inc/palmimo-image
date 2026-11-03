@@ -1,0 +1,17 @@
+[Unit]
+Description=Relocate Palmimo device identity
+After=palmimo-firstboot.service
+Before=palmimo-portal.service
+RequiresMountsFor=/boot/firmware
+ConditionPathExists=/boot/firmware/palmimo-identity.json
+ConditionPathExists=/var/lib/palmimo/firstboot-done
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+RemainAfterExit=no
+User=root
+ExecStart=/usr/lib/palmimo/identity-relocate
+
+[Install]
+WantedBy=multi-user.target

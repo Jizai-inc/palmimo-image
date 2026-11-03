@@ -28,6 +28,7 @@ include = [
     "tests/**/*.py",
     "platform/**/*.py",
     "**/palmimo-display-firmware",
+    "**/identity-relocate",
 ]
 exclude = [
     ".venv",
@@ -70,6 +71,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.mypy]
+scripts_are_modules = true
 python_version = "3.12"
 warn_return_any = false  # disabled because untyped third-party stubs make some calls return Any
 warn_unused_configs = true
@@ -91,6 +93,7 @@ files = [
     "tests/",
     "platform/",
     "platform/files/usr/local/libexec/palmimo/palmimo-display-firmware",
+    "platform/files/usr/lib/palmimo/identity-relocate",
 ]
 exclude = [
     "\\.venv",
