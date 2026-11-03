@@ -171,6 +171,32 @@ enable_nuke: true
   冪等性の判定キーは変更ごとの通知文言。既存の nm.py パッチは
   `Modified by Jizai Inc.` の有無で当て済みと判定するので、このパッチより
   **先に**当てる（apply-pi.sh・pi-gen とも、順序をテストで固定）
+- 同じパッチで、優先度順の候補を**その場のスキャンで見えた SSID と隠し
+  ネットワークだけ**に絞る。圏外の保存済みネットワークを試すと 1 本につき
+  supplicant の待ち 25 秒がかかり、2 本で AP まで 50 秒遅れる。AP 中の
+  180 / 360 秒周期の再試行でも同じ時間 AP が消える。
+  Pi 5 / NetworkManager 1.52.1 の実測では RequestScan は接続中
+  3.5〜3.9 秒、切断中 0.5〜2.3 秒、接続試行中 1.0〜4.5 秒。
+  **AP を出したままでも 3.2〜3.6 秒で終わり AP は落ちない**ため、
+  候補が無ければ comitup 自身の処理で AP を維持できる。
+  NM は接続中に AP 一覧を更新せず、LastSeen が 16 時間前のままの例もある。
+  device.SpecificDevice() の RequestScan({}) を呼び LastScan の変化を
+  最大 8 秒、0.1 秒刻みで待つ。LastScan は CLOCK_BOOTTIME のミリ秒、
+  LastSeen は同じ時計の秒（-1 は未検出）。LastSeen が要求時刻 - 1 秒以上の
+  SSID を使い、自分のスキャン完了から 20 秒未満は同じデバイスの集合を再利用する。
+  connecting_start は 1 本試すごとに候補を引くため、このキャッシュが必要になる。
+  RequestScan の例外、8 秒のタイムアウト、新鮮な AP が 0 件、その他の例外では
+  **絞らず全候補を優先度順で試す**。見落とすと最大 360 秒再接続できないため。
+  絞り込み結果または絞らない理由は comitup のログに残す。
+  呼び出し元は GLib のメインループなので、スキャンの間はコールバックも待つ。
+- `states.py` では単一デバイス・startup 中の HOTSPOT に届く hotspot_fail を
+  WARNING 付きで無視する。この段階では実 AP をまだ立てず、100ms 後の
+  fake_hs_pass から候補の接続へ進む。実機では切断時の FAILED(120) と
+  DISCONNECTED(30) が約 2ms 差で届き、後者が HOTSPOT の失敗扱いになると、
+  強制 HOTSPOT が CONNECTING より先に積まれて候補を試さず AP になる事象が
+  2 回中 1 回起きた。末尾ラッパは古い state ID を拒否し、startup 外や
+  複数デバイスでは元のデコレータ付き関数へ戻す。state_matrix が globals() から
+  関数を引くため本体の書き換えは不要。これらのパッチ適用後の実機確認は未実施。
 - avahi-daemon が enable であることの確認
 - `/etc/network/interfaces` に Wi-Fi 定義が無いことの確認（あれば fail、
   自動では消さない — 手焼き環境の意図的設定を壊さない）

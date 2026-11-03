@@ -698,6 +698,52 @@ if __name__ == "__main__":
 """
 
 
+_FAKE_STATES_PY = """\
+import logging
+from functools import wraps
+from types import SimpleNamespace
+log = logging.getLogger("comitup")
+startup = True
+state_id = 7
+transitions = []
+callbacks = []
+modemgr = SimpleNamespace(SINGLE_MODE="single", get_mode=lambda: "single")
+
+
+def timeout(fn):
+    @wraps(fn)
+    def wrapper(sid, reason):
+        if sid == state_id:
+            fn(reason)
+            return True
+        return False
+    return wrapper
+
+
+def state_callback(fn):
+    @wraps(fn)
+    def wrapper(reason):
+        fn(reason)
+        callbacks.append(("HOTSPOT", "fail"))
+    return wrapper
+
+
+def set_state(state, **kwargs):
+    transitions.append((state, kwargs))
+
+
+@timeout
+@state_callback
+def hotspot_fail(reason: int) -> None:
+    set_state("HOTSPOT", force=True)
+
+
+class state_matrix:
+    def __getattr__(self, attr):
+        return globals()["hotspot_" + attr[:-3]]
+"""
+
+
 class _FakeDBusError(Exception):
     pass
 
@@ -773,6 +819,7 @@ def fake_comitup(tmp_path: Path) -> Path:
     # LF like the installed comitup, whatever the host platform writes.
     (tmp_path / "mdns.py").write_text(_FAKE_MDNS_PY, encoding="utf-8", newline="\n")
     (tmp_path / "nm.py").write_text(_FAKE_NM_PY, encoding="utf-8", newline="\n")
+    (tmp_path / "states.py").write_text(_FAKE_STATES_PY, encoding="utf-8", newline="\n")
     return tmp_path
 
 
@@ -845,26 +892,165 @@ def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup:
     assert nm["get_candidate_connections"](None) == ["home", "phone", "office", "lab"]
 
 
+class _ScanClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def clock_gettime(self, clock: int) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _ScanDevice:
+    def __init__(self, clock: _ScanClock, failure: str = "") -> None:
+        self.clock = clock
+        self.failure = failure
+        self.requests = 0
+        self.completed_at = 0.0
+        self.points = [("visible", 100), ("stale", 98), ("boundary", 99), ("never", -1)]
+
+    def SpecificDevice(self) -> _ScanDevice:  # noqa: N802
+        return self
+
+    @property
+    def LastScan(self) -> int:  # noqa: N802
+        if self.requests and self.failure != "timeout" and self.clock.now >= self.completed_at:
+            return int(self.completed_at * 1000)
+        return 0
+
+    def RequestScan(self, options: dict[str, Any]) -> None:  # noqa: N802
+        self.requests += 1
+        if self.failure == "request":
+            raise RuntimeError("scan rejected")
+        self.completed_at = self.clock.now + 0.5
+
+    def GetAllAccessPoints(self) -> list[Any]:  # noqa: N802
+        from types import SimpleNamespace
+
+        if self.failure == "points":
+            raise RuntimeError("device vanished")
+        points = [] if self.failure == "empty" else self.points
+        if self.failure == "stale":
+            points = [("stale", 2), ("never", -1)]
+        return [SimpleNamespace(Ssid=ssid, LastSeen=seen) for ssid, seen in points]
+
+
+@pytest.fixture
+def scanned_nm(fake_comitup: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any], _ScanDevice]:
+    import time
+
+    clock = _ScanClock()
+    monkeypatch.setattr(time, "clock_gettime", clock.clock_gettime, raising=False)
+    monkeypatch.setattr(time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(time, "sleep", clock.sleep)
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+    nm = _exec_module(fake_comitup / "nm.py")
+    for priority, ssid in enumerate(["stale", "hidden", "visible", "boundary", "never"]):
+        nm["CONNECTIONS"].append(
+            nm["Connection"](
+                {
+                    "connection": {"autoconnect-priority": priority},
+                    "802-11-wireless": {"ssid": ssid, "mode": "infrastructure", "hidden": ssid == "hidden"},
+                }
+            )
+        )
+    return nm, _ScanDevice(clock)
+
+
+def test_reconnect_patch_keeps_only_fresh_visible_and_hidden_candidates(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    assert nm["get_candidate_connections"](device) == ["boundary", "visible", "hidden"]
+
+
+@pytest.mark.parametrize("failure", ["request", "timeout", "empty", "points", "stale"])
+@pytest.mark.parametrize("expired_cache", [False, True])
+def test_reconnect_patch_preserves_candidates_when_scan_is_unreliable(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], failure: str, expired_cache: bool
+) -> None:
+    nm, device = scanned_nm
+    if expired_cache:
+        nm["get_candidate_connections"](device)
+        device.clock.now += 21
+    started = device.clock.now
+    device.failure = failure
+    assert nm["get_candidate_connections"](device) == ["never", "boundary", "visible", "hidden", "stale"]
+    assert device.clock.now - started <= 8.1
+
+
+def test_reconnect_patch_reuses_scan_until_twenty_seconds_after_completion(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    expected = nm["get_candidate_connections"](device)
+    device.clock.now += 19.9
+    assert nm["get_candidate_connections"](device) == expected
+    assert device.requests == 1
+    device.clock.now += 0.2
+    device.points = [("stale", int(device.clock.now))]
+    assert nm["get_candidate_connections"](device) == ["hidden", "stale"]
+    assert device.requests == 2
+
+
+def test_reconnect_patch_does_not_reuse_scan_for_another_device(scanned_nm: tuple[dict[str, Any], _ScanDevice]) -> None:
+    nm, device = scanned_nm
+    nm["get_candidate_connections"](device)
+    other = _ScanDevice(device.clock)
+    other.points = [("stale", 100)]
+    assert nm["get_candidate_connections"](other) == ["hidden", "stale"]
+    assert other.requests == 1
+
+
+@pytest.mark.parametrize(
+    "startup,mode,sid,expected,transitions",
+    [
+        (True, "single", 7, True, []),
+        (False, "single", 7, True, [("HOTSPOT", {"force": True})]),
+        (True, "multi", 7, True, [("HOTSPOT", {"force": True})]),
+        (True, "single", 6, False, []),
+        (False, "single", 6, False, []),
+    ],
+)
+def test_reconnect_patch_ignores_only_current_startup_single_hotspot_failure(
+    fake_comitup: Path, startup: bool, mode: str, sid: int, expected: bool, transitions: list[Any]
+) -> None:
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+    states = _exec_module(fake_comitup / "states.py")
+    states["startup"] = startup
+    states["modemgr"].get_mode = lambda: mode
+    assert states["state_matrix"]().fail_fn(sid, 30) is expected
+    assert states["transitions"] == transitions
+    assert states["callbacks"] == ([("HOTSPOT", "fail")] if transitions else [])
+
+
 def test_reconnect_patch_adds_dated_notices_and_is_a_noop_when_run_twice(
     fake_comitup: Path,
 ) -> None:
     first = _run_reconnect_patch(fake_comitup)
     assert first.returncode == 0, first.stderr
     today = datetime.date.today().isoformat()
-    for name in ("mdns.py", "nm.py"):
+    for name in ("mdns.py", "nm.py", "states.py"):
         text = (fake_comitup / name).read_text(encoding="utf-8")
         assert f"# Modified by Jizai Inc. on {today}:" in text
         assert "GPLv2 section 2(a) notice" in text
-    patched = {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")}
+    patched = {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py", "states.py")}
 
     second = _run_reconnect_patch(fake_comitup)
     assert second.returncode == 0, second.stderr
-    assert second.stdout.count("already patched") == 2
-    assert {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")} == patched
+    assert second.stdout.count("already patched") == 4
+    assert {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py", "states.py")} == patched
 
 
-def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path) -> None:
-    (fake_comitup / "nm.py").write_text("def get_candidate_connections(device):\n    return []\n", encoding="utf-8")
+@pytest.mark.parametrize("name", ["nm.py", "states.py"])
+def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path, name: str) -> None:
+    (fake_comitup / name).write_text("", encoding="utf-8")
 
     result = _run_reconnect_patch(fake_comitup)
     assert result.returncode == 1

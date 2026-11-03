@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Patch comitup's mdns.py and nm.py so a lost Wi-Fi network falls back to
-the setup AP, and saved networks are tried in priority order.
+"""Patch comitup's mdns.py, nm.py and states.py so a lost Wi-Fi network falls back to
+the setup AP, and saved networks are tried in priority order when visible or hidden.
 
 Shared between apply-pi.sh (piped over SSH as `sudo python3 -`) and the
 pi-gen custom stage (copied into the chroot), like patch_comitup_nm.py.
@@ -15,7 +15,7 @@ See doc/design.md ("comitup 設定") for the hardware findings.
 2. nm.py -- get_candidate_connections() returns saved networks in
    ListConnections order and ignores connection.autoconnect-priority.
 
-Both fixes are inserted just above the `__main__` block as wrappers that rebind the
+Fixes are appended (above `__main__` where present) as wrappers that rebind the
 module-level names, so comitup's own function bodies stay untouched and
 this script quotes nothing of them beyond the signature lines it checks
 for. Callers resolve these names at call time (states.py through the module
@@ -41,6 +41,8 @@ TODAY = datetime.date.today().isoformat()
 
 MDNS_MARKER = "keep a stale avahi entry group from blocking the AP fallback"
 NM_MARKER = "try candidates in autoconnect-priority order"
+SCAN_MARKER = "limit candidates to freshly visible or hidden networks"
+STATES_MARKER = "ignore residual disconnects during the single-device startup hotspot"
 
 MAIN_GUARD = '\nif __name__ == "__main__":\n'
 MDNS_ANCHORS = (
@@ -118,6 +120,97 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
 """
 
 
+SCAN_APPENDIX = f"""
+
+# Modified by Jizai Inc. on {TODAY}: {SCAN_MARKER}
+# (GPLv2 section 2(a) notice). NetworkManager retains stale APs and does
+# not refresh them while connected. LastScan/LastSeen use CLOCK_BOOTTIME,
+# not wall time; only our completed scans may populate the short cache.
+import time as _palmimo_time
+
+_palmimo_ordered_candidates = get_candidate_connections
+_palmimo_scan_device = None
+_palmimo_scan_completed = None
+_palmimo_visible_ssids = set()
+
+
+def get_candidate_connections(device: nm.Device) -> List[str]:
+    global _palmimo_scan_device, _palmimo_scan_completed, _palmimo_visible_ssids
+
+    candidates = _palmimo_ordered_candidates(device)
+    try:
+        now = _palmimo_time.monotonic()
+        if (
+            device == _palmimo_scan_device
+            and _palmimo_scan_completed is not None
+            and now - _palmimo_scan_completed < 20
+        ):
+            visible = _palmimo_visible_ssids
+        else:
+            wireless = device.SpecificDevice()
+            previous_scan = wireless.LastScan
+            requested = _palmimo_time.clock_gettime(_palmimo_time.CLOCK_BOOTTIME)
+            deadline = now + 8
+            wireless.RequestScan({{}})
+            while wireless.LastScan == previous_scan:
+                remaining = deadline - _palmimo_time.monotonic()
+                if remaining <= 0:
+                    log.info("candidate scan: unfiltered (scan timed out)")
+                    return candidates
+                _palmimo_time.sleep(min(0.1, remaining))
+
+            visible = {{
+                ap.Ssid for ap in wireless.GetAllAccessPoints()
+                if ap.LastSeen >= 0 and ap.LastSeen >= requested - 1
+            }}
+            if not visible:
+                log.info("candidate scan: unfiltered (no fresh APs)")
+                return candidates
+            _palmimo_scan_device = device
+            _palmimo_visible_ssids = visible
+            _palmimo_scan_completed = _palmimo_time.monotonic()
+
+        hidden = set()
+        for conn in get_all_connections():
+            settings = conn.GetSettings()
+            wifi = settings.get("802-11-wireless", {{}})
+            if wifi.get("mode") == "infrastructure" and wifi.get("hidden"):
+                hidden.add(get_ssid_from_connection(conn))
+        filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden]
+        log.info("candidate scan: filtered %s to %s", candidates, filtered)
+        return filtered
+    except Exception as error:
+        # The scan is only an optimization: uncertainty must not suppress
+        # a reachable saved network until the next 180/360-second retry.
+        log.warning("candidate scan: unfiltered (%s)", type(error).__name__)
+        return candidates
+"""
+
+STATES_ANCHORS = (
+    "@timeout\n@state_callback\ndef hotspot_fail(reason: int) -> None:\n",
+    "class state_matrix",
+)
+
+STATES_APPENDIX = f"""
+
+# Modified by Jizai Inc. on {TODAY}: {STATES_MARKER}
+# (GPLv2 section 2(a) notice). No AP exists in single-device startup:
+# residual NM disconnect signals must not queue a forced HOTSPOT ahead
+# of fake_hs_pass's CONNECTING. Keep the original decorated callback for
+# real failures, including its state-id check and callback notifications.
+_palmimo_hotspot_fail = hotspot_fail
+
+
+def hotspot_fail(id: int, reason: int) -> bool:
+    if id != state_id:
+        return False
+    if startup and modemgr.get_mode() == modemgr.SINGLE_MODE:
+        log.warning("Ignoring residual disconnect in startup hotspot")
+        return True
+    return _palmimo_hotspot_fail(id, reason)
+"""
+
+
 def fail(path: str, anchor: str) -> None:
     sys.stderr.write(
         f"    FAIL: expected line {anchor.strip()!r} not found in {path}\n"
@@ -142,6 +235,8 @@ def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> No
         # Above the `__main__` block, so running the module as a CLI gets
         # the wrappers too.
         head, guard, tail = text.rpartition(MAIN_GUARD)
+        if not guard:
+            head, tail = text, ""
         f.write(head.rstrip("\n") + "\n" + appendix + "\n" + guard + tail)
     print(f"    patched: {name}")
 
@@ -149,6 +244,13 @@ def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> No
 def main() -> None:
     patch("mdns.py", MDNS_MARKER, MDNS_ANCHORS, MDNS_APPENDIX)
     patch("nm.py", NM_MARKER, NM_ANCHORS, NM_APPENDIX)
+    patch(
+        "nm.py",
+        SCAN_MARKER,
+        ("_comitup_get_candidate_connections = get_candidate_connections\n", MAIN_GUARD),
+        SCAN_APPENDIX,
+    )
+    patch("states.py", STATES_MARKER, STATES_ANCHORS, STATES_APPENDIX)
 
 
 if __name__ == "__main__":
