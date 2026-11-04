@@ -923,6 +923,11 @@ def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup:
 
 
 class _ScanClock:
+    CLOCK_BOOTTIME = 7
+
+    def clock_gettime(self, clock: int) -> float:
+        return self.now
+
     def __init__(self) -> None:
         self.now = 100.0
 
@@ -943,10 +948,11 @@ class _ScanDevice:
         self.last_scan = 98500
         self.delay = 0.5
         self.snapshot_delay = 0.0
+        self.ap_reply_overrun = 0.0
         self.active_ssid: str | None = None
         self.active_error: type[Exception] | None = None
         self.points: list[Any] = self.aps([("visible", 99), ("stale", 98), ("never", -1)])
-        self.scan_results = [self.aps([("visible", 100), ("stale", 98), ("new", 10), ("never", -1)])]
+        self.scan_results = [self.aps([("visible", 100), ("stale", 98), ("new", 100), ("never", -1)])]
 
     @staticmethod
     def aps(values: list[tuple[str, int]]) -> list[Any]:
@@ -997,6 +1003,8 @@ def scanned_nm(fake_comitup: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dic
     clock = _ScanClock()
     monkeypatch.setattr(time, "monotonic", clock.monotonic)
     monkeypatch.setattr(time, "sleep", clock.sleep)
+    monkeypatch.setattr(time, "clock_gettime", clock.clock_gettime, raising=False)
+    monkeypatch.setattr(time, "CLOCK_BOOTTIME", clock.CLOCK_BOOTTIME, raising=False)
     assert _run_reconnect_patch(fake_comitup).returncode == 0
     module = ModuleType("patched_nm")
     exec(compile((fake_comitup / "nm.py").read_text(), "nm.py", "exec"), module.__dict__)
@@ -1051,7 +1059,10 @@ class _ScanBus:
 
             def GetAll(self, interface: str, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
                 ap = next(ap for ap in device.points if ap.object_path == path)
-                return {"LastSeen": ap.LastSeen, "Ssid": ap.Ssid.encode()}
+                props = {"LastSeen": ap.LastSeen, "Ssid": ap.Ssid.encode()}
+                if device.requests:
+                    device.clock.sleep(device.ap_reply_overrun)
+                return props
 
             def GetSettings(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
                 conn = (
@@ -1112,25 +1123,73 @@ def test_reconnect_patch_does_not_leak_a_scan_request_when_timeout_skips_candida
     assert device.requests == 0
 
 
-def test_reconnect_patch_keeps_only_increased_or_new_access_points(
+def test_reconnect_patch_skips_scanning_when_no_saved_candidates(
     scanned_nm: tuple[dict[str, Any], _ScanDevice],
 ) -> None:
     nm, device = scanned_nm
+    nm["CONNECTIONS"].clear()
+    assert _decision(nm, device) == []
+    assert device.requests == 0
+
+
+def test_reconnect_patch_keeps_aps_seen_in_the_request_second(scanned_nm: tuple[dict[str, Any], _ScanDevice]) -> None:
+    nm, device = scanned_nm
+    device.clock.now = 100.75
+    device.points = device.aps([("visible", 100)])
+    device.scan_results = [device.aps([("visible", 100)])]
+    assert _decision(nm, device) == ["visible", "hidden"]
+    assert device.requests == 1
+
+
+def test_reconnect_patch_drops_aps_seen_only_before_the_request_second(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    device.clock.now = 149631.9
     device.last_scan = 149631804
-    device.points = device.aps([("visible", 149630), ("stale", 149631), ("never", -1)])
-    device.scan_results = [device.aps([("visible", 149631), ("stale", 149631), ("new", 1), ("never", -1)])]
+    device.points = device.aps([("visible", 149630), ("stale", 149629), ("never", -1)])
+    device.scan_results = [device.aps([("visible", 149631), ("stale", 149630), ("new", 149631), ("never", -1)])]
     assert _decision(nm, device) == ["new", "visible", "hidden"]
 
 
-@pytest.mark.parametrize("found_on_retry", [False, True])
+@pytest.mark.parametrize("retry_last_seen,expected", [(None, []), (100, []), (102, ["stale"])])
 def test_reconnect_patch_rechecks_an_empty_successful_scan_once(
-    scanned_nm: tuple[dict[str, Any], _ScanDevice], found_on_retry: bool
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], retry_last_seen: int | None, expected: list[str]
 ) -> None:
     nm, device = scanned_nm
     nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0]]
-    device.scan_results = [[], device.aps([("stale", 100)]) if found_on_retry else []]
-    assert _decision(nm, device) == (["stale"] if found_on_retry else [])
+    device.delay = 1.1
+    device.scan_results = [[], device.aps([("stale", retry_last_seen)]) if retry_last_seen is not None else []]
+    assert _decision(nm, device) == expected
     assert device.requests == 2
+
+
+@pytest.mark.parametrize("failure", ["timeout", "request", "points"])
+def test_reconnect_patch_preserves_the_first_result_when_the_retry_fails(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], failure: str
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0]]
+    device.scan_results = [[]]
+    request = device.RequestScan
+
+    def scan(options: dict[str, Any]) -> None:
+        if device.requests == 1:
+            device.failure = failure
+        request(options)
+
+    device.RequestScan = scan  # type: ignore[method-assign]
+    assert _decision(nm, device) == []
+    assert device.requests == 2
+
+
+def test_reconnect_patch_preserves_ap_data_delivered_at_the_deadline(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    device.scan_results = [device.aps([("visible", 100)])]
+    device.ap_reply_overrun = 4.6
+    assert _decision(nm, device) == ["visible", "hidden"]
 
 
 @pytest.mark.parametrize("failure", ["request", "timeout", "points"])
@@ -1148,7 +1207,8 @@ def test_reconnect_patch_preserves_all_candidates_on_scan_errors(
 @pytest.mark.parametrize(
     "delay,snapshot_delay,requests,unfiltered",
     [
-        (3.5, 0.0, 2, True),
+        (3.5, 0.0, 1, False),
+        (2.5, 0.0, 1, False),
         (4.0, 1.0, 1, False),
         (5.0, 0.0, 1, True),
         (6.0, 0.0, 1, True),
@@ -1168,7 +1228,7 @@ def test_reconnect_patch_bounds_both_scans_by_one_five_second_budget(
     assert device.clock.now - started <= 5.0001
 
 
-@pytest.mark.parametrize("error_name", [None, "ObjectVanished", "DBusException"])
+@pytest.mark.parametrize("error_name", [None, "DBusException"])
 def test_reconnect_patch_reads_active_connection_without_exiting(
     scanned_nm: tuple[dict[str, Any], _ScanDevice], error_name: str | None
 ) -> None:
@@ -1185,13 +1245,12 @@ def test_reconnect_patch_reads_active_connection_without_exiting(
     )
 
 
-@pytest.mark.parametrize("exception_name", ["ObjectVanished", "DBusException"])
 @pytest.mark.parametrize("source", ["ap", "connection"])
 def test_reconnect_patch_skips_only_the_disappearing_dbus_item(
-    scanned_nm: tuple[dict[str, Any], _ScanDevice], exception_name: str, source: str
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], source: str
 ) -> None:
     nm, device = scanned_nm
-    error = nm[exception_name]
+    error = nm["DBusException"]
 
     def vanished() -> Any:
         raise error()

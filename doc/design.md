@@ -175,7 +175,8 @@ enable_nuke: true
   states.py の startup 中の hotspot_pass と、AP 中の周期再試行の
   hotspot_timeout が「次の candidate_connections を絞る」印を立てる。
   nm.py はその印を消費した呼び出しだけスキャンし、それ以外は優先度順の
-  全候補を返す。connecting_start は全候補で既存接続の有無を確認するだけで、
+  全候補を返す。保存済み候補が 0 件なら印があってもスキャンしない。
+  connecting_start は全候補で既存接続の有無を確認するだけで、
   試す順は CONNECTING への遷移で渡した conn_list が決める。
   timeout が AP クライアントのため候補取得を飛ばした場合も、ラッパを抜ける
   ときに印を下ろす。切断ごとに新しい判断を行い、過去の検出を使い回さない。
@@ -187,21 +188,30 @@ enable_nuke: true
   AP 中のスキャンでは保存済み SSID の LastSeen が 0.1〜0.7 秒前に更新された
   （3 回とも）。接続中の一覧は接続先 1 件のみで、LastSeen は最後の LastScan と
   同じ秒のまま、ビーコンでは更新されない。
-  RequestScan の前後で `{AP の object path: LastSeen}` を比較し、LastSeen が
-  増えた AP と新しく現れた AP の SSID を可視とする。LastSeen=-1 は未検出。
-  前回と同じ秒のままの AP を落とすため、LastScan の秒への丸めは判定に使わない。
+  Pi 5 では起動直後もスキャンが拒否されず 2.3 秒で完了して候補を絞れた。
+  接続中に comitup を再起動しても接続が保たれることを実機で確認済み。
+  RequestScan の直前に CLOCK_BOOTTIME を読み、秒に切り捨てた値以上の
+  LastSeen を持つ AP の SSID を可視とする。LastSeen=-1 は除外。
+  NM 自身が同じ秒の少し前に検出した AP も在圏と扱い、LastSeen の増加は要求しない。
+  要求より前の秒にしか見えていない AP は落とす。再スキャン時には、その要求の
+  直前の CLOCK_BOOTTIME を基準として取り直す。
   優先度順の候補から可視 SSID・隠しネットワーク・現在接続中の SSID を残す。
   接続中の SSID は device の ActiveConnection → Connection → GetSettings から
-  直接読む。ObjectVanished / DBusException は接続中 SSID 無しとして扱い、
+  直接読む。生プロキシの DBusException は接続中 SSID 無しとして扱い、
   ObjectVanished で終了する経路を持つ comitup の get_active_ssid は追加処理で使わない。
-  AP・接続設定ごとの ObjectVanished / DBusException はその 1 件だけ飛ばす。
+  AP・接続設定ごとの DBusException はその 1 件だけ飛ばす。ObjectVanished は
+  python-networkmanager が変換して出す例外であり、生プロキシの捕捉対象にはしない。
   スキャンが正常終了し新しく見えた AP が 0 件なら空集合と扱う。元の候補が
-  あるのに絞った結果が空なら 1 回だけ再スキャンし、それでも空なら空を返して
-  AP を保つ。正常な 0 件を理由に圏外の保存先を試すことはない。
-  絞らず全候補を返すのは要求の例外・時間切れ・その他の例外の場合だけ。
+  あるのに絞った結果が空なら、残り予算が 1 回目の所要時間より長い場合だけ
+  1 回再スキャンする。それでも空なら空を返して AP を保つ。再スキャンの
+  例外・時間切れでも、1 回目に得た絞り込み結果を返す。
+  全候補へ戻すのは 1 回目の結果を得る前に例外・時間切れとなった場合だけ。
+  空の結果で `set_state("CONNECTING", [])` しても AP に向かうのは、startup の
+  HOTSPOT に入る前には conn_list が必ず空（初期値または connected_start）だから。
   再スキャンを含めた判断には **5 秒の共通予算**を設ける。D-Bus 呼び出しには
   残り時間を timeout として渡し、poll の sleep も残り時間までに制限する。
-  最初の結果が得られた時点で予算が無ければ再スキャンせずその結果で決める。
+  得た結果を呼び出し後の締め切り判定で捨てない。呼び出し前の残り時間の確認と
+  timeout で予算を制限し、再スキャンの失敗が正常な最初の結果を覆さないようにする。
   python-networkmanager の生成メソッド／プロパティは timeout 引数を受けないため、
   この追加処理では下層の D-Bus プロキシを使う。
   呼び出し元は GLib のメインループなので、スキャン中は他のコールバックも待つ。
@@ -216,7 +226,7 @@ enable_nuke: true
   GLib の同優先度コールバックの実行順に依存しない。古い state ID は拒否し、
   次の ID の通常失敗や複数デバイスでは元のデコレータ付き関数へ戻す。
   state_matrix が globals() から関数を引くため本体の書き換えは不要。
-  これらのパッチ適用後の実機確認は未実施。
+  今回の修正後の追加実機測定は未実施。
 - avahi-daemon が enable であることの確認
 - `/etc/network/interfaces` に Wi-Fi 定義が無いことの確認（あれば fail、
   自動では消さない — 手焼き環境の意図的設定を壊さない）

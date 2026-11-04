@@ -144,34 +144,36 @@ def _palmimo_call(proxy, interface, method, deadline, *args):
         raise TimeoutError("candidate decision timed out")
     # python-networkmanager's generated properties/methods do not accept
     # timeout arguments. Bound the underlying D-Bus calls by the same budget.
-    result = getattr(proxy, method)(*args, dbus_interface=interface, timeout=remaining)
-    if _palmimo_time.monotonic() > deadline:
-        raise TimeoutError("candidate decision timed out")
-    return result
+    return getattr(proxy, method)(*args, dbus_interface=interface, timeout=remaining)
 
 
 def _palmimo_ssid(value):
     return bytes(value).decode("utf-8", "replace") if value is not None else None
 
 
-def _palmimo_snapshot(wireless, deadline):
+def _palmimo_visible_ssids(wireless, deadline, since):
     paths = _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless",
                           "GetAllAccessPoints", deadline)
-    snapshot = {{}}
+    visible = set()
     for path in paths:
         try:
             props = _palmimo_call(_palmimo_proxy(path), _palmimo_properties, "GetAll",
                                   deadline, _palmimo_nm_interface + ".AccessPoint")
-            snapshot[str(path)] = (int(props["LastSeen"]), _palmimo_ssid(props["Ssid"]))
-        except (nm.ObjectVanished, dbus.exceptions.DBusException):
+            seen = int(props["LastSeen"])
+            ssid = _palmimo_ssid(props["Ssid"])
+            if seen >= 0 and seen >= since and ssid is not None:
+                visible.add(ssid)
+        except dbus.exceptions.DBusException:
             continue
-    return snapshot
+    return visible
 
 
 def _palmimo_scan(wireless, deadline):
-    before = _palmimo_snapshot(wireless, deadline)
     previous_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
                                   _palmimo_nm_interface + ".Device.Wireless", "LastScan")
+    # NM may have refreshed an AP earlier in this same second. LastSeen
+    # only has second precision, so retain that entire request second.
+    since = int(_palmimo_time.clock_gettime(_palmimo_time.CLOCK_BOOTTIME))
     _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless", "RequestScan", deadline, dbus.Dictionary({{}}, signature="sv"))
     while True:
         last_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
@@ -182,9 +184,7 @@ def _palmimo_scan(wireless, deadline):
         if remaining <= 0:
             raise TimeoutError("candidate scan timed out")
         _palmimo_time.sleep(min(0.1, remaining))
-    after = _palmimo_snapshot(wireless, deadline)
-    return {{ssid for path, (seen, ssid) in after.items()
-             if seen >= 0 and ssid is not None and (path not in before or seen > before[path][0])}}
+    return _palmimo_visible_ssids(wireless, deadline, since)
 
 
 def _palmimo_active_ssid(device, deadline):
@@ -200,7 +200,7 @@ def _palmimo_active_ssid(device, deadline):
         settings = _palmimo_call(_palmimo_proxy(connection),
                                  _palmimo_nm_interface + ".Settings.Connection", "GetSettings", deadline)
         return _palmimo_ssid(settings.get("802-11-wireless", {{}}).get("ssid"))
-    except (nm.ObjectVanished, dbus.exceptions.DBusException):
+    except dbus.exceptions.DBusException:
         return None
 
 
@@ -211,8 +211,9 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
     _palmimo_filter_next_candidates = False
     deadline = _palmimo_time.monotonic() + 5
     candidates = _palmimo_ordered_candidates(device)
-    if not requested:
+    if not requested or not candidates:
         return candidates
+    filtered = None
     try:
         wireless = _palmimo_proxy(device.object_path)
         active = _palmimo_active_ssid(wireless, deadline)
@@ -226,15 +227,23 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
                     ssid = _palmimo_ssid(wifi.get("ssid"))
                     if ssid is not None:
                         hidden.add(ssid)
-            except (nm.ObjectVanished, dbus.exceptions.DBusException):
+            except dbus.exceptions.DBusException:
                 continue
-        for attempt in range(2):
+        started = _palmimo_time.monotonic()
+        visible = _palmimo_scan(wireless, deadline)
+        filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden or ssid == active]
+        duration = _palmimo_time.monotonic() - started
+        if not filtered and deadline - _palmimo_time.monotonic() > duration:
             visible = _palmimo_scan(wireless, deadline)
             filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden or ssid == active]
-            if filtered or not candidates or attempt == 1 or _palmimo_time.monotonic() >= deadline:
-                log.info("candidate scan: filtered %s to %s", candidates, filtered)
-                return filtered
+        log.info("candidate scan: filtered %s to %s", candidates, filtered)
+        return filtered
     except Exception as error:
+        if filtered is not None:
+            # A retry is optional evidence; its failure cannot invalidate
+            # the successful first scan and tear down an otherwise idle AP.
+            log.warning("candidate rescan: keeping %s (%s)", filtered, type(error).__name__)
+            return filtered
         log.warning("candidate scan: unfiltered (%s)", type(error).__name__)
         return candidates
 """
