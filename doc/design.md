@@ -171,39 +171,41 @@ enable_nuke: true
   冪等性の判定キーは変更ごとの通知文言。既存の nm.py パッチは
   `Modified by Jizai Inc.` の有無で当て済みと判定するので、このパッチより
   **先に**当てる（apply-pi.sh・pi-gen とも、順序をテストで固定）
-- 同じパッチで、優先度順の候補を**その場のスキャンで見えた SSID、隠し
-  ネットワーク、現在接続中の SSID**に絞る。接続中に comitup を再起動した
-  場合も、接続先を候補から落として生きた接続を切らない。
-  圏外の保存済みネットワークを試すと 1 本につき supplicant の待ち 25 秒が
-  かかり、2 本で AP まで 50 秒遅れる。AP 中の 180 / 360 秒周期の再試行でも
-  同じ時間 AP が消える。
+- 同じパッチで、**接続を試すか AP に居るかを決める時点だけ**候補を絞る。
+  states.py の startup 中の hotspot_pass と、AP 中の周期再試行の
+  hotspot_timeout が「次の candidate_connections を絞る」印を立てる。
+  nm.py はその印を消費した呼び出しだけスキャンし、それ以外は優先度順の
+  全候補を返す。connecting_start は全候補で既存接続の有無を確認するだけで、
+  試す順は CONNECTING への遷移で渡した conn_list が決める。
+  timeout が AP クライアントのため候補取得を飛ばした場合も、ラッパを抜ける
+  ときに印を下ろす。切断ごとに新しい判断を行い、過去の検出を使い回さない。
+  圏外の保存先は 1 本につき supplicant の待ち 25 秒がかかり、2 本で AP まで
+  50 秒遅れる。AP 中の 180 / 360 秒周期の再試行でもその間 AP が消える。
   Pi 5 / NetworkManager 1.52.1 の実測では RequestScan は接続中
   3.5〜3.9 秒、切断中 0.5〜2.3 秒、接続試行中 1.0〜4.5 秒。
-  **AP を出したままでも 3.2〜3.6 秒で終わり AP は落ちない**ため、
-  候補が無ければ comitup 自身の処理で AP を維持できる。AP 中のスキャンでは
-  保存済み SSID の LastSeen が 0.1〜0.7 秒前へ更新された（3 回とも）。
-  接続中の GetAllAccessPoints() は接続先 1 件のみで、LastSeen は最後の
-  LastScan と同じ秒のまま（ビーコンでは更新されない）。16 時間前のままの例もある。
-  device.SpecificDevice() の RequestScan({}) を呼び LastScan の変化を
-  最大 8 秒、0.1 秒刻みで待つ。LastScan は CLOCK_BOOTTIME のミリ秒、
-  LastSeen は同じ時計の秒（-1 は未検出）。要求前に完了済みの LastScan より
-  後に見えた AP を使うため、既に進行中のスキャンの完了を拾っても前半の検出を
-  落とさない。LastSeen は秒に丸められているため、LastScan を秒に切り捨てた
-  境界の秒も残す。LastScan が -1 のときは LastSeen が非負の AP をすべて使う。
-  元の候補があるのに絞った結果が空なら 1 回だけキャッシュを無視してスキャン
-  し直す。それでも空なら空を返して AP を保つ。同じキャッシュ期間中にこの
-  再確認を繰り返さない。
-  成功も失敗も完了から **60 秒**は再利用する。connecting_start は 1 本試す
-  ごとに候補を引き、1 本の失敗が 25 秒なので、再試行のたびのスキャン待ちを防ぐ。
-  RequestScan の例外、8 秒のタイムアウト、新鮮な AP が 0 件、その他の例外では
-  **絞らず全候補を優先度順で試し、失敗結果も 60 秒再利用する**。
-  見落とすと最大 360 秒再接続できず、詰まったスキャンで毎回 8 秒待つことも避ける。
+  **AP を出したままでも 3.2〜3.6 秒で終わり AP は落ちない**。
+  AP 中のスキャンでは保存済み SSID の LastSeen が 0.1〜0.7 秒前に更新された
+  （3 回とも）。接続中の一覧は接続先 1 件のみで、LastSeen は最後の LastScan と
+  同じ秒のまま、ビーコンでは更新されない。
+  RequestScan の前後で `{AP の object path: LastSeen}` を比較し、LastSeen が
+  増えた AP と新しく現れた AP の SSID を可視とする。LastSeen=-1 は未検出。
+  前回と同じ秒のままの AP を落とすため、LastScan の秒への丸めは判定に使わない。
+  優先度順の候補から可視 SSID・隠しネットワーク・現在接続中の SSID を残す。
+  接続中の SSID は device の ActiveConnection → Connection → GetSettings から
+  直接読む。ObjectVanished / DBusException は接続中 SSID 無しとして扱い、
+  ObjectVanished で終了する経路を持つ comitup の get_active_ssid は追加処理で使わない。
   AP・接続設定ごとの ObjectVanished / DBusException はその 1 件だけ飛ばす。
-  python-networkmanager のプロパティは毎回 D-Bus 往復となるため LastSeen は
-  AP ごとに 1 回だけ読む。単一 Wi-Fi が対象で、IpInterface の D-Bus 比較を伴う
-  device の等値比較をキャッシュ判定に使わない。
+  スキャンが正常終了し新しく見えた AP が 0 件なら空集合と扱う。元の候補が
+  あるのに絞った結果が空なら 1 回だけ再スキャンし、それでも空なら空を返して
+  AP を保つ。正常な 0 件を理由に圏外の保存先を試すことはない。
+  絞らず全候補を返すのは要求の例外・時間切れ・その他の例外の場合だけ。
+  再スキャンを含めた判断には **5 秒の共通予算**を設ける。D-Bus 呼び出しには
+  残り時間を timeout として渡し、poll の sleep も残り時間までに制限する。
+  最初の結果が得られた時点で予算が無ければ再スキャンせずその結果で決める。
+  python-networkmanager の生成メソッド／プロパティは timeout 引数を受けないため、
+  この追加処理では下層の D-Bus プロキシを使う。
+  呼び出し元は GLib のメインループなので、スキャン中は他のコールバックも待つ。
   絞り込み結果または絞らない理由は comitup のログに残す。
-  呼び出し元は GLib のメインループなので、スキャンの間はコールバックも待つ。
 - `states.py` では単一デバイス・startup 中の HOTSPOT に届く hotspot_fail を
   WARNING 付きで無視する。この段階では実 AP をまだ立てず、100ms 後の
   fake_hs_pass から候補の接続へ進む。実機では切断時の FAILED(120) と

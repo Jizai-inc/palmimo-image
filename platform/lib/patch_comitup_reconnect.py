@@ -41,7 +41,7 @@ TODAY = datetime.date.today().isoformat()
 
 MDNS_MARKER = "keep a stale avahi entry group from blocking the AP fallback"
 NM_MARKER = "try candidates in autoconnect-priority order"
-SCAN_MARKER = "preserve active candidates and cache scan outcomes for 60 seconds"
+SCAN_MARKER = "scan candidates only at hotspot connection decisions"
 STATES_MARKER = "ignore residual disconnects through the single-device startup hotspot pass"
 
 MAIN_GUARD = '\nif __name__ == "__main__":\n'
@@ -123,112 +123,126 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
 SCAN_APPENDIX = f"""
 
 # Modified by Jizai Inc. on {TODAY}: {SCAN_MARKER}
-# (GPLv2 section 2(a) notice). This device has one Wi-Fi interface. Both
-# successful and failed scans have a 60-second lifetime, covering the
-# supplicant's 25-second connection attempts without repeated GLib waits.
+# (GPLv2 section 2(a) notice). Only HOTSPOT decisions consume a scan
+# request. Connecting callbacks need the full list to recognize a live
+# connection; their attempt order already comes from the state transition.
 import time as _palmimo_time
 
 _palmimo_ordered_candidates = get_candidate_connections
-_palmimo_scan_completed = None
-_palmimo_visible_ssids = None
-_palmimo_scan_reason = "not scanned"
-_palmimo_empty_rechecked = False
+_palmimo_filter_next_candidates = False
+_palmimo_nm_interface = "org.freedesktop.NetworkManager"
+_palmimo_properties = "org.freedesktop.DBus.Properties"
 
 
-def _palmimo_scan(device):
-    global _palmimo_scan_completed, _palmimo_visible_ssids, _palmimo_scan_reason
+def _palmimo_proxy(path):
+    return dbus.SystemBus().get_object(_palmimo_nm_interface, path, introspect=False)
 
-    _palmimo_visible_ssids = None
+
+def _palmimo_call(proxy, interface, method, deadline, *args):
+    remaining = deadline - _palmimo_time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("candidate decision timed out")
+    # python-networkmanager's generated properties/methods do not accept
+    # timeout arguments. Bound the underlying D-Bus calls by the same budget.
+    result = getattr(proxy, method)(*args, dbus_interface=interface, timeout=remaining)
+    if _palmimo_time.monotonic() > deadline:
+        raise TimeoutError("candidate decision timed out")
+    return result
+
+
+def _palmimo_ssid(value):
+    return bytes(value).decode("utf-8", "replace") if value is not None else None
+
+
+def _palmimo_snapshot(wireless, deadline):
+    paths = _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless",
+                          "GetAllAccessPoints", deadline)
+    snapshot = {{}}
+    for path in paths:
+        try:
+            props = _palmimo_call(_palmimo_proxy(path), _palmimo_properties, "GetAll",
+                                  deadline, _palmimo_nm_interface + ".AccessPoint")
+            snapshot[str(path)] = (int(props["LastSeen"]), _palmimo_ssid(props["Ssid"]))
+        except (nm.ObjectVanished, dbus.exceptions.DBusException):
+            continue
+    return snapshot
+
+
+def _palmimo_scan(wireless, deadline):
+    before = _palmimo_snapshot(wireless, deadline)
+    previous_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
+                                  _palmimo_nm_interface + ".Device.Wireless", "LastScan")
+    _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless", "RequestScan", deadline, dbus.Dictionary({{}}, signature="sv"))
+    while True:
+        last_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
+                                 _palmimo_nm_interface + ".Device.Wireless", "LastScan")
+        if last_scan != previous_scan:
+            break
+        remaining = deadline - _palmimo_time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("candidate scan timed out")
+        _palmimo_time.sleep(min(0.1, remaining))
+    after = _palmimo_snapshot(wireless, deadline)
+    return {{ssid for path, (seen, ssid) in after.items()
+             if seen >= 0 and ssid is not None and (path not in before or seen > before[path][0])}}
+
+
+def _palmimo_active_ssid(device, deadline):
+    # comitup get_active_ssid can exit on ObjectVanished; a disappearing
+    # active connection must only remove this exemption from filtering.
     try:
-        wireless = device.SpecificDevice()
-        previous_scan = wireless.LastScan
-        deadline = _palmimo_time.monotonic() + 8
-        wireless.RequestScan({{}})
-        while wireless.LastScan == previous_scan:
-            remaining = deadline - _palmimo_time.monotonic()
-            if remaining <= 0:
-                _palmimo_scan_reason = "scan timed out"
-                return
-            _palmimo_time.sleep(min(0.1, remaining))
-
-        visible = set()
-        for ap in wireless.GetAllAccessPoints():
-            try:
-                seen = ap.LastSeen
-                # LastSeen has only second precision. Keep the boundary
-                # second: an AP seen after LastScan may round down to it.
-                if seen >= 0 and (previous_scan < 0 or seen >= previous_scan // 1000):
-                    visible.add(ap.Ssid)
-            except (nm.ObjectVanished, dbus.exceptions.DBusException):
-                continue
-        if visible:
-            _palmimo_visible_ssids = visible
-        else:
-            _palmimo_scan_reason = "no fresh APs"
-    except Exception as error:
-        _palmimo_scan_reason = type(error).__name__
-    finally:
-        _palmimo_scan_completed = _palmimo_time.monotonic()
+        path = _palmimo_call(device, _palmimo_properties, "Get", deadline,
+                             _palmimo_nm_interface + ".Device", "ActiveConnection")
+        if not path or path == "/":
+            return None
+        connection = _palmimo_call(_palmimo_proxy(path), _palmimo_properties, "Get", deadline,
+                                   _palmimo_nm_interface + ".Connection.Active", "Connection")
+        settings = _palmimo_call(_palmimo_proxy(connection),
+                                 _palmimo_nm_interface + ".Settings.Connection", "GetSettings", deadline)
+        return _palmimo_ssid(settings.get("802-11-wireless", {{}}).get("ssid"))
+    except (nm.ObjectVanished, dbus.exceptions.DBusException):
+        return None
 
 
 def get_candidate_connections(device: nm.Device) -> List[str]:
-    global _palmimo_scan_completed, _palmimo_visible_ssids, _palmimo_scan_reason
-    global _palmimo_empty_rechecked
+    global _palmimo_filter_next_candidates
 
+    requested = _palmimo_filter_next_candidates
+    _palmimo_filter_next_candidates = False
+    deadline = _palmimo_time.monotonic() + 5
     candidates = _palmimo_ordered_candidates(device)
+    if not requested:
+        return candidates
     try:
-        if (
-            _palmimo_scan_completed is None
-            or _palmimo_time.monotonic() - _palmimo_scan_completed >= 60
-        ):
-            _palmimo_scan(device)
-            _palmimo_empty_rechecked = False
-
-        if _palmimo_visible_ssids is None:
-            log.info("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
-            return candidates
-
-        active = get_active_ssid(device)
+        wireless = _palmimo_proxy(device.object_path)
+        active = _palmimo_active_ssid(wireless, deadline)
         hidden = set()
         for conn in get_all_connections():
             try:
-                settings = conn.GetSettings()
+                settings = _palmimo_call(_palmimo_proxy(conn.object_path),
+                                         _palmimo_nm_interface + ".Settings.Connection", "GetSettings", deadline)
                 wifi = settings.get("802-11-wireless", {{}})
                 if wifi.get("mode") == "infrastructure" and wifi.get("hidden"):
-                    ssid = get_ssid_from_connection(conn)
+                    ssid = _palmimo_ssid(wifi.get("ssid"))
                     if ssid is not None:
                         hidden.add(ssid)
             except (nm.ObjectVanished, dbus.exceptions.DBusException):
                 continue
-
-        while True:
-            if _palmimo_visible_ssids is None:
-                log.info("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
-                return candidates
-            filtered = [
-                ssid for ssid in candidates
-                if ssid in _palmimo_visible_ssids or ssid in hidden or ssid == active
-            ]
-            if filtered or not candidates or _palmimo_empty_rechecked:
+        for attempt in range(2):
+            visible = _palmimo_scan(wireless, deadline)
+            filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden or ssid == active]
+            if filtered or not candidates or attempt == 1 or _palmimo_time.monotonic() >= deadline:
                 log.info("candidate scan: filtered %s to %s", candidates, filtered)
                 return filtered
-            # Once per cached outcome, confirm an empty result before
-            # keeping the AP. Do not rescan on each subsequent callback.
-            _palmimo_empty_rechecked = True
-            _palmimo_scan(device)
     except Exception as error:
-        # Uncertainty must not suppress a reachable saved network until
-        # the next 180/360-second retry, or block every callback again.
-        _palmimo_visible_ssids = None
-        _palmimo_scan_reason = type(error).__name__
-        _palmimo_scan_completed = _palmimo_time.monotonic()
-        log.warning("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
+        log.warning("candidate scan: unfiltered (%s)", type(error).__name__)
         return candidates
 """
 
 STATES_ANCHORS = (
     "@timeout\n@state_callback\ndef hotspot_fail(reason: int) -> None:\n",
     "@timeout\n@state_callback\ndef hotspot_pass(reason: int) -> None:\n",
+    "@timeout\ndef hotspot_timeout(dummy: int) -> None:\n",
     "class state_matrix",
 )
 
@@ -240,6 +254,7 @@ STATES_APPENDIX = f"""
 # hotspot_pass until state_id advances, regardless of GLib callback order.
 _palmimo_hotspot_fail = hotspot_fail
 _palmimo_hotspot_pass = hotspot_pass
+_palmimo_hotspot_timeout = hotspot_timeout
 _palmimo_startup_pass_id = None
 
 
@@ -248,7 +263,24 @@ def hotspot_pass(id: int, reason: int) -> bool:
 
     if id == state_id and startup and modemgr.get_mode() == modemgr.SINGLE_MODE:
         _palmimo_startup_pass_id = id
-    return _palmimo_hotspot_pass(id, reason)
+    if id != state_id or not startup:
+        return _palmimo_hotspot_pass(id, reason)
+    nm._palmimo_filter_next_candidates = True
+    try:
+        return _palmimo_hotspot_pass(id, reason)
+    finally:
+        nm._palmimo_filter_next_candidates = False
+
+
+def hotspot_timeout(id: int, reason: int) -> bool:
+    if id != state_id:
+        return _palmimo_hotspot_timeout(id, reason)
+    nm._palmimo_filter_next_candidates = True
+    try:
+        return _palmimo_hotspot_timeout(id, reason)
+    finally:
+        # AP clients can make the original callback skip candidate lookup.
+        nm._palmimo_filter_next_candidates = False
 
 
 def hotspot_fail(id: int, reason: int) -> bool:

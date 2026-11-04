@@ -269,8 +269,9 @@ avahi restart instead of raising, so a device whose Wi-Fi network
 disappears falls back to the setup AP; without it the AP does not come back
 until a reboot (verified on hardware). In `nm.py` it tries saved networks in
 `connection.autoconnect-priority` order, filtering to visible, hidden or currently connected
-networks. Scan outcomes, including failures, are cached for 60 seconds; an empty
-filtered result is checked once more. Uncertain scans keep all candidates.
+networks only at hotspot connection decisions. AP visibility is compared before
+and after scanning, with at most one retry under a shared five-second budget.
+A successful empty scan keeps the setup AP; scan errors keep all candidates.
 In `states.py` it ignores residual disconnect signals during the single-device
 startup hotspot through its pass callback so saved candidates can be tried
 before starting the AP.
