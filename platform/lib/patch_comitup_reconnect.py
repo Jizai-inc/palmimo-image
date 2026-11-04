@@ -34,7 +34,6 @@ fallback that cannot come up.
 import datetime
 import os
 import sys
-from typing import NoReturn
 
 
 COMITUP_DIR = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/comitup/comitup"
@@ -42,9 +41,7 @@ TODAY = datetime.date.today().isoformat()
 
 MDNS_MARKER = "keep a stale avahi entry group from blocking the AP fallback"
 NM_MARKER = "try candidates in autoconnect-priority order"
-LEGACY_SCAN_MARKER = "limit candidates to freshly visible or hidden networks"
 SCAN_MARKER = "preserve active candidates and cache scan outcomes for 60 seconds"
-LEGACY_STATES_MARKER = "ignore residual disconnects during the single-device startup hotspot"
 STATES_MARKER = "ignore residual disconnects through the single-device startup hotspot pass"
 
 MAIN_GUARD = '\nif __name__ == "__main__":\n'
@@ -264,7 +261,7 @@ def hotspot_fail(id: int, reason: int) -> bool:
 """
 
 
-def fail(path: str, anchor: str) -> NoReturn:
+def fail(path: str, anchor: str) -> None:
     sys.stderr.write(
         f"    FAIL: expected line {anchor.strip()!r} not found in {path}\n"
         "    This patch targets comitup 1.43; a comitup upgrade likely changed "
@@ -274,13 +271,7 @@ def fail(path: str, anchor: str) -> NoReturn:
     sys.exit(1)
 
 
-def patch(
-    name: str,
-    marker: str,
-    anchors: tuple[str, ...],
-    appendix: str,
-    legacy: tuple[str, str] | None = None,
-) -> None:
+def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> None:
     path = os.path.join(COMITUP_DIR, name)
     with open(path, encoding="utf-8", newline="") as f:
         text = f.read()
@@ -290,25 +281,6 @@ def patch(
     for anchor in anchors:
         if text.count(anchor) != 1:
             fail(path, anchor)
-    if legacy is not None and legacy[0] in text:
-        # The previous scan/state appendix is the final block before the
-        # CLI guard (or EOF). Refuse unfamiliar tails instead of deleting
-        # custom code or stacking a scanner on top of the old scanner.
-        head, guard, tail = text.rpartition(MAIN_GUARD)
-        if not guard:
-            head, tail = text, ""
-        notice = next(
-            (
-                line
-                for line in head.splitlines(keepends=True)
-                if line.startswith("# Modified by Jizai Inc. on ") and line.rstrip().endswith(": " + legacy[0])
-            ),
-            None,
-        )
-        if notice is None or not head.rstrip().endswith(legacy[1]):
-            fail(path, legacy[1])
-        head = head[: head.index(notice)]
-        text = head + guard + tail
     with open(path, "w", encoding="utf-8", newline="") as f:
         # Above the `__main__` block, so running the module as a CLI gets
         # the wrappers too.
@@ -327,15 +299,8 @@ def main() -> None:
         SCAN_MARKER,
         ("_comitup_get_candidate_connections = get_candidate_connections\n", MAIN_GUARD),
         SCAN_APPENDIX,
-        (LEGACY_SCAN_MARKER, "return candidates"),
     )
-    patch(
-        "states.py",
-        STATES_MARKER,
-        STATES_ANCHORS,
-        STATES_APPENDIX,
-        (LEGACY_STATES_MARKER, "return _palmimo_hotspot_fail(id, reason)"),
-    )
+    patch("states.py", STATES_MARKER, STATES_ANCHORS, STATES_APPENDIX)
 
 
 if __name__ == "__main__":
