@@ -34,6 +34,7 @@ fallback that cannot come up.
 import datetime
 import os
 import sys
+from typing import NoReturn
 
 
 COMITUP_DIR = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/comitup/comitup"
@@ -41,8 +42,10 @@ TODAY = datetime.date.today().isoformat()
 
 MDNS_MARKER = "keep a stale avahi entry group from blocking the AP fallback"
 NM_MARKER = "try candidates in autoconnect-priority order"
-SCAN_MARKER = "limit candidates to freshly visible or hidden networks"
-STATES_MARKER = "ignore residual disconnects during the single-device startup hotspot"
+LEGACY_SCAN_MARKER = "limit candidates to freshly visible or hidden networks"
+SCAN_MARKER = "preserve active candidates and cache scan outcomes for 60 seconds"
+LEGACY_STATES_MARKER = "ignore residual disconnects during the single-device startup hotspot"
+STATES_MARKER = "ignore residual disconnects through the single-device startup hotspot pass"
 
 MAIN_GUARD = '\nif __name__ == "__main__":\n'
 MDNS_ANCHORS = (
@@ -123,95 +126,145 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
 SCAN_APPENDIX = f"""
 
 # Modified by Jizai Inc. on {TODAY}: {SCAN_MARKER}
-# (GPLv2 section 2(a) notice). NetworkManager retains stale APs and does
-# not refresh them while connected. LastScan/LastSeen use CLOCK_BOOTTIME,
-# not wall time; only our completed scans may populate the short cache.
+# (GPLv2 section 2(a) notice). This device has one Wi-Fi interface. Both
+# successful and failed scans have a 60-second lifetime, covering the
+# supplicant's 25-second connection attempts without repeated GLib waits.
 import time as _palmimo_time
 
 _palmimo_ordered_candidates = get_candidate_connections
-_palmimo_scan_device = None
 _palmimo_scan_completed = None
-_palmimo_visible_ssids = set()
+_palmimo_visible_ssids = None
+_palmimo_scan_reason = "not scanned"
+_palmimo_empty_rechecked = False
+
+
+def _palmimo_scan(device):
+    global _palmimo_scan_completed, _palmimo_visible_ssids, _palmimo_scan_reason
+
+    _palmimo_visible_ssids = None
+    try:
+        wireless = device.SpecificDevice()
+        previous_scan = wireless.LastScan
+        deadline = _palmimo_time.monotonic() + 8
+        wireless.RequestScan({{}})
+        while wireless.LastScan == previous_scan:
+            remaining = deadline - _palmimo_time.monotonic()
+            if remaining <= 0:
+                _palmimo_scan_reason = "scan timed out"
+                return
+            _palmimo_time.sleep(min(0.1, remaining))
+
+        visible = set()
+        for ap in wireless.GetAllAccessPoints():
+            try:
+                seen = ap.LastSeen
+                # LastSeen has only second precision. Keep the boundary
+                # second: an AP seen after LastScan may round down to it.
+                if seen >= 0 and (previous_scan < 0 or seen >= previous_scan // 1000):
+                    visible.add(ap.Ssid)
+            except (nm.ObjectVanished, dbus.exceptions.DBusException):
+                continue
+        if visible:
+            _palmimo_visible_ssids = visible
+        else:
+            _palmimo_scan_reason = "no fresh APs"
+    except Exception as error:
+        _palmimo_scan_reason = type(error).__name__
+    finally:
+        _palmimo_scan_completed = _palmimo_time.monotonic()
 
 
 def get_candidate_connections(device: nm.Device) -> List[str]:
-    global _palmimo_scan_device, _palmimo_scan_completed, _palmimo_visible_ssids
+    global _palmimo_scan_completed, _palmimo_visible_ssids, _palmimo_scan_reason
+    global _palmimo_empty_rechecked
 
     candidates = _palmimo_ordered_candidates(device)
     try:
-        now = _palmimo_time.monotonic()
         if (
-            device == _palmimo_scan_device
-            and _palmimo_scan_completed is not None
-            and now - _palmimo_scan_completed < 20
+            _palmimo_scan_completed is None
+            or _palmimo_time.monotonic() - _palmimo_scan_completed >= 60
         ):
-            visible = _palmimo_visible_ssids
-        else:
-            wireless = device.SpecificDevice()
-            previous_scan = wireless.LastScan
-            requested = _palmimo_time.clock_gettime(_palmimo_time.CLOCK_BOOTTIME)
-            deadline = now + 8
-            wireless.RequestScan({{}})
-            while wireless.LastScan == previous_scan:
-                remaining = deadline - _palmimo_time.monotonic()
-                if remaining <= 0:
-                    log.info("candidate scan: unfiltered (scan timed out)")
-                    return candidates
-                _palmimo_time.sleep(min(0.1, remaining))
+            _palmimo_scan(device)
+            _palmimo_empty_rechecked = False
 
-            visible = {{
-                ap.Ssid for ap in wireless.GetAllAccessPoints()
-                if ap.LastSeen >= 0 and ap.LastSeen >= requested - 1
-            }}
-            if not visible:
-                log.info("candidate scan: unfiltered (no fresh APs)")
-                return candidates
-            _palmimo_scan_device = device
-            _palmimo_visible_ssids = visible
-            _palmimo_scan_completed = _palmimo_time.monotonic()
+        if _palmimo_visible_ssids is None:
+            log.info("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
+            return candidates
 
+        active = get_active_ssid(device)
         hidden = set()
         for conn in get_all_connections():
-            settings = conn.GetSettings()
-            wifi = settings.get("802-11-wireless", {{}})
-            if wifi.get("mode") == "infrastructure" and wifi.get("hidden"):
-                hidden.add(get_ssid_from_connection(conn))
-        filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden]
-        log.info("candidate scan: filtered %s to %s", candidates, filtered)
-        return filtered
+            try:
+                settings = conn.GetSettings()
+                wifi = settings.get("802-11-wireless", {{}})
+                if wifi.get("mode") == "infrastructure" and wifi.get("hidden"):
+                    ssid = get_ssid_from_connection(conn)
+                    if ssid is not None:
+                        hidden.add(ssid)
+            except (nm.ObjectVanished, dbus.exceptions.DBusException):
+                continue
+
+        while True:
+            if _palmimo_visible_ssids is None:
+                log.info("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
+                return candidates
+            filtered = [
+                ssid for ssid in candidates
+                if ssid in _palmimo_visible_ssids or ssid in hidden or ssid == active
+            ]
+            if filtered or not candidates or _palmimo_empty_rechecked:
+                log.info("candidate scan: filtered %s to %s", candidates, filtered)
+                return filtered
+            # Once per cached outcome, confirm an empty result before
+            # keeping the AP. Do not rescan on each subsequent callback.
+            _palmimo_empty_rechecked = True
+            _palmimo_scan(device)
     except Exception as error:
-        # The scan is only an optimization: uncertainty must not suppress
-        # a reachable saved network until the next 180/360-second retry.
-        log.warning("candidate scan: unfiltered (%s)", type(error).__name__)
+        # Uncertainty must not suppress a reachable saved network until
+        # the next 180/360-second retry, or block every callback again.
+        _palmimo_visible_ssids = None
+        _palmimo_scan_reason = type(error).__name__
+        _palmimo_scan_completed = _palmimo_time.monotonic()
+        log.warning("candidate scan: unfiltered (%s)", _palmimo_scan_reason)
         return candidates
 """
 
 STATES_ANCHORS = (
     "@timeout\n@state_callback\ndef hotspot_fail(reason: int) -> None:\n",
+    "@timeout\n@state_callback\ndef hotspot_pass(reason: int) -> None:\n",
     "class state_matrix",
 )
 
 STATES_APPENDIX = f"""
 
 # Modified by Jizai Inc. on {TODAY}: {STATES_MARKER}
-# (GPLv2 section 2(a) notice). No AP exists in single-device startup:
-# residual NM disconnect signals must not queue a forced HOTSPOT ahead
-# of fake_hs_pass's CONNECTING. Keep the original decorated callback for
-# real failures, including its state-id check and callback notifications.
+# (GPLv2 section 2(a) notice). A single-device startup HOTSPOT has no AP
+# activation to fail. Its residual disconnects remain harmless through
+# hotspot_pass until state_id advances, regardless of GLib callback order.
 _palmimo_hotspot_fail = hotspot_fail
+_palmimo_hotspot_pass = hotspot_pass
+_palmimo_startup_pass_id = None
+
+
+def hotspot_pass(id: int, reason: int) -> bool:
+    global _palmimo_startup_pass_id
+
+    if id == state_id and startup and modemgr.get_mode() == modemgr.SINGLE_MODE:
+        _palmimo_startup_pass_id = id
+    return _palmimo_hotspot_pass(id, reason)
 
 
 def hotspot_fail(id: int, reason: int) -> bool:
     if id != state_id:
         return False
-    if startup and modemgr.get_mode() == modemgr.SINGLE_MODE:
+    if modemgr.get_mode() == modemgr.SINGLE_MODE and (startup or id == _palmimo_startup_pass_id):
         log.warning("Ignoring residual disconnect in startup hotspot")
         return True
     return _palmimo_hotspot_fail(id, reason)
 """
 
 
-def fail(path: str, anchor: str) -> None:
+def fail(path: str, anchor: str) -> NoReturn:
     sys.stderr.write(
         f"    FAIL: expected line {anchor.strip()!r} not found in {path}\n"
         "    This patch targets comitup 1.43; a comitup upgrade likely changed "
@@ -221,7 +274,13 @@ def fail(path: str, anchor: str) -> None:
     sys.exit(1)
 
 
-def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> None:
+def patch(
+    name: str,
+    marker: str,
+    anchors: tuple[str, ...],
+    appendix: str,
+    legacy: tuple[str, str] | None = None,
+) -> None:
     path = os.path.join(COMITUP_DIR, name)
     with open(path, encoding="utf-8", newline="") as f:
         text = f.read()
@@ -231,6 +290,25 @@ def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> No
     for anchor in anchors:
         if text.count(anchor) != 1:
             fail(path, anchor)
+    if legacy is not None and legacy[0] in text:
+        # The previous scan/state appendix is the final block before the
+        # CLI guard (or EOF). Refuse unfamiliar tails instead of deleting
+        # custom code or stacking a scanner on top of the old scanner.
+        head, guard, tail = text.rpartition(MAIN_GUARD)
+        if not guard:
+            head, tail = text, ""
+        notice = next(
+            (
+                line
+                for line in head.splitlines(keepends=True)
+                if line.startswith("# Modified by Jizai Inc. on ") and line.rstrip().endswith(": " + legacy[0])
+            ),
+            None,
+        )
+        if notice is None or not head.rstrip().endswith(legacy[1]):
+            fail(path, legacy[1])
+        head = head[: head.index(notice)]
+        text = head + guard + tail
     with open(path, "w", encoding="utf-8", newline="") as f:
         # Above the `__main__` block, so running the module as a CLI gets
         # the wrappers too.
@@ -249,8 +327,15 @@ def main() -> None:
         SCAN_MARKER,
         ("_comitup_get_candidate_connections = get_candidate_connections\n", MAIN_GUARD),
         SCAN_APPENDIX,
+        (LEGACY_SCAN_MARKER, "return candidates"),
     )
-    patch("states.py", STATES_MARKER, STATES_ANCHORS, STATES_APPENDIX)
+    patch(
+        "states.py",
+        STATES_MARKER,
+        STATES_ANCHORS,
+        STATES_APPENDIX,
+        (LEGACY_STATES_MARKER, "return _palmimo_hotspot_fail(id, reason)"),
+    )
 
 
 if __name__ == "__main__":

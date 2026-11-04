@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform with protected device identity relocation, app sandboxes, shared resources, and display firmware.",
