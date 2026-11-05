@@ -663,6 +663,7 @@ settings_cache = {}
 class Connection:
     def __init__(self, settings):
         self.settings = settings
+        self.object_path = "/profile/" + str(id(self))
 
     def GetSettings(self):
         if self.settings is None:
@@ -695,6 +696,81 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
 
 if __name__ == "__main__":
     pass
+"""
+
+
+_FAKE_STATES_PY = """\
+import logging
+from functools import wraps
+from types import SimpleNamespace
+log = logging.getLogger("comitup")
+startup = True
+state_id = 7
+transitions = []
+callbacks = []
+modemgr = SimpleNamespace(SINGLE_MODE="single", get_mode=lambda: "single")
+nm = SimpleNamespace()
+candidate_results = []
+scan_device = None
+skip_candidates = False
+
+
+def candidate_connections(device):
+    if hasattr(nm, "get_candidate_connections"):
+        result = nm.get_candidate_connections(device)
+        candidate_results.append(result)
+        return result
+    return []
+
+
+def timeout(fn):
+    @wraps(fn)
+    def wrapper(sid, reason):
+        if sid == state_id:
+            fn(reason)
+            return True
+        return False
+    return wrapper
+
+
+def state_callback(fn):
+    @wraps(fn)
+    def wrapper(reason):
+        fn(reason)
+        state, action = fn.__name__.split("_")
+        callbacks.append((state.upper(), action))
+    return wrapper
+
+
+def set_state(state, **kwargs):
+    transitions.append((state, kwargs))
+
+
+@timeout
+@state_callback
+def hotspot_fail(reason: int) -> None:
+    set_state("HOTSPOT", force=True)
+
+
+@timeout
+@state_callback
+def hotspot_pass(reason: int) -> None:
+    global startup
+    candidate_connections(scan_device)
+    if startup:
+        set_state("CONNECTING")
+        startup = False
+
+
+@timeout
+def hotspot_timeout(dummy: int) -> None:
+    if not skip_candidates:
+        candidate_connections(scan_device)
+
+
+class state_matrix:
+    def __getattr__(self, attr):
+        return globals()["hotspot_" + attr[:-3]]
 """
 
 
@@ -773,6 +849,7 @@ def fake_comitup(tmp_path: Path) -> Path:
     # LF like the installed comitup, whatever the host platform writes.
     (tmp_path / "mdns.py").write_text(_FAKE_MDNS_PY, encoding="utf-8", newline="\n")
     (tmp_path / "nm.py").write_text(_FAKE_NM_PY, encoding="utf-8", newline="\n")
+    (tmp_path / "states.py").write_text(_FAKE_STATES_PY, encoding="utf-8", newline="\n")
     return tmp_path
 
 
@@ -845,26 +922,432 @@ def test_reconnect_patch_orders_candidates_by_autoconnect_priority(fake_comitup:
     assert nm["get_candidate_connections"](None) == ["home", "phone", "office", "lab"]
 
 
+class _ScanClock:
+    CLOCK_BOOTTIME = 7
+
+    def clock_gettime(self, clock: int) -> float:
+        return self.now
+
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now = round(self.now + seconds, 9)
+
+
+class _ScanDevice:
+    def __init__(self, clock: _ScanClock) -> None:
+        self.clock = clock
+        self.object_path = "/device/wifi"
+        self.failure = ""
+        self.requests = 0
+        self.completed_at: float | None = None
+        self.last_scan = 98500
+        self.delay = 0.5
+        self.snapshot_delay = 0.0
+        self.ap_reply_overrun = 0.0
+        self.active_ssid: str | None = None
+        self.active_error: type[Exception] | None = None
+        self.points: list[Any] = self.aps([("visible", 99), ("stale", 98), ("never", -1)])
+        self.scan_results = [self.aps([("visible", 100), ("stale", 98), ("new", 100), ("never", -1)])]
+
+    @staticmethod
+    def aps(values: list[tuple[str, int]]) -> list[Any]:
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(object_path="/ap/" + ssid, Ssid=ssid, LastSeen=seen) for ssid, seen in values]
+
+    def SpecificDevice(self) -> _ScanDevice:  # noqa: N802
+        return self
+
+    @property
+    def ActiveConnection(self) -> Any:  # noqa: N802
+        from types import SimpleNamespace
+
+        if self.active_error:
+            raise self.active_error()
+        if self.active_ssid is None:
+            return None
+        return SimpleNamespace(
+            Connection=SimpleNamespace(GetSettings=lambda: {"802-11-wireless": {"ssid": self.active_ssid}})
+        )
+
+    @property
+    def LastScan(self) -> int:  # noqa: N802
+        if self.completed_at is not None and self.failure != "timeout" and self.clock.now >= self.completed_at:
+            self.last_scan += 1000
+            self.points = self.scan_results[min(self.requests - 1, len(self.scan_results) - 1)]
+            self.completed_at = None
+        return self.last_scan
+
+    def RequestScan(self, options: dict[str, Any]) -> None:  # noqa: N802
+        self.requests += 1
+        if self.failure == "request":
+            raise RuntimeError("scan rejected")
+        self.completed_at = self.clock.now + self.delay
+
+    def GetAllAccessPoints(self) -> list[Any]:  # noqa: N802
+        if self.failure == "points":
+            raise RuntimeError("device vanished")
+        return self.points
+
+
+@pytest.fixture
+def scanned_nm(fake_comitup: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any], _ScanDevice]:
+    import time
+    from types import ModuleType
+
+    clock = _ScanClock()
+    monkeypatch.setattr(time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(time, "sleep", clock.sleep)
+    monkeypatch.setattr(time, "clock_gettime", clock.clock_gettime, raising=False)
+    monkeypatch.setattr(time, "CLOCK_BOOTTIME", clock.CLOCK_BOOTTIME, raising=False)
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+    module = ModuleType("patched_nm")
+    exec(compile((fake_comitup / "nm.py").read_text(), "nm.py", "exec"), module.__dict__)
+    nm = module.__dict__
+    nm["_module"] = module
+
+    nm["get_active_ssid"] = lambda device: device.active_ssid
+    for priority, ssid in enumerate(["stale", "hidden", "visible", "new", "never"]):
+        nm["CONNECTIONS"].append(
+            nm["Connection"](
+                {
+                    "connection": {"autoconnect-priority": priority},
+                    "802-11-wireless": {"ssid": ssid, "mode": "infrastructure", "hidden": ssid == "hidden"},
+                }
+            )
+        )
+    device = _ScanDevice(clock)
+    nm["dbus"].SystemBus = lambda: _ScanBus(nm, device)
+    nm["dbus"].Dictionary = lambda value, signature: value
+    return nm, device
+
+
+class _ScanBus:
+    def __init__(self, nm: dict[str, Any], device: _ScanDevice) -> None:
+        self.nm = nm
+        self.device = device
+
+    def get_object(self, service: str, path: str, introspect: bool = False) -> Any:
+        from types import SimpleNamespace
+
+        bus = self
+        device = self.device
+
+        class Proxy:
+            def Get(self, interface: str, prop: str, **kwargs: Any) -> Any:  # noqa: N802
+                if prop == "Connection":
+                    return "/active/profile"
+                if prop == "ActiveConnection":
+                    return "/active" if device.ActiveConnection else "/"
+                return getattr(device, prop)
+
+            def RequestScan(self, options: dict[str, Any], **kwargs: Any) -> None:  # noqa: N802
+                device.RequestScan(options)
+
+            def GetAllAccessPoints(self, **kwargs: Any) -> list[str]:  # noqa: N802
+                if device.requests and device.completed_at is None:
+                    remaining = kwargs["timeout"]
+                    device.clock.sleep(min(device.snapshot_delay, remaining))
+                    if device.snapshot_delay > remaining:
+                        raise bus.nm["DBusException"]()
+                return [ap.object_path for ap in device.GetAllAccessPoints()]
+
+            def GetAll(self, interface: str, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
+                ap = next(ap for ap in device.points if ap.object_path == path)
+                props = {"LastSeen": ap.LastSeen, "Ssid": ap.Ssid.encode()}
+                if device.requests:
+                    device.clock.sleep(device.ap_reply_overrun)
+                return props
+
+            def GetSettings(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
+                conn = (
+                    SimpleNamespace(GetSettings=device.ActiveConnection.Connection.GetSettings)
+                    if path == "/active/profile"
+                    else next(c for c in bus.nm["CONNECTIONS"] if c.object_path == path)
+                )
+                settings = conn.GetSettings()
+                wifi = settings.get("802-11-wireless", {})
+                if isinstance(wifi.get("ssid"), str):
+                    wifi["ssid"] = wifi["ssid"].encode()
+                return settings
+
+        return Proxy()
+
+
+def _decision(nm: dict[str, Any], device: _ScanDevice) -> list[str]:
+    nm["_palmimo_filter_next_candidates"] = True
+    return nm["get_candidate_connections"](device)
+
+
+def test_reconnect_patch_unmarked_calls_return_all_candidates_without_scanning(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    assert nm["get_candidate_connections"](device) == ["never", "new", "visible", "hidden", "stale"]
+    assert device.requests == 0
+    assert _decision(nm, device) == ["new", "visible", "hidden"]
+    assert nm["get_candidate_connections"](device) == ["never", "new", "visible", "hidden", "stale"]
+    assert device.requests == 1
+
+
+@pytest.mark.parametrize("event,startup,scans", [("pass", True, 1), ("pass", False, 0), ("timeout", False, 1)])
+def test_reconnect_patch_scans_only_the_candidate_call_in_a_hotspot_decision(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], fake_comitup: Path, event: str, startup: bool, scans: int
+) -> None:
+    nm, device = scanned_nm
+    states = _exec_module(fake_comitup / "states.py")
+    states.update(nm=nm["_module"], scan_device=device, startup=startup)
+    states["hotspot_" + event](7, 0)
+    assert device.requests == scans
+    assert states["candidate_results"] == [
+        ["new", "visible", "hidden"] if scans else ["never", "new", "visible", "hidden", "stale"]
+    ]
+    assert nm["get_candidate_connections"](device) == ["never", "new", "visible", "hidden", "stale"]
+    assert device.requests == scans
+
+
+def test_reconnect_patch_does_not_leak_a_scan_request_when_timeout_skips_candidates(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], fake_comitup: Path
+) -> None:
+    nm, device = scanned_nm
+    states = _exec_module(fake_comitup / "states.py")
+    states.update(nm=nm["_module"], scan_device=device, skip_candidates=True)
+    assert states["hotspot_timeout"](7, 0) is True
+    assert states["hotspot_timeout"](6, 0) is False
+    assert nm["get_candidate_connections"](device) == ["never", "new", "visible", "hidden", "stale"]
+    assert device.requests == 0
+
+
+def test_reconnect_patch_skips_scanning_when_no_saved_candidates(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"].clear()
+    assert _decision(nm, device) == []
+    assert device.requests == 0
+
+
+def test_reconnect_patch_keeps_aps_seen_in_the_request_second(scanned_nm: tuple[dict[str, Any], _ScanDevice]) -> None:
+    nm, device = scanned_nm
+    device.clock.now = 100.75
+    device.points = device.aps([("visible", 100)])
+    device.scan_results = [device.aps([("visible", 100)])]
+    assert _decision(nm, device) == ["visible", "hidden"]
+    assert device.requests == 1
+
+
+def test_reconnect_patch_drops_aps_seen_only_before_the_request_second(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    device.clock.now = 149631.9
+    device.last_scan = 149631804
+    device.points = device.aps([("visible", 149630), ("stale", 149629), ("never", -1)])
+    device.scan_results = [device.aps([("visible", 149631), ("stale", 149630), ("new", 149631), ("never", -1)])]
+    assert _decision(nm, device) == ["new", "visible", "hidden"]
+
+
+@pytest.mark.parametrize("retry_last_seen,expected", [(None, []), (100, []), (102, ["stale"])])
+def test_reconnect_patch_rechecks_an_empty_successful_scan_once(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], retry_last_seen: int | None, expected: list[str]
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0]]
+    device.delay = 1.1
+    device.scan_results = [[], device.aps([("stale", retry_last_seen)]) if retry_last_seen is not None else []]
+    assert _decision(nm, device) == expected
+    assert device.requests == 2
+
+
+@pytest.mark.parametrize("failure", ["timeout", "request", "points"])
+def test_reconnect_patch_preserves_the_first_result_when_the_retry_fails(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], failure: str
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0]]
+    device.scan_results = [[]]
+    request = device.RequestScan
+
+    def scan(options: dict[str, Any]) -> None:
+        if device.requests == 1:
+            device.failure = failure
+        request(options)
+
+    device.RequestScan = scan  # type: ignore[method-assign]
+    assert _decision(nm, device) == []
+    assert device.requests == 2
+
+
+def test_reconnect_patch_preserves_ap_data_delivered_at_the_deadline(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice],
+) -> None:
+    nm, device = scanned_nm
+    device.scan_results = [device.aps([("visible", 100)])]
+    device.ap_reply_overrun = 4.6
+    assert _decision(nm, device) == ["visible", "hidden"]
+
+
+@pytest.mark.parametrize("failure", ["request", "timeout", "points"])
+def test_reconnect_patch_preserves_all_candidates_on_scan_errors(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], failure: str
+) -> None:
+    nm, device = scanned_nm
+    device.failure = failure
+    started = device.clock.now
+    assert _decision(nm, device) == ["never", "new", "visible", "hidden", "stale"]
+    assert device.clock.now - started <= 5.0001
+    assert nm["get_candidate_connections"](device) == ["never", "new", "visible", "hidden", "stale"]
+
+
+@pytest.mark.parametrize(
+    "delay,snapshot_delay,requests,unfiltered",
+    [
+        (3.5, 0.0, 1, False),
+        (2.5, 0.0, 1, False),
+        (4.0, 1.0, 1, False),
+        (5.0, 0.0, 1, True),
+        (6.0, 0.0, 1, True),
+    ],
+)
+def test_reconnect_patch_bounds_both_scans_by_one_five_second_budget(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], delay: float, snapshot_delay: float, requests: int, unfiltered: bool
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0]]
+    device.scan_results = [[]]
+    device.delay = delay
+    device.snapshot_delay = snapshot_delay
+    started = device.clock.now
+    assert _decision(nm, device) == (["stale"] if unfiltered else [])
+    assert device.requests == requests
+    assert device.clock.now - started <= 5.0001
+
+
+@pytest.mark.parametrize("error_name", [None, "DBusException"])
+def test_reconnect_patch_reads_active_connection_without_exiting(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], error_name: str | None
+) -> None:
+    nm, device = scanned_nm
+
+    def unsafe_active(device: Any) -> None:
+        raise SystemExit(1)
+
+    nm["get_active_ssid"] = unsafe_active
+    device.active_ssid = "stale"
+    device.active_error = nm[error_name] if error_name else None
+    assert _decision(nm, device) == (
+        ["new", "visible", "hidden"] if error_name else ["new", "visible", "hidden", "stale"]
+    )
+
+
+@pytest.mark.parametrize("source", ["ap", "connection"])
+def test_reconnect_patch_skips_only_the_disappearing_dbus_item(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], source: str
+) -> None:
+    nm, device = scanned_nm
+    error = nm["DBusException"]
+
+    def vanished() -> Any:
+        raise error()
+
+    if source == "ap":
+
+        class DisappearingAP:
+            object_path = "/ap/gone"
+
+            @property
+            def LastSeen(self) -> int:  # noqa: N802
+                return vanished()
+
+        device.scan_results[0].append(DisappearingAP())
+        expected = ["new", "visible", "hidden"]
+    else:
+        conn = nm["CONNECTIONS"][1]
+        nm["get_connection_settings"](conn)
+        conn.GetSettings = vanished
+        expected = ["new", "visible"]
+    assert _decision(nm, device) == expected
+
+
+def test_reconnect_patch_refreshes_candidates_at_the_next_disconnect(
+    scanned_nm: tuple[dict[str, Any], _ScanDevice], fake_comitup: Path
+) -> None:
+    nm, device = scanned_nm
+    nm["CONNECTIONS"][:] = [nm["CONNECTIONS"][0], nm["CONNECTIONS"][2]]
+    device.scan_results = [device.aps([("stale", 100)]), device.aps([("visible", 101)])]
+    states = _exec_module(fake_comitup / "states.py")
+    states.update(nm=nm["_module"], scan_device=device)
+    states["hotspot_pass"](7, 0)
+    states.update(startup=True, state_id=8)
+    states["hotspot_pass"](8, 0)
+    assert states["candidate_results"] == [["stale"], ["visible"]]
+    assert device.requests == 2
+
+
+def test_reconnect_patch_ignores_residual_failure_after_startup_hotspot_pass(fake_comitup: Path) -> None:
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+    states = _exec_module(fake_comitup / "states.py")
+    matrix = states["state_matrix"]()
+    assert matrix.pass_fn(6, 0) is False
+    assert matrix.pass_fn(7, 0) is True
+    assert states["startup"] is False
+    assert matrix.fail_fn(7, 30) is True
+    assert states["transitions"] == [("CONNECTING", {})]
+    assert states["callbacks"] == [("HOTSPOT", "pass")]
+    states["state_id"] = 8
+    assert matrix.fail_fn(8, 30) is True
+    assert states["transitions"][-1] == ("HOTSPOT", {"force": True})
+    assert states["callbacks"] == [("HOTSPOT", "pass"), ("HOTSPOT", "fail")]
+
+
+@pytest.mark.parametrize(
+    "startup,mode,sid,expected,transitions",
+    [
+        (True, "single", 7, True, []),
+        (False, "single", 7, True, [("HOTSPOT", {"force": True})]),
+        (True, "multi", 7, True, [("HOTSPOT", {"force": True})]),
+        (True, "single", 6, False, []),
+        (False, "single", 6, False, []),
+    ],
+)
+def test_reconnect_patch_ignores_only_current_startup_single_hotspot_failure(
+    fake_comitup: Path, startup: bool, mode: str, sid: int, expected: bool, transitions: list[Any]
+) -> None:
+    assert _run_reconnect_patch(fake_comitup).returncode == 0
+    states = _exec_module(fake_comitup / "states.py")
+    states["startup"] = startup
+    states["modemgr"].get_mode = lambda: mode
+    assert states["state_matrix"]().fail_fn(sid, 30) is expected
+    assert states["transitions"] == transitions
+    assert states["callbacks"] == ([("HOTSPOT", "fail")] if transitions else [])
+
+
 def test_reconnect_patch_adds_dated_notices_and_is_a_noop_when_run_twice(
     fake_comitup: Path,
 ) -> None:
     first = _run_reconnect_patch(fake_comitup)
     assert first.returncode == 0, first.stderr
     today = datetime.date.today().isoformat()
-    for name in ("mdns.py", "nm.py"):
+    for name in ("mdns.py", "nm.py", "states.py"):
         text = (fake_comitup / name).read_text(encoding="utf-8")
         assert f"# Modified by Jizai Inc. on {today}:" in text
         assert "GPLv2 section 2(a) notice" in text
-    patched = {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")}
+    patched = {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py", "states.py")}
 
     second = _run_reconnect_patch(fake_comitup)
     assert second.returncode == 0, second.stderr
-    assert second.stdout.count("already patched") == 2
-    assert {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py")} == patched
+    assert second.stdout.count("already patched") == 4
+    assert {name: (fake_comitup / name).read_bytes() for name in ("mdns.py", "nm.py", "states.py")} == patched
 
 
-def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path) -> None:
-    (fake_comitup / "nm.py").write_text("def get_candidate_connections(device):\n    return []\n", encoding="utf-8")
+@pytest.mark.parametrize("name", ["nm.py", "states.py"])
+def test_reconnect_patch_fails_loud_when_an_anchor_is_missing(fake_comitup: Path, name: str) -> None:
+    (fake_comitup / name).write_text("", encoding="utf-8")
 
     result = _run_reconnect_patch(fake_comitup)
     assert result.returncode == 1

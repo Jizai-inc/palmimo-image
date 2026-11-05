@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Patch comitup's mdns.py and nm.py so a lost Wi-Fi network falls back to
-the setup AP, and saved networks are tried in priority order.
+"""Patch comitup's mdns.py, nm.py and states.py so a lost Wi-Fi network falls back to
+the setup AP, and saved networks are tried in priority order when visible or hidden.
 
 Shared between apply-pi.sh (piped over SSH as `sudo python3 -`) and the
 pi-gen custom stage (copied into the chroot), like patch_comitup_nm.py.
@@ -15,7 +15,7 @@ See doc/design.md ("comitup 設定") for the hardware findings.
 2. nm.py -- get_candidate_connections() returns saved networks in
    ListConnections order and ignores connection.autoconnect-priority.
 
-Both fixes are inserted just above the `__main__` block as wrappers that rebind the
+Fixes are appended (above `__main__` where present) as wrappers that rebind the
 module-level names, so comitup's own function bodies stay untouched and
 this script quotes nothing of them beyond the signature lines it checks
 for. Callers resolve these names at call time (states.py through the module
@@ -41,6 +41,8 @@ TODAY = datetime.date.today().isoformat()
 
 MDNS_MARKER = "keep a stale avahi entry group from blocking the AP fallback"
 NM_MARKER = "try candidates in autoconnect-priority order"
+SCAN_MARKER = "scan candidates only at hotspot connection decisions"
+STATES_MARKER = "ignore residual disconnects through the single-device startup hotspot pass"
 
 MAIN_GUARD = '\nif __name__ == "__main__":\n'
 MDNS_ANCHORS = (
@@ -118,6 +120,188 @@ def get_candidate_connections(device: nm.Device) -> List[str]:
 """
 
 
+SCAN_APPENDIX = f"""
+
+# Modified by Jizai Inc. on {TODAY}: {SCAN_MARKER}
+# (GPLv2 section 2(a) notice). Only HOTSPOT decisions consume a scan
+# request. Connecting callbacks need the full list to recognize a live
+# connection; their attempt order already comes from the state transition.
+import time as _palmimo_time
+
+_palmimo_ordered_candidates = get_candidate_connections
+_palmimo_filter_next_candidates = False
+_palmimo_nm_interface = "org.freedesktop.NetworkManager"
+_palmimo_properties = "org.freedesktop.DBus.Properties"
+
+
+def _palmimo_proxy(path):
+    return dbus.SystemBus().get_object(_palmimo_nm_interface, path, introspect=False)
+
+
+def _palmimo_call(proxy, interface, method, deadline, *args):
+    remaining = deadline - _palmimo_time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("candidate decision timed out")
+    # python-networkmanager's generated properties/methods do not accept
+    # timeout arguments. Bound the underlying D-Bus calls by the same budget.
+    return getattr(proxy, method)(*args, dbus_interface=interface, timeout=remaining)
+
+
+def _palmimo_ssid(value):
+    return bytes(value).decode("utf-8", "replace") if value is not None else None
+
+
+def _palmimo_visible_ssids(wireless, deadline, since):
+    paths = _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless",
+                          "GetAllAccessPoints", deadline)
+    visible = set()
+    for path in paths:
+        try:
+            props = _palmimo_call(_palmimo_proxy(path), _palmimo_properties, "GetAll",
+                                  deadline, _palmimo_nm_interface + ".AccessPoint")
+            seen = int(props["LastSeen"])
+            ssid = _palmimo_ssid(props["Ssid"])
+            if seen >= 0 and seen >= since and ssid is not None:
+                visible.add(ssid)
+        except dbus.exceptions.DBusException:
+            continue
+    return visible
+
+
+def _palmimo_scan(wireless, deadline):
+    previous_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
+                                  _palmimo_nm_interface + ".Device.Wireless", "LastScan")
+    # NM may have refreshed an AP earlier in this same second. LastSeen
+    # only has second precision, so retain that entire request second.
+    since = int(_palmimo_time.clock_gettime(_palmimo_time.CLOCK_BOOTTIME))
+    _palmimo_call(wireless, _palmimo_nm_interface + ".Device.Wireless", "RequestScan", deadline, dbus.Dictionary({{}}, signature="sv"))
+    while True:
+        last_scan = _palmimo_call(wireless, _palmimo_properties, "Get", deadline,
+                                 _palmimo_nm_interface + ".Device.Wireless", "LastScan")
+        if last_scan != previous_scan:
+            break
+        remaining = deadline - _palmimo_time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("candidate scan timed out")
+        _palmimo_time.sleep(min(0.1, remaining))
+    return _palmimo_visible_ssids(wireless, deadline, since)
+
+
+def _palmimo_active_ssid(device, deadline):
+    # comitup get_active_ssid can exit on ObjectVanished; a disappearing
+    # active connection must only remove this exemption from filtering.
+    try:
+        path = _palmimo_call(device, _palmimo_properties, "Get", deadline,
+                             _palmimo_nm_interface + ".Device", "ActiveConnection")
+        if not path or path == "/":
+            return None
+        connection = _palmimo_call(_palmimo_proxy(path), _palmimo_properties, "Get", deadline,
+                                   _palmimo_nm_interface + ".Connection.Active", "Connection")
+        settings = _palmimo_call(_palmimo_proxy(connection),
+                                 _palmimo_nm_interface + ".Settings.Connection", "GetSettings", deadline)
+        return _palmimo_ssid(settings.get("802-11-wireless", {{}}).get("ssid"))
+    except dbus.exceptions.DBusException:
+        return None
+
+
+def get_candidate_connections(device: nm.Device) -> List[str]:
+    global _palmimo_filter_next_candidates
+
+    requested = _palmimo_filter_next_candidates
+    _palmimo_filter_next_candidates = False
+    deadline = _palmimo_time.monotonic() + 5
+    candidates = _palmimo_ordered_candidates(device)
+    if not requested or not candidates:
+        return candidates
+    filtered = None
+    try:
+        wireless = _palmimo_proxy(device.object_path)
+        active = _palmimo_active_ssid(wireless, deadline)
+        hidden = set()
+        for conn in get_all_connections():
+            try:
+                settings = _palmimo_call(_palmimo_proxy(conn.object_path),
+                                         _palmimo_nm_interface + ".Settings.Connection", "GetSettings", deadline)
+                wifi = settings.get("802-11-wireless", {{}})
+                if wifi.get("mode") == "infrastructure" and wifi.get("hidden"):
+                    ssid = _palmimo_ssid(wifi.get("ssid"))
+                    if ssid is not None:
+                        hidden.add(ssid)
+            except dbus.exceptions.DBusException:
+                continue
+        started = _palmimo_time.monotonic()
+        visible = _palmimo_scan(wireless, deadline)
+        filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden or ssid == active]
+        duration = _palmimo_time.monotonic() - started
+        if not filtered and deadline - _palmimo_time.monotonic() > duration:
+            visible = _palmimo_scan(wireless, deadline)
+            filtered = [ssid for ssid in candidates if ssid in visible or ssid in hidden or ssid == active]
+        log.info("candidate scan: filtered %s to %s", candidates, filtered)
+        return filtered
+    except Exception as error:
+        if filtered is not None:
+            # A retry is optional evidence; its failure cannot invalidate
+            # the successful first scan and tear down an otherwise idle AP.
+            log.warning("candidate rescan: keeping %s (%s)", filtered, type(error).__name__)
+            return filtered
+        log.warning("candidate scan: unfiltered (%s)", type(error).__name__)
+        return candidates
+"""
+
+STATES_ANCHORS = (
+    "@timeout\n@state_callback\ndef hotspot_fail(reason: int) -> None:\n",
+    "@timeout\n@state_callback\ndef hotspot_pass(reason: int) -> None:\n",
+    "@timeout\ndef hotspot_timeout(dummy: int) -> None:\n",
+    "class state_matrix",
+)
+
+STATES_APPENDIX = f"""
+
+# Modified by Jizai Inc. on {TODAY}: {STATES_MARKER}
+# (GPLv2 section 2(a) notice). A single-device startup HOTSPOT has no AP
+# activation to fail. Its residual disconnects remain harmless through
+# hotspot_pass until state_id advances, regardless of GLib callback order.
+_palmimo_hotspot_fail = hotspot_fail
+_palmimo_hotspot_pass = hotspot_pass
+_palmimo_hotspot_timeout = hotspot_timeout
+_palmimo_startup_pass_id = None
+
+
+def hotspot_pass(id: int, reason: int) -> bool:
+    global _palmimo_startup_pass_id
+
+    if id == state_id and startup and modemgr.get_mode() == modemgr.SINGLE_MODE:
+        _palmimo_startup_pass_id = id
+    if id != state_id or not startup:
+        return _palmimo_hotspot_pass(id, reason)
+    nm._palmimo_filter_next_candidates = True
+    try:
+        return _palmimo_hotspot_pass(id, reason)
+    finally:
+        nm._palmimo_filter_next_candidates = False
+
+
+def hotspot_timeout(id: int, reason: int) -> bool:
+    if id != state_id:
+        return _palmimo_hotspot_timeout(id, reason)
+    nm._palmimo_filter_next_candidates = True
+    try:
+        return _palmimo_hotspot_timeout(id, reason)
+    finally:
+        # AP clients can make the original callback skip candidate lookup.
+        nm._palmimo_filter_next_candidates = False
+
+
+def hotspot_fail(id: int, reason: int) -> bool:
+    if id != state_id:
+        return False
+    if modemgr.get_mode() == modemgr.SINGLE_MODE and (startup or id == _palmimo_startup_pass_id):
+        log.warning("Ignoring residual disconnect in startup hotspot")
+        return True
+    return _palmimo_hotspot_fail(id, reason)
+"""
+
+
 def fail(path: str, anchor: str) -> None:
     sys.stderr.write(
         f"    FAIL: expected line {anchor.strip()!r} not found in {path}\n"
@@ -142,6 +326,8 @@ def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> No
         # Above the `__main__` block, so running the module as a CLI gets
         # the wrappers too.
         head, guard, tail = text.rpartition(MAIN_GUARD)
+        if not guard:
+            head, tail = text, ""
         f.write(head.rstrip("\n") + "\n" + appendix + "\n" + guard + tail)
     print(f"    patched: {name}")
 
@@ -149,6 +335,13 @@ def patch(name: str, marker: str, anchors: tuple[str, ...], appendix: str) -> No
 def main() -> None:
     patch("mdns.py", MDNS_MARKER, MDNS_ANCHORS, MDNS_APPENDIX)
     patch("nm.py", NM_MARKER, NM_ANCHORS, NM_APPENDIX)
+    patch(
+        "nm.py",
+        SCAN_MARKER,
+        ("_comitup_get_candidate_connections = get_candidate_connections\n", MAIN_GUARD),
+        SCAN_APPENDIX,
+    )
+    patch("states.py", STATES_MARKER, STATES_ANCHORS, STATES_APPENDIX)
 
 
 if __name__ == "__main__":

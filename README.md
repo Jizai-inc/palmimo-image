@@ -261,14 +261,23 @@ it searches for in `nm.py`, a de-minimis excerpt used only to locate the
 insertion point; the lines it inserts become part of the GPL-2.0 file once
 applied.
 
-### comitup's modified mdns.py and nm.py (GPLv2 §2(a))
+### comitup's modified mdns.py, nm.py and states.py (GPLv2 §2(a))
 
-`platform/lib/patch_comitup_reconnect.py` changes two more comitup 1.43 files under
+`platform/lib/patch_comitup_reconnect.py` changes comitup 1.43 files under
 the same rules. In `mdns.py` it rebuilds the avahi entry group after an
 avahi restart instead of raising, so a device whose Wi-Fi network
 disappears falls back to the setup AP; without it the AP does not come back
 until a reboot (verified on hardware). In `nm.py` it tries saved networks in
-`connection.autoconnect-priority` order. Each change carries its own dated
+`connection.autoconnect-priority` order, filtering to visible, hidden or currently connected
+networks only at hotspot connection decisions. APs seen in or after the request
+second count as visible. A shared five-second budget allows at most one retry
+when enough time remains. A successful empty scan keeps the setup AP even if
+the retry fails; errors before the first result keep all candidates.
+In `states.py` it ignores residual disconnect signals during the single-device
+startup hotspot through its pass callback so saved candidates can be tried
+before starting the AP.
+See [the design notes](doc/design.md#comitup-設定) for timings and fallback conditions.
+Each change carries its own dated
 `Modified by Jizai Inc.` notice, which is also that change's idempotency
 key, and a missing anchor fails loud. The modified files stay on the image
 as plain Python source. The patch script is Jizai Inc.'s own work under
