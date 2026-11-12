@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 11,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform with protected device identity relocation, app sandboxes, shared resources, and display firmware.",
@@ -142,6 +142,12 @@
         "owner": "root",
         "group": "root",
         "mode": "0644"
+      },
+      {
+        "path": "usr/local/libexec/palmimo/palmimo-display-assets",
+        "owner": "root",
+        "group": "root",
+        "mode": "0755"
       }
     ],
     "managed_directories": [
@@ -276,7 +282,8 @@
       "picotool",
       "python3-serial",
       "python3-zbar",
-      "libturbojpeg0"
+      "libturbojpeg0",
+      "python3-pil"
     ],
     "repair_root_owned": [
       ".",

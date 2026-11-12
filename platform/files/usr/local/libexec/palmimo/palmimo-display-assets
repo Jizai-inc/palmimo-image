@@ -1,0 +1,874 @@
+#!/usr/bin/python3
+"""Convert display assets and validate the untrusted binary format before installation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import struct
+import sys
+import tempfile
+import warnings
+import zlib
+from array import array
+from itertools import pairwise
+from pathlib import Path
+from typing import Any, Never
+
+
+SID = re.compile(r"[a-z0-9_]{1,32}", re.ASCII)
+VECTORS = ("s", "e", "ox", "oy", "ix", "iy")
+MAX_FILE = 6_275_072
+
+
+class AssetError(ValueError):
+    def __init__(self, code: str, path: str, message: str) -> None:
+        super().__init__(message)
+        self.errors = [{"code": code, "path": path, "message": message}]
+
+
+def require(condition: bool, code: str, path: str, message: str) -> None:
+    if not condition:
+        raise AssetError(code, path, message)
+
+
+def bounded(value: Any, low: float, high: float) -> bool:
+    return (
+        isinstance(value, (float, int))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and low <= value <= high
+    )
+
+
+def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
+    require(len(blob) >= 80, "truncated", "$", "SPAF header requires 80 bytes")
+    version, kind, total, crc = struct.unpack_from("<4I", blob, 4)
+    require(version == 1 and kind == 1, "version", "$", "Unsupported SPAF version or kind")
+    require(total == len(blob) and total <= 1_048_576 and total % 4 == 0, "length", "$", "Invalid SPAF length")
+    require(zlib.crc32(blob[:16] + b"\0" * 4 + blob[20:]) == crc, "crc", "$", "SPAF CRC mismatch")
+    fps, ip, op = struct.unpack_from("<3f", blob, 20)
+    require(
+        bounded(fps, 1, 240) and bounded(ip, -1e9, 1e9) and bounded(op, -1e9, 1e9) and ip < op,
+        "numeric",
+        "$",
+        "Invalid composition time",
+    )
+    tables: list[list[tuple[Any, ...]]] = []
+    cursor = 80
+    for i, (fmt, limit) in enumerate(
+        zip(("<6i4f", "<5I6if", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
+    ):
+        offset, count = struct.unpack_from("<2I", blob, 32 + i * 8)
+        stride = struct.calcsize(fmt)
+        require(count <= limit, "limit", "$", "SPAF table exceeds capacity")
+        require(offset == cursor and cursor + count * stride <= total, "offset", "$", "Noncanonical SPAF table")
+        tables.append([struct.unpack_from(fmt, blob, cursor + j * stride) for j in range(count)])
+        cursor += count * stride
+    payload_offset, payload_bytes = struct.unpack_from("<2I", blob, 72)
+    require(payload_offset == cursor and payload_bytes == total - cursor, "offset", "$", "Invalid payload span")
+    nodes, draws, tracks, keys, slots = tables
+
+    def payload(offset: int, size: int) -> bytes:
+        require(
+            offset % 4 == 0 and cursor <= offset <= total and 0 <= size <= total - offset,
+            "offset",
+            "$",
+            "Payload reference outside aligned payload",
+        )
+        return blob[offset : offset + size]
+
+    params: dict[str, dict[str, int]] = {}
+    for offset, size, dim in slots:
+        require(2 <= size <= 33 and 1 <= dim <= 144, "slot", "$", "Invalid slot size or dimension")
+        name_bytes = payload(offset, size)
+        require(name_bytes[-1:] == b"\0", "slot", "$", "Slot name needs a terminator")
+        name = name_bytes[:-1].decode("ascii", errors="replace")
+        require(SID.fullmatch(name) is not None and name not in params, "slot", "$", "Invalid or duplicate slot id")
+        params[name] = {"dim": dim}
+    values: list[list[tuple[float, ...]]] = []
+    key_cursor = 0
+    for dim, count, first, slot in tracks:
+        require(1 <= dim <= 144 and count > 0, "dimension", "$", "Invalid track dimension or key count")
+        require(first == key_cursor and first + count <= len(keys), "reference", "$", "Invalid key span")
+        require(-1 <= slot < len(slots), "reference", "$", "Invalid slot reference")
+        if slot >= 0:
+            require(slots[slot][2] == dim, "dimension", "$", "Slot/track dimensions differ")
+        key_cursor += count
+        previous = -math.inf
+        endpoints = []
+        for frame, hold, *offsets in keys[first : first + count]:
+            require(
+                bounded(frame, -1e9, 1e9) and frame > previous and hold in (0, 1),
+                "numeric",
+                "$",
+                "Invalid key time or hold",
+            )
+            previous = frame
+            for i, offset in enumerate(offsets):
+                vector = struct.unpack(f"<{dim}f", payload(offset, dim * 4))
+                low, high = (-1024, 1024) if i < 2 else (0, 1)
+                require(all(bounded(x, low, high) for x in vector), "numeric", "$", "Invalid key vector")
+                if i < 2:
+                    endpoints.append(vector)
+        values.append(endpoints)
+    require(key_cursor == len(keys), "reference", "$", "Unowned key records")
+
+    def role(index: int, dims: tuple[int, ...], low: float, high: float) -> None:
+        require(0 <= index < len(tracks), "reference", "$", "Invalid track reference")
+        require(tracks[index][0] in dims, "dimension", "$", "Track dimension does not match its role")
+        require(
+            all(bounded(v, low, high) for vector in values[index] for v in vector),
+            "numeric",
+            "$",
+            "Track values outside role range",
+        )
+
+    depths: list[int] = []
+    for i, (parent, p, a, s, r, o, nip, nop, start, stretch) in enumerate(nodes):
+        require(-1 <= parent < i, "reference", "$", "Parents must precede children")
+        depth = 1 if parent < 0 else depths[parent] + 1
+        require(depth <= 8, "depth", "$", "Node depth exceeds 8")
+        depths.append(depth)
+        require(
+            bounded(nip, -1e9, 1e9)
+            and bounded(nop, -1e9, 1e9)
+            and nip < nop
+            and bounded(start, -1e6, 1e6)
+            and bounded(stretch, struct.unpack("<f", struct.pack("<f", 0.001))[0], 1000),
+            "numeric",
+            "$",
+            "Invalid node time",
+        )
+        for index in (p, a):
+            role(index, (2, 3), -1024, 1024)
+        role(s, (2, 3), -200, 200)
+        role(r, (1,), -1024, 1024)
+        role(o, (1,), 0, 100)
+    for node, kind, vertices, closed, fill, g0, g1, g2, color, opacity, width, glow in draws:
+        require(node < len(nodes), "reference", "$", "Invalid draw node")
+        require(
+            kind in (0, 1, 2)
+            and closed in (0, 1)
+            and fill in (0, 1)
+            and (2 <= vertices <= 24 if kind == 2 else vertices == 0),
+            "topology",
+            "$",
+            "Invalid draw topology",
+        )
+        require(bounded(glow, 0, 128), "numeric", "$", "Invalid glow radius")
+        role(g0, (vertices * 6 if kind == 2 else 2,), -1024, 1024)
+        if kind == 2:
+            require(g1 == g2 == -1, "reference", "$", "Path has extraneous geometry references")
+        else:
+            role(g1, (2,), 0, 1024)
+            role(g2, (1,), 0, 1024)
+        role(color, (4,), 0, 1)
+        role(opacity, (1,), 0, 100)
+        role(width, (1,), 0, 128)
+    return params
+
+
+def image_warnings(kind: str, scans: list[int]) -> list[dict[str, str]]:
+    result = [
+        {
+            "code": "no_params",
+            "message": "Images have no parameters; replacing a standard vector asset disables its parameters.",
+        }
+    ]
+    if kind == "gif" and any(n > 2 for n in scans):
+        result.append(
+            {
+                "code": "slow_gif",
+                "message": "Frame intervals slower than about 30 fps may flicker during high contrast motion.",
+            }
+        )
+    return result
+
+
+def inspect_pimg(blob: bytes) -> tuple[str, list[dict[str, str]]]:
+    require(len(blob) >= 64, "truncated", "$", "PIMG header and entry require 64 bytes")
+    version, count, total, crc = struct.unpack_from("<HHII", blob, 4)
+    require(version == 2 and count == 1, "version", "$", "Expected PIMG v2 with one image")
+    require(total == len(blob) and total % 2 == 0, "length", "$", "Invalid PIMG length")
+    require(zlib.crc32(blob[32:]) == crc, "crc", "$", "PIMG CRC mismatch")
+    require(
+        blob[16:32] == b"\0" * 16 and blob[54:56] == b"\0" * 2 and blob[60:64] == b"\0" * 4,
+        "reserved",
+        "$",
+        "Nonzero reserved bytes",
+    )
+    name = blob[32:52]
+    require(re.fullmatch(rb"[A-Z0-9_]+\x00+", name) is not None, "name", "$", "Invalid PIMG name")
+    frames, _reserved, table = struct.unpack_from("<HHI", blob, 52)
+    require(1 <= frames <= 64, "limit", "$", "PIMG requires 1..64 frames")
+    require(table >= 64 and table % 2 == 0 and table + frames * 12 <= total, "offset", "$", "Invalid frame table span")
+    scans = []
+    for i in range(frames):
+        offset, words, duration = struct.unpack_from("<3I", blob, table + i * 12)
+        require(
+            offset % 2 == 0 and offset >= table + frames * 12 and words > 0 and offset + words * 2 <= total,
+            "offset",
+            "$",
+            "Invalid RLE span",
+        )
+        scans.append(duration)
+        cursor, end, pixels = offset, offset + words * 2, 0
+        while cursor < end:
+            control = struct.unpack_from("<H", blob, cursor)[0]
+            cursor += 2
+            length = (control & 0x7FFF) + 1
+            cursor += 2 if control & 0x8000 else length * 2
+            pixels += length
+            require(cursor <= end and pixels <= 480 * 480, "rle", "$", "RLE exceeds its stream or framebuffer")
+        require(pixels == 480 * 480, "rle", "$", "RLE does not fill the framebuffer")
+    require(
+        all(n >= 1 for n in scans) or (frames == 1 and scans == [0]),
+        "duration",
+        "$",
+        "Animation frames need positive refresh counts",
+    )
+    kind = "image" if scans == [0] else "gif"
+    return kind, image_warnings(kind, scans)
+
+
+def inspect(blob: bytes) -> dict[str, Any]:
+    require(len(blob) <= MAX_FILE, "limit", "$", "Asset exceeds display storage")
+    if blob[:4] == b"SPAF":
+        params = inspect_spaf(blob)
+        kind = "vector"
+        notices: list[dict[str, str]] = []
+    elif blob[:4] == b"PIMG":
+        kind, notices = inspect_pimg(blob)
+        params = {}
+    else:
+        raise AssetError("magic", "$", "Expected SPAF or PIMG")
+    return {
+        "ok": True,
+        "kind": kind,
+        "bytes": len(blob),
+        "crc32": f"{zlib.crc32(blob):08x}",
+        "params": params,
+        "warnings": notices,
+    }
+
+
+def rle_pack(pixels: list[int]) -> bytes:
+    words: list[int] = []
+    i = 0
+    while i < len(pixels):
+        end = i + 1
+        while end < len(pixels) and end - i < 32768 and pixels[end] == pixels[i]:
+            end += 1
+        if end - i >= 3:
+            words.extend((0x8000 | (end - i - 1), pixels[i]))
+            i = end
+        else:
+            start = i
+            i = end
+            while i < len(pixels) and i - start < 32768:
+                if i + 2 < len(pixels) and pixels[i] == pixels[i + 1] == pixels[i + 2]:
+                    break
+                i += 1
+            words.append(i - start - 1)
+            words.extend(pixels[start:i])
+    packed = array("H", words)
+    if sys.byteorder != "little":
+        packed.byteswap()
+    return packed.tobytes()
+
+
+def convert_image(source: Path) -> bytes:
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise AssetError("dependency", str(source), "Install the system python3-pil package") from exc
+    formats = {".gif": "GIF", ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG"}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                require(
+                    image.format == formats[source.suffix.lower()],
+                    "type",
+                    str(source),
+                    "Extension and image content differ",
+                )
+                gif = image.format == "GIF"
+                frames = getattr(image, "n_frames", 1) if gif else 1
+                require(1 <= frames <= 64, "limit", str(source), "At most 64 GIF frames are supported")
+                streams, durations = [], []
+                for i in range(frames):
+                    image.seek(i)
+                    duration = image.info.get("duration", 0) or 10
+                    durations.append(max(1, round(duration / 16.24)) if gif else 0)
+                    frame = ImageOps.exif_transpose(image).convert("RGBA")
+                    frame = ImageOps.contain(frame, (480, 480), Image.Resampling.LANCZOS)
+                    canvas = Image.new("RGBA", (480, 480), (0, 0, 0, 255))
+                    canvas.alpha_composite(frame, ((480 - frame.width) // 2, (480 - frame.height) // 2))
+                    rgb = canvas.convert("RGB").tobytes()
+                    pixels = []
+                    for y in range(480):
+                        for x in range(480):
+                            # Pixel centers define the panel's radius-240 visible circle.
+                            if (2 * x - 479) ** 2 + (2 * y - 479) ** 2 > 480**2:
+                                pixels.append(0)
+                            else:
+                                p = (y * 480 + x) * 3
+                                r, g, b = rgb[p : p + 3]
+                                pixels.append((r >> 3) << 11 | (g >> 2) << 5 | b >> 3)
+                    streams.append(rle_pack(pixels))
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning, EOFError, SyntaxError) as exc:
+        raise AssetError("image", str(source), str(exc)) from exc
+    data_offset = 64 + frames * 12
+    body = bytearray(struct.pack("<20sHHII", b"IMAGE", frames, 0, 64, 0))
+    for stream, duration in zip(streams, durations, strict=True):
+        body.extend(struct.pack("<3I", data_offset, len(stream) // 2, duration))
+        data_offset += len(stream)
+    body.extend(b"".join(streams))
+    return struct.pack("<4sHHII16x", b"PIMG", 2, 1, 32 + len(body), zlib.crc32(body)) + body
+
+
+class Lottie:
+    def __init__(self, doc: dict[str, Any]) -> None:
+        self.doc = doc
+        self.tracks: list[dict[str, Any]] = []
+        self.nodes: list[dict[str, Any]] = []
+        self.draws: list[dict[str, Any]] = []
+        self.errors: list[dict[str, str]] = []
+        self.notices: list[dict[str, str]] = []
+        self.slot_dims: dict[str, int] = {}
+
+    def error(self, layer: str, feature: str, path: str, code: str = "unsupported") -> None:
+        self.errors.append({"code": code, "path": path, "message": f"{layer}: {feature}"})
+
+    def check_errors(self) -> None:
+        if self.errors:
+            exc = AssetError("unsupported", "$", "Unsupported Lottie")
+            exc.errors = self.errors
+            raise exc
+
+    def resolve(self, prop: dict[str, Any]) -> dict[str, Any]:
+        sid = prop.get("sid")
+        default = self.doc.get("slots", {}).get(sid, {}).get("p", {}) if sid else {}
+        return {**prop, **default}
+
+    def scan(self, obj: Any, path: str, layer: str) -> None:
+        if isinstance(obj, list):
+            for i, item in enumerate(obj):
+                self.scan(item, f"{path}[{i}]", layer)
+            return
+        if not isinstance(obj, dict):
+            return
+        ty = obj.get("ty")
+        if isinstance(ty, str) and ty not in {"gr", "el", "rc", "sh", "fl", "st", "tr"}:
+            self.error(
+                layer,
+                {"tm": "trim path", "gf": "gradient fill", "gs": "gradient stroke", "rp": "repeater", "sr": "star"}.get(
+                    ty, f"shape {ty}"
+                ),
+                path + ".ty",
+            )
+        if isinstance(obj.get("x"), str):
+            self.error(layer, "expression", path + ".x")
+        for key in ("masksProperties", "ef", "tt", "td", "tm"):
+            if obj.get(key):
+                self.error(layer, key, path + "." + key)
+        if "parent" in obj:
+            self.error(layer, "parent layer", path + ".parent")
+        if ty == "tr" or path.endswith(".ks"):
+            for key in ("rx", "ry", "rz", "or"):
+                if key in obj:
+                    self.error(layer, "3D transform " + key, path + "." + key)
+        for key in ("ddd", "bm", "ao"):
+            if obj.get(key, 0):
+                self.error(layer, key, path + "." + key)
+        if isinstance(obj.get("d"), list) and obj["d"]:
+            self.error(layer, "stroke dashes", path + ".d")
+        if obj.get("hasMask") and not obj.get("masksProperties"):
+            self.error(layer, "mask", path + ".hasMask")
+        if obj.get("s") is True:
+            self.error(layer, "separated position", path + ".s")
+        for key in ("to", "ti"):
+            if key in obj:
+                self.error(layer, "spatial tangents", path + "." + key)
+        for key in ("sk", "sa"):
+            if key in obj and (not isinstance(obj[key], dict) or obj[key].get("a") or obj[key].get("k", 0)):
+                self.error(layer, "skew", path + "." + key)
+        if "sid" in obj and (not isinstance(obj["sid"], str) or SID.fullmatch(obj["sid"]) is None):
+            self.error(layer, "slot id must match [a-z0-9_]{1,32}", path + ".sid", "slot")
+        if ty == "fl" and obj.get("r", 1) != 1:
+            self.error(layer, "only nonzero fill is supported", path + ".r")
+        if ty == "st":
+            for key in ("lc", "lj"):
+                if obj.get(key, 1) != 2:
+                    self.error(layer, "only explicit round cap/join is supported", path + "." + key)
+        if ty in ("rc", "el") and obj.get("d", 1) != 1:
+            self.error(layer, "reverse primitive direction", path + ".d")
+        for key in ("shapes", "it"):
+            if key in obj:
+                items = obj[key]
+                require(
+                    isinstance(items, list) and all(isinstance(x, dict) for x in items),
+                    "input",
+                    path + "." + key,
+                    "Expected a shape list",
+                )
+                seen_paint = False
+                transforms = 0
+                for i, item in enumerate(items):
+                    item_path = f"{path}.{key}[{i}]"
+                    item_ty = item.get("ty")
+                    if item_ty in ("fl", "st"):
+                        seen_paint = True
+                    elif item_ty in ("gr", "el", "rc", "sh") and seen_paint:
+                        self.error(layer, "interleaved geometry/style ordering", item_path)
+                    if item_ty == "tr":
+                        transforms += 1
+                if transforms > 1:
+                    self.error(layer, "multiple group transforms", path + "." + key)
+        for key, value in obj.items():
+            self.scan(value, path + "." + key, layer)
+
+    def prop(
+        self,
+        prop: Any,
+        default: Any,
+        path: str,
+        layer: str,
+        dims: tuple[int, ...],
+        low: float,
+        high: float,
+        topology: tuple[int, bool] | None = None,
+    ) -> int:
+        p = self.resolve(prop if prop is not None else {"k": default})
+        sid = prop.get("sid", "") if prop is not None else ""
+        raw_keys = p["k"] if p.get("a") else [{"t": 0, "s": p["k"]}]
+        require(isinstance(raw_keys, list) and len(raw_keys) > 0, "input", path, "Expected nonempty key list")
+
+        def flatten(value: Any) -> list[Any]:
+            if topology is not None:
+                shape = value[0] if isinstance(value, list) and len(value) == 1 else value
+                vertices, closed = topology
+                require(isinstance(shape, dict) and shape.get("c") is closed, "topology", path, "Changing path closure")
+                vector: list[Any] = []
+                for key in ("v", "i", "o"):
+                    points = shape[key]
+                    require(
+                        isinstance(points, list)
+                        and len(points) == vertices
+                        and all(isinstance(x, list) and len(x) == 2 for x in points),
+                        "topology",
+                        path,
+                        "Changing path vertex/tangent count",
+                    )
+                    vector.extend(n for xy in points for n in xy)
+                return vector
+            return value if isinstance(value, list) else [value]
+
+        keys: list[dict[str, Any]] = []
+        previous = -math.inf
+        for i, key in enumerate(raw_keys):
+            value = key.get("s", raw_keys[i - 1].get("e", raw_keys[i - 1].get("s"))) if i else key["s"]
+            start = flatten(value)
+            end = flatten(key.get("e", raw_keys[i + 1].get("s", value))) if i + 1 < len(raw_keys) else start
+            dim = len(start)
+            if dim not in dims or len(end) != dim or any(not bounded(x, low, high) for x in [*start, *end]):
+                self.error(layer, f"property requires dimension {dims} and values {low}..{high}", path, "numeric")
+            t = key["t"]
+            valid_time = bounded(t, -1e9, 1e9)
+            frame = struct.unpack("<f", struct.pack("<f", t))[0] if valid_time else 0
+            if not valid_time or frame <= previous or key.get("h", 0) not in (0, 1):
+                self.error(layer, "finite increasing float32 key times and boolean hold required", path, "numeric")
+            previous = frame
+            record = {"t": t, "hold": key.get("h", 0), "s": start, "e": end}
+            for which, axis, fallback in (("o", "x", 0), ("o", "y", 0), ("i", "x", 1), ("i", "y", 1)):
+                handle = key.get(which, {}).get(axis, fallback)
+                handle = handle if isinstance(handle, list) else [handle]
+                handle = handle * dim if len(handle) == 1 else handle
+                if len(handle) != dim or any(not bounded(v, 0, 1) for v in handle):
+                    self.error(layer, "easing controls require dimension-matched values in 0..1", path, "numeric")
+                record[which + axis] = handle
+            keys.append(record)
+        dim = len(keys[0]["s"])
+        if any(len(k["s"]) != dim for k in keys):
+            self.error(layer, "changing property dimension", path, "topology")
+        if sid:
+            if sid in self.slot_dims and self.slot_dims[sid] != dim:
+                self.error(layer, "one slot id cannot have different dimensions", path, "slot")
+            self.slot_dims[sid] = dim
+        self.tracks.append({"slot": sid, "dim": dim, "keys": keys})
+        return len(self.tracks) - 1
+
+    def node(
+        self, tr: dict[str, Any], parent: int, ip: float, op: float, start: float, stretch: float, path: str, layer: str
+    ) -> int:
+        ids = []
+        for name, default, dims, low, high in (
+            ("p", [0, 0], (2, 3), -1024, 1024),
+            ("a", [0, 0], (2, 3), -1024, 1024),
+            ("s", [100, 100], (2, 3), -200, 200),
+            ("r", 0, (1,), -1024, 1024),
+            ("o", 100, (1,), 0, 100),
+        ):
+            ids.append(self.prop(tr.get(name), default, path + "." + name, layer, dims, low, high))
+        if not (
+            bounded(ip, -1e9, 1e9)
+            and bounded(op, -1e9, 1e9)
+            and ip < op
+            and bounded(start, -1e6, 1e6)
+            and bounded(stretch, 0.001, 1000)
+        ):
+            self.error(layer, "node time outside supported range", path, "numeric")
+        self.nodes.append({"parent": parent, "tracks": ids, "ip": ip, "op": op, "start": start, "stretch": stretch})
+        return len(self.nodes) - 1
+
+    def group(
+        self,
+        items: list[dict[str, Any]],
+        parent: int,
+        name: str,
+        glow: float,
+        path: str,
+        inherited: tuple[tuple[dict[str, Any], str], ...] = (),
+        depth: int = 2,
+    ) -> None:
+        if depth > 8:
+            self.error(name, "node depth exceeds 8", path, "depth")
+            return
+        transforms = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] == "tr"]
+        tr, tr_path = transforms[0] if transforms else ({}, path)
+        at = self.node(tr, parent, -1e9, 1e9, 0, 1, tr_path, name)
+        paints = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] in ("fl", "st") and not x.get("hd")]
+        strokes = [(x, p) for x, p in paints if x["ty"] == "st"]
+        if len(strokes) > 1:
+            resolved = [(self.resolve(x["w"]), self.resolve(x.get("o", {"k": 100})), x, p) for x, p in strokes]
+            if any(w.get("a") or o.get("a") for w, o, _, _ in resolved):
+                self.error(name, "animated stacked stroke width/opacity", path)
+            else:
+                ordered = sorted(resolved, key=lambda t: t[0]["k"])
+                if any(a[0]["k"] >= b[0]["k"] or a[1]["k"] <= b[1]["k"] for a, b in pairwise(ordered)):
+                    self.error(name, "stacked strokes require thin opaque core and wider faint halos", path)
+                else:
+                    # DIST retains the core and approximates all halos with one radius.
+                    glow = max(glow, (ordered[-1][0]["k"] - ordered[0][0]["k"]) / 2)
+                    paints = [(x, p) for x, p in paints if x["ty"] != "st" or x is ordered[0][2]]
+                    self.notices.append(
+                        {
+                            "code": "stacked_strokes",
+                            "message": f"{name}: halo colors and opacity approximated by DIST glow",
+                        }
+                    )
+            # Discarded halos still must obey the source property limits.
+            for stroke, stroke_path in strokes:
+                for key, default, dims, low, high in (
+                    ("w", 0, (1,), 0, 128),
+                    ("o", 100, (1,), 0, 100),
+                    ("c", [1, 1, 1, 1], (4,), 0, 1),
+                ):
+                    before = len(self.tracks)
+                    self.prop(stroke.get(key), default, stroke_path + "." + key, name, dims, low, high)
+                    del self.tracks[before:]
+        effective = (*inherited, *reversed(paints))
+        for i in reversed(range(len(items))):
+            item, item_path = items[i], f"{path}[{i}]"
+            ty = item["ty"]
+            if item.get("hd"):
+                continue
+            if ty == "gr":
+                self.group(
+                    item["it"], at, name + "/" + item.get("nm", "group"), glow, item_path + ".it", effective, depth + 1
+                )
+            elif ty in ("el", "rc", "sh"):
+                closed, vertices = True, 0
+                if ty == "sh":
+                    p = self.resolve(item["ks"])
+                    shape = p["k"][0]["s"][0] if p.get("a") else p["k"]
+                    closed, vertices = shape["c"], len(shape["v"])
+                    if type(closed) is not bool or not 2 <= vertices <= 24:
+                        self.error(
+                            name, "path requires 2..24 vertices and boolean closure", item_path + ".ks", "topology"
+                        )
+                        continue
+                    try:
+                        geo = [
+                            self.prop(
+                                item["ks"],
+                                None,
+                                item_path + ".ks",
+                                name,
+                                (vertices * 6,),
+                                -1024,
+                                1024,
+                                (vertices, closed),
+                            ),
+                            -1,
+                            -1,
+                        ]
+                    except AssetError as exc:
+                        for error in exc.errors:
+                            self.error(name, error["message"], error["path"], error["code"])
+                        continue
+                else:
+                    geo = [
+                        self.prop(item.get(k), default, item_path + "." + k, name, dims, low, 1024)
+                        for k, default, dims, low in (
+                            ("p", [0, 0], (2,), -1024),
+                            ("s", [0, 0], (2,), 0),
+                            ("r", 0, (1,), 0),
+                        )
+                    ]
+                for paint, paint_path in effective:
+                    fill = paint["ty"] == "fl"
+                    color = self.prop(paint.get("c"), [1, 1, 1, 1], paint_path + ".c", name, (4,), 0, 1)
+                    opacity = self.prop(paint.get("o"), 100, paint_path + ".o", name, (1,), 0, 100)
+                    width = self.prop(paint.get("w"), 0, paint_path + ".w", name, (1,), 0, 128)
+                    self.draws.append(
+                        {
+                            "node": at,
+                            "kind": {"el": 0, "rc": 1, "sh": 2}[ty],
+                            "geo": geo,
+                            "vertices": vertices,
+                            "closed": closed,
+                            "fill": fill,
+                            "color": color,
+                            "opacity": opacity,
+                            "width": width,
+                            "glow": 0 if fill else glow,
+                        }
+                    )
+
+    def convert(self) -> bytes:
+        doc = self.doc
+        require(isinstance(doc, dict), "input", "$", "Lottie must be an object")
+        if (doc.get("w"), doc.get("h")) != (480, 480) or doc.get("ddd"):
+            self.error("<composition>", "only 2D 480x480 compositions are supported", "$")
+        if doc.get("assets"):
+            self.error("<composition>", "assets/precompositions/images", "$.assets")
+        layers = doc.get("layers", [])
+        require(
+            isinstance(layers, list) and all(isinstance(x, dict) for x in layers),
+            "input",
+            "$.layers",
+            "Expected layer objects",
+        )
+        for i, layer in enumerate(layers):
+            name, path = layer.get("nm", str(i)), f"$.layers[{i}]"
+            if layer.get("ty") != 4:
+                self.error(name, f"layer type {layer.get('ty')} (only shape layers)", path + ".ty")
+            self.scan(layer, path, name)
+        slots = doc.get("slots", {})
+        require(isinstance(slots, dict), "input", "$.slots", "Expected slots object")
+        for sid, default in slots.items():
+            if SID.fullmatch(sid) is None:
+                self.error("<composition>", "invalid slot id", "$.slots." + sid, "slot")
+            self.scan(default, "$.slots." + sid, "<composition>")
+        if not (
+            bounded(doc.get("fr"), 1, 240)
+            and bounded(doc.get("ip"), -1e9, 1e9)
+            and bounded(doc.get("op"), -1e9, 1e9)
+            and doc["ip"] < doc["op"]
+        ):
+            self.error("<composition>", "invalid fps or composition time", "$", "numeric")
+        for i in reversed(range(len(layers))):
+            layer, path = layers[i], f"$.layers[{i}]"
+            if layer.get("hd"):
+                continue
+            try:
+                self.compile_layer(layer, path, i)
+            except AssetError as exc:
+                for error in exc.errors:
+                    self.error(str(layer.get("nm", i)), error["message"], error["path"], error["code"])
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
+                self.error(str(layer.get("nm", i)), str(exc), path, "input")
+        for label, count, limit in (
+            ("nodes", len(self.nodes), 32),
+            ("draws", len(self.draws), 8),
+            ("tracks", len(self.tracks), 256),
+            ("keys", sum(len(t["keys"]) for t in self.tracks), 2048),
+            ("slots", len(self.slot_dims), 32),
+        ):
+            if count > limit:
+                self.error("<composition>", f"{label} exceeds {limit}", "$", "limit")
+        self.check_errors()
+        return self.serialize()
+
+    def compile_layer(self, layer: dict[str, Any], path: str, index: int) -> None:
+        if layer.get("ty") != 4:
+            return
+        name = layer.get("nm", str(index))
+        glow = 0.0
+        tags = re.findall(r"#glow\([^)]*\)", name)
+        if "#glow" in name:
+            if len(tags) != 1:
+                self.error(name, "expected one #glow(r=<px>) tag", path + ".nm", "numeric")
+            else:
+                match = re.fullmatch(r"#glow\(r=([+-]?(?:\d+(?:\.\d*)?|\.\d+))\)", tags[0])
+                if not match or not bounded(float(match[1]), 0, 128):
+                    self.error(name, "glow requires radius 0..128", path + ".nm", "numeric")
+                else:
+                    glow = float(match[1])
+        at = self.node(
+            layer.get("ks", {}),
+            -1,
+            layer["ip"],
+            layer["op"],
+            layer.get("st", 0),
+            layer.get("sr", 1),
+            path + ".ks",
+            name,
+        )
+        self.group(layer["shapes"], at, name, glow, path + ".shapes")
+
+    def serialize(self) -> bytes:
+        keys = [k for t in self.tracks for k in t["keys"]]
+        slots = list(dict.fromkeys((t["slot"], t["dim"]) for t in self.tracks if t["slot"]))
+        offsets = [80]
+        counts = (len(self.nodes), len(self.draws), len(self.tracks), len(keys), len(slots))
+        for count, stride in zip(counts, (40, 48, 16, 32, 12), strict=True):
+            offsets.append(offsets[-1] + count * stride)
+        payload, shared = bytearray(), {}
+
+        def put(value: bytes) -> int:
+            if value not in shared:
+                shared[value] = offsets[-1] + len(payload)
+                payload.extend(value)
+                payload.extend(b"\0" * (-len(payload) % 4))
+            return shared[value]
+
+        key_records = []
+        for key in keys:
+            vectors = [put(struct.pack(f"<{len(key[v])}f", *key[v])) for v in VECTORS]
+            key_records.append(struct.pack("<fI6I", key["t"], key["hold"], *vectors))
+        slot_records = [
+            struct.pack("<3I", put(name.encode("ascii") + b"\0"), len(name) + 1, dim) for name, dim in slots
+        ]
+        body = bytearray()
+        for n in self.nodes:
+            body.extend(struct.pack("<6i4f", n["parent"], *n["tracks"], n["ip"], n["op"], n["start"], n["stretch"]))
+        for d in self.draws:
+            body.extend(
+                struct.pack(
+                    "<5I6if",
+                    d["node"],
+                    d["kind"],
+                    d["vertices"],
+                    d["closed"],
+                    d["fill"],
+                    *d["geo"],
+                    d["color"],
+                    d["opacity"],
+                    d["width"],
+                    d["glow"],
+                )
+            )
+        first = 0
+        for t in self.tracks:
+            slot = slots.index((t["slot"], t["dim"])) if t["slot"] else -1
+            body.extend(struct.pack("<3Ii", t["dim"], len(t["keys"]), first, slot))
+            first += len(t["keys"])
+        body.extend(b"".join(key_records))
+        body.extend(b"".join(slot_records))
+        body.extend(payload)
+        fields = [x for pair in zip(offsets[:5], counts, strict=True) for x in pair]
+        header = struct.pack(
+            "<4s4I3f12I",
+            b"SPAF",
+            1,
+            1,
+            80 + len(body),
+            0,
+            self.doc["fr"],
+            self.doc["ip"],
+            self.doc["op"],
+            *fields,
+            offsets[-1],
+            len(payload),
+        )
+        blob = bytearray(header + body)
+        struct.pack_into("<I", blob, 16, zlib.crc32(blob))
+        return bytes(blob)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        raise AssetError("arguments", "$", message)
+
+
+def main() -> int:
+    parser = Parser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
+    convert = commands.add_parser("convert")
+    convert.add_argument("input", type=Path)
+    convert.add_argument("-o", "--output", required=True, type=Path)
+    convert.add_argument("--json", action="store_true")
+    check = commands.add_parser("inspect")
+    check.add_argument("input", type=Path)
+    check.add_argument("--json", action="store_true")
+    json_output = "--json" in sys.argv[1:]
+    notices = []
+    try:
+        args = parser.parse_args()
+        if args.command == "inspect":
+            with args.input.open("rb") as stream:
+                blob = stream.read(MAX_FILE + 1)
+        elif args.input.suffix.lower() == ".json":
+            with args.input.open("rb") as stream:
+                raw = stream.read(16 * 1024 * 1024 + 1)
+            require(len(raw) <= 16 * 1024 * 1024, "limit", str(args.input), "Lottie source exceeds 16 MiB")
+            compiler = Lottie(json.loads(raw))
+            blob = compiler.convert()
+            notices = compiler.notices
+        else:
+            require(
+                args.input.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif"),
+                "type",
+                str(args.input),
+                "Expected JSON, PNG, JPEG or GIF",
+            )
+            blob = convert_image(args.input)
+        result = inspect(blob)
+        result["warnings"].extend(notices)
+        if args.command == "convert":
+            # Validation precedes replacement so rejected input cannot destroy a previous asset.
+            temp: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=args.output.parent, delete=False) as stream:
+                    temp = stream.name
+                    stream.write(blob)
+                os.replace(temp, args.output)
+            finally:
+                if temp and os.path.exists(temp):
+                    os.unlink(temp)
+    except AssetError as exc:
+        result = {"ok": False, "errors": exc.errors}
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+        OverflowError,
+        RecursionError,
+        struct.error,
+        Warning,
+    ) as exc:
+        result = {"ok": False, "errors": [{"code": "input", "path": "$", "message": str(exc)}]}
+    if json_output:
+        print(json.dumps(result, ensure_ascii=True))
+    elif result["ok"]:
+        print(f"{result['kind']}: {result['bytes']} bytes, crc32={result['crc32']}")
+        for notice in result["warnings"]:
+            print(f"warning {notice['code']}: {notice['message']}", file=sys.stderr)
+    else:
+        for error in result["errors"]:
+            print(f"{error['code']}: {error['path']}: {error['message']}", file=sys.stderr)
+    return 0 if result["ok"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

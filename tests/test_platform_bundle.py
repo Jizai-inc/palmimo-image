@@ -1737,3 +1737,13 @@ def test_install_records_offline_identity_relocate_unit_enable(installed_root: t
     unit_link.parent.mkdir(parents=True, exist_ok=True)
     unit_link.symlink_to("/not-required-by-verification")
     assert _run_install(root, accounts, None, command="verify").returncode == 0
+
+
+def test_install_ships_display_asset_converter_and_decoder(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    converter = root / "usr/local/libexec/palmimo/palmimo-display-assets"
+    assert (
+        converter.read_bytes() == (PLATFORM_DIR / "files/usr/local/libexec/palmimo/palmimo-display-assets").read_bytes()
+    )
+    assert stat.S_IMODE(converter.stat().st_mode) == 0o755
+    assert "apt-get install python3-pil" in accounts.read_text().splitlines()
