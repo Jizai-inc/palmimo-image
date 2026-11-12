@@ -1,0 +1,110 @@
+# 顔ディスプレイ v2 のアセットと FW の切り替え
+
+顔ディスプレイの FW v2 は表情や絵文字を持たず、platform が書き込んだ**アセット**（画像・GIF・Lottie から変換したベクタ）を再生する。
+この文書は platform 側の約束を定める: アセットの形式と変換器、標準アセットの置き場、Flash への同期、旧 FW（v1）と新 FW（v2）の切り替え。
+FW とホストの通信は palmimo-devkit の `doc/reference/display-protocol.md`、アプリのアセットの宣言は同じく `doc/reference/app-manifest.md`
+（schema 2）が正本で、ここでは繰り返さない。
+
+## 置き場
+
+| パス | 中身 | 所有 |
+|---|---|---|
+| `/usr/local/lib/palmimo/display-firmware/firmware.json` | 同梱する 2 つの FW の宣言（下記） | root、bundle の `owns.files` |
+| `/usr/local/lib/palmimo/display-firmware/face_serial_v1.bin.gz`・`face_serial_v2.bin.gz` | FW バイナリ | 同上 |
+| `/var/lib/palmimo/display-firmware/desired.json` | いま望む FW（下記） | root。書くのは `desire` サブコマンドだけ |
+| `/var/lib/palmimo/display-firmware/state.json` | 既存の書き込みの記録。連続失敗は**望む FW ごと**に数える | root |
+| `/usr/local/share/palmimo/display-assets/catalog.json` | 標準アセットの目録（形はアプリの `/run/palmimo/apps/<id>/assets.json` と同じ。id・説明・タグ・パラメータの説明・翻訳。種類と次元は書かない＝実機の `ASSET INFO` が正本） | root、読み取り専用。アプリから読める |
+| `/usr/local/share/palmimo/display-assets/<name>.bin` | 標準アセットの既定の中身（変換済み） | 同上 |
+| `/var/lib/palmimo/display-assets/overrides/<name>.bin` | 利用者が Portal で差し替えた中身（変換済み） | root。書くのは `assets override` だけ。アプリには見せない |
+| `/var/lib/palmimo/display-assets/apps/<app ID>/<name>.bin` | アプリのアセット（インストール時に変換） | root。書くのは `assets install` だけ |
+| `/var/lib/palmimo/display-assets/launch.json` | アプリの起動の通し番号（古い順に外すため。時計は使わない） | root。`assets sync --app` が増やす |
+
+## 変換器
+
+`/usr/local/libexec/palmimo/palmimo-display-assets`（Python、root でなくても動く）。
+
+```
+palmimo-display-assets convert <入力> -o <出力.bin> [--json]
+palmimo-display-assets inspect <.bin> [--json]
+```
+
+- 入力の種類は拡張子と中身で決める: Lottie（`.json`）→ SPAF、GIF → PIMG（複数フレーム）、PNG・JPEG → PIMG（1 フレーム）。
+- 失敗は終了 2 と、`--json` なら `{"ok": false, "errors": [{"code", "path", "message"}]}`。Lottie の非対応機能は、レイヤー名・機能・JSON のパスを
+  **すべて**並べる（最初の 1 つで止めない）。
+- 成功は `{"ok": true, "kind": "vector|image|gif", "bytes": <int>, "crc32": "<8 桁の小文字 16 進>", "params": {"<sid>": {"dim": <int>}}, "warnings": [{"code", "message"}]}`。
+  `inspect` は同じ形で既存の `.bin` を検査する（`convert` の結果を root 側で検査し直すのに使う）。
+- 警告: GIF のコマ間隔が約 30fps より遅い（高コントラストの動きがちらついて見える）、画像を標準アセットの差し替えに使う
+  （パラメータが効かなくなる）など。Portal が利用者に見せる。
+- GIF のコマ間隔はパネルの書き換え（16.24ms）の整数倍に丸めて PIMG に書く。
+
+## 形式
+
+全形式とも little-endian。先頭 4 バイトの識別子で種類を見分ける。FW は受け取ったときと起動時に全体を検査し、通らないものは使わない。
+
+### PIMG v2（画像・GIF）
+
+v1（旧 FW の画像スロットの形式）との違いはフレームごとの表示時間だけ。GIF はフレームごとに遅延が違ってよいので、v2 はそれをフレーム表に持つ。
+
+| 位置 | 中身 |
+|---|---|
+| ヘッダ 32B | `"PIMG"`、u16 版 = 2、u16 画像数（= 1）、u32 全長、u32 CRC-32（[32, 全長)）、予約 16B |
+| エントリ 32B | 名前 20B（NUL 埋め、`[A-Z0-9_]`）、u16 フレーム数（≤ 64）、u16 予約（0）、u32 フレーム表の位置、予約 4B |
+| フレーム表 12B × フレーム数 | u32 RLE の位置（2B 境界）、u32 語数、u32 このフレームの表示時間（ms。静止画は 0。変換器がパネルの書き換え 16.24ms の整数倍に丸めた値） |
+| RLE | 480×480 RGB565 の語単位 RLE。制御語 `c` が `c & 0x8000` なら続く 1 語を `(c & 0x7fff) + 1` 回、それ以外は続く `c + 1` 語をそのまま |
+
+### SPAF v1（Lottie から変換したベクタ）
+
+固定長のレコードとオフセットで並べ、FW は Flash 上のまま（RAM に写さずに）読む。
+
+| 位置 | 中身 |
+|---|---|
+| ヘッダ 80B | `"SPAF"`、u32 版 = 1、u32 種類 = 1、u32 全長（4 の倍数、≤ 1MiB）、u32 CRC-32（16〜19 を 0 とみなした全体）、f32 fps・ip・op、Node・Draw・Track・Key・Slot・payload の位置と件数（各 u32 2 つ） |
+| Node 40B | i32 親（-1 = 根）、i32 Track×5（位置・基準点・拡大・回転・不透明度）、f32 ip・op・開始・伸縮 |
+| Draw 48B | u32 Node・種類（0 楕円・1 角丸四角・2 パス）・頂点数・閉じているか・塗りか、i32 形の Track×3・色・不透明度・線幅、f32 発光 |
+| Track 16B | u32 次元・Key 数・先頭の Key、i32 Slot（-1 = 無し） |
+| Key 32B | f32 フレーム、u32 hold、u32 ベクトルの位置×6（値・終わり・ease の out x/y・in x/y） |
+| Slot 12B | u32 名前の位置・名前の長さ（NUL 込み）・次元 |
+| payload | float32 のベクトルと slot 名。同じベクトルは共有してよい |
+
+上限: 8 Draw、32 Node、深さ 8、1 パス 24 頂点、256 Track、2048 Key、32 Slot、1 Track 144 成分。値の範囲（拡大 ±200%、位置 ±1024、線幅・発光 0〜128、
+色 0〜1、不透明度 0〜100、ease の制御点 0〜1）を超えるものは変換器が断る。発光はレイヤー名の `#glow(r=<px>)` で指定する。
+
+## FW の切り替え
+
+`firmware.json`（schema 2。`schema` キーが無い平らな `{"version", "sha256"}` は schema 1 ＝今の道具の形で、新しい道具は schema 1 を受け付けない。
+新しい道具と schema 2 の宣言は同じ bundle で入れ替わるので、混在は起きない）:
+
+```json
+{"schema": 2, "firmware": {"1": {"version": "0.1.3+…", "sha256": "…", "file": "face_serial_v1.bin.gz"},
+                           "2": {"version": "2.0.0+…", "sha256": "…", "file": "face_serial_v2.bin.gz"}}}
+```
+
+`desired.json`: `{"schema": 1, "protocol": 1 | 2, "by": "app-start" | "initial"}`（時刻は持たない。RTC が無いため）。
+
+- 起動時の unit・platform 更新の段・手動の書き直しは、どれも `desired.json` の `protocol` の FW へ収束させる（`ensure`）。
+- **`desired.json` が無いとき、`ensure` は何も書かない**（`{"result": "undesired"}`）。起動時の unit は Portal より前に動き、autostart の情報を持たないため。
+- `desired.json` を書くのは `palmimo-display-firmware desire <1|2> --by <app-start|initial>`（root、Portal が sudo で呼ぶ）だけ。
+  Portal は起動時と platform 更新の段で、`desired.json` が無ければ初期値（autostart のアプリがあればその要求、無ければ 2）を `--by initial` で書いてから `ensure` する。
+  アプリの起動の判定では `--by app-start` で書く。`desire` の出力は `{"protocol": <int>, "changed": <bool>}`。
+- アプリの要求は、アプリの環境にインストールされた palmimo-sdk の `display_firmware.json` をファイルとして読む（devkit の
+  `display-protocol.md`「Firmware selection」）。
+
+## アセットの同期
+
+`palmimo-display-firmware assets sync [--app <app ID>] --json`（root）。
+
+- `display.lock` を**待たずに**取る。取れなければ `{"result": "busy"}`。FW が v2 でなければ `{"result": "skipped"}`。
+- Flash に置くべき集合 = 標準アセット（差し替えがあればその中身）＋ `--app` のアプリのアセット。`ASSET LIST` の CRC と比べて、違う・無いものを `ASSET PUT`。
+- 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。
+- 結果は `{"result": "synced" | "busy" | "skipped" | "failed", "put": [...], "deleted": [...], "reason"}`。経過は標準エラーに 1 行ずつ。
+- 容量の条件は Portal がインストールと差し替えの時点で検査する。同期の道具は条件が守られている前提で動き、守られていなければ `failed`。
+  - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
+  - 1 アセットの占める量: `ceil(bytes / 4096) × 4096`。
+  - 条件: 標準アセット（差し替えを反映）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
+
+### 保存の入口（root、Portal が sudo で呼ぶ）
+
+- `assets install <app ID> <name> <変換済みの .bin>`: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
+- `assets uninstall <app ID>`: そのアプリの分を消す（Flash の分は次に場所が要るときに外れる）。
+- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準アセットの差し替え／標準に戻す。
+- どれも出力は `{"ok": <bool>, "reason"}`。Portal は変換器を user で動かし、結果の `.bin` をこれらに渡す。
