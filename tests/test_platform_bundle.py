@@ -1747,3 +1747,18 @@ def test_install_ships_display_asset_converter_and_decoder(installed_root: tuple
     )
     assert stat.S_IMODE(converter.stat().st_mode) == 0o755
     assert "apt-get install python3-pil" in accounts.read_text().splitlines()
+
+
+def test_install_ships_protocol_named_firmware_and_retires_legacy_file(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, uv_source = installed_root
+    directory = root / "usr/local/lib/palmimo/display-firmware"
+    manifest = json.loads((directory / "firmware.json").read_text())
+    assert manifest["schema"] == 2
+    assert manifest["firmware"]["1"]["file"] == "face_serial_v1.bin.gz"
+    assert (directory / "face_serial_v1.bin.gz").read_bytes() == (
+        PLATFORM_DIR / "files/usr/local/lib/palmimo/display-firmware/face_serial_v1.bin.gz"
+    ).read_bytes()
+    legacy = directory / "face_serial.bin.gz"
+    legacy.write_bytes(b"old bundle leftover")
+    assert _run_install(root, accounts, uv_source).returncode == 0
+    assert not legacy.exists()

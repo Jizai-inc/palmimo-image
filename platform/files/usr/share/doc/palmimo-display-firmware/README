@@ -1,7 +1,7 @@
 Palmimo face display firmware
 
-This bundle includes firmware 0.1.3+6ea1932, declared by firmware.json in
-/usr/local/lib/palmimo/display-firmware alongside face_serial.bin.gz.
+This bundle declares its available protocols in firmware.json under
+/usr/local/lib/palmimo/display-firmware. Protocol 1 uses face_serial_v1.bin.gz.
 The updater installs it during boot and Portal platform updates.
 
 Firmware binaries installed in /usr/local/lib/palmimo/display-firmware are

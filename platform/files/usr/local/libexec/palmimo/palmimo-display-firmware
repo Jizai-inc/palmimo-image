@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jizai Inc.
-"""Ensure the attached face runs the root-installed firmware declaration."""
+"""Persist the desired face firmware and converge the attached display to it."""
 
 import argparse
 import contextlib
@@ -53,23 +53,52 @@ class Paths:
         state: Path = Path("/var/lib/palmimo/display-firmware/state.json"),
         work: Path = Path("/run/palmimo-display-firmware"),
         locks: Path = Path("/run/lock/palmimo"),
+        desired: Path | None = None,
     ) -> None:
         self.firmware, self.state, self.work, self.locks = firmware, state, work, locks
+        self.desired = desired if desired is not None else state.with_name("desired.json")
 
 
-def declaration(path: Path) -> dict[str, str]:
+def declaration(path: Path) -> dict[str, dict[str, str]]:
     try:
         data = json.loads(path.read_text())
-        if not isinstance(data, dict):
-            raise ValueError("expected an object")
-        version, digest = data.get("version"), data.get("sha256")
-        if not isinstance(version, str) or not version or re.search(r"[\s\x00-\x1f]", version):
-            raise ValueError("invalid version")
-        if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
-            raise ValueError("invalid sha256")
-        return {"version": version, "sha256": digest.lower()}
+        if not isinstance(data, dict) or type(data.get("schema")) is not int or data["schema"] != 2:
+            raise ValueError("expected firmware schema 2")
+        entries = data.get("firmware")
+        if not isinstance(entries, dict) or not entries or not entries.keys() <= {"1", "2"}:
+            raise ValueError("expected firmware entries for protocol 1 or 2")
+        result = {}
+        for protocol, entry in entries.items():
+            if not isinstance(entry, dict):
+                raise ValueError(f"invalid protocol {protocol} entry")
+            version, digest, filename = (entry.get(key) for key in ("version", "sha256", "file"))
+            if not isinstance(version, str) or not version or re.search(r"[\s\x00-\x1f]", version):
+                raise ValueError("invalid version")
+            if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+                raise ValueError("invalid sha256")
+            if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.bin\.gz", filename):
+                raise ValueError("invalid firmware filename")
+            result[protocol] = {"version": version, "sha256": digest.lower(), "file": filename}
+        return result
     except (OSError, ValueError) as error:
         raise ConfigurationError(f"Invalid firmware declaration: {error}") from error
+
+
+def desired_declaration(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+        if (
+            not isinstance(data, dict)
+            or type(data.get("schema")) is not int
+            or data["schema"] != 1
+            or type(data.get("protocol")) is not int
+            or data["protocol"] not in (1, 2)
+            or data.get("by") not in ("app-start", "initial")
+        ):
+            raise ValueError("expected desired schema 1, protocol 1 or 2 and by app-start or initial")
+        return data
+    except (OSError, ValueError) as error:
+        raise ConfigurationError(f"Invalid desired firmware: {error}") from error
 
 
 def unpack(source: Path, target: Path, limit: int) -> bytes:
@@ -86,20 +115,20 @@ def unpack(source: Path, target: Path, limit: int) -> bytes:
 
 def validate_artifact(directory: Path, forbidden: list[str]) -> None:
     """Validate release integrity and check any privately supplied forbidden terms."""
-    declared = declaration(directory / "firmware.json")
-    with tempfile.TemporaryDirectory() as temporary:
-        data = unpack(directory / "face_serial.bin.gz", Path(temporary) / "firmware.bin", 10 * 1024 * 1024)
-    if len(data) >= 10 * 1024 * 1024:
-        raise FirmwareError("Release firmware must be smaller than 10 MiB")
-    if hashlib.sha256(data).hexdigest() != declared["sha256"]:
-        raise FirmwareError("Firmware checksum mismatch")
-    version = declared["version"].encode()
-    if any(marker in version or marker in data for marker in (b".dirty", b"+unknown")):
-        raise FirmwareError("Unreleased firmware version")
-    if version + b"\0" not in data:
-        raise FirmwareError("Declared version is missing from firmware")
-    if any(term.encode().lower() in data.lower() for term in forbidden if term):
-        raise FirmwareError("Firmware contains a forbidden source identifier")
+    for declared in declaration(directory / "firmware.json").values():
+        with tempfile.TemporaryDirectory() as temporary:
+            data = unpack(directory / declared["file"], Path(temporary) / "firmware.bin", 10 * 1024 * 1024)
+        if len(data) >= 10 * 1024 * 1024:
+            raise FirmwareError("Release firmware must be smaller than 10 MiB")
+        if hashlib.sha256(data).hexdigest() != declared["sha256"]:
+            raise FirmwareError("Firmware checksum mismatch")
+        version = declared["version"].encode()
+        if any(marker in version or marker in data for marker in (b".dirty", b"+unknown")):
+            raise FirmwareError("Unreleased firmware version")
+        if version + b"\0" not in data:
+            raise FirmwareError("Declared version is missing from firmware")
+        if any(term.encode().lower() in data.lower() for term in forbidden if term):
+            raise FirmwareError("Firmware contains a forbidden source identifier")
 
 
 @contextlib.contextmanager
@@ -280,6 +309,32 @@ def chip_id(value: str) -> str:
     return value
 
 
+def save_json(path: Path, data: dict[str, Any]) -> None:
+    missing = []
+    directory = path.parent
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            json.dump(data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        for directory in [path.parent, *(parent.parent for parent in missing)]:
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name)
+
+
 class Updater:
     def __init__(self, paths: Paths, hardware: Hardware) -> None:
         self.paths, self.hw = paths, hardware
@@ -298,29 +353,7 @@ class Updater:
         return min(maximum, remaining)
 
     def save(self, state: dict[str, Any]) -> None:
-        missing = []
-        directory = self.paths.state.parent
-        while not directory.exists():
-            missing.append(directory)
-            directory = directory.parent
-        self.paths.state.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-        fd, name = tempfile.mkstemp(dir=self.paths.state.parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o644)
-                json.dump(state, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, self.paths.state)
-            for directory in [self.paths.state.parent, *(parent.parent for parent in missing)]:
-                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(name)
+        save_json(self.paths.state, state)
 
     def pico(self, *args: str, maximum: float = UPDATE_BUDGET_SECONDS) -> str:
         if self.target_chip is None:
@@ -445,7 +478,7 @@ class Updater:
         if boot and state["consecutive_failures"] >= 3:
             print("WARNING: automatic display writes suspended after repeated failures", file=sys.stderr)
             return "skipped"
-        data = unpack(self.paths.firmware / "face_serial.bin.gz", self.paths.work / "firmware.bin", 12 * 1024 * 1024)
+        data = unpack(self.paths.firmware / declared["file"], self.paths.work / "firmware.bin", 12 * 1024 * 1024)
         if len(data) <= 4096:
             raise FirmwareError("Firmware must contain a header and body")
         if hashlib.sha256(data).hexdigest() != declared["sha256"]:
@@ -504,7 +537,13 @@ class Updater:
         self.in_bootsel = False
         state: dict[str, Any] = {}
         result, reason, code = "failed", None, 1
+        if not self.paths.desired.exists():
+            return {"result": "undesired"}, 0
         if not (self.paths.firmware / "firmware.json").exists():
+            try:
+                desired_declaration(self.paths.desired)
+            except ConfigurationError as error:
+                return {"result": "failed", "before": None, "after": None, "reason": str(error)}, 78
             return {"result": "undeclared", "before": None, "after": None, "reason": None}, 0
         try:
             with reservation(self.paths.locks):
@@ -521,9 +560,19 @@ class Updater:
                 try:
                     if boot and adopt_bootsel:
                         raise ConfigurationError("BOOTSEL adoption is a manual operation; omit --boot")
-                    declared = declaration(self.paths.firmware / "firmware.json")
-                    if not boot or state.get("declared_version") != declared["version"]:
+                    desired = desired_declaration(self.paths.desired)
+                    protocol = desired["protocol"]
+                    entries = declaration(self.paths.firmware / "firmware.json")
+                    if str(protocol) not in entries:
+                        raise ConfigurationError(f"Firmware protocol {protocol} is not declared in this bundle")
+                    declared = entries[str(protocol)]
+                    if (
+                        not boot
+                        or state.get("desired_protocol") != protocol
+                        or state.get("declared_version") != declared["version"]
+                    ):
                         state["consecutive_failures"] = 0
+                    state["desired_protocol"] = protocol
                     state["declared_version"] = declared["version"]
                     if self.paths.work.is_symlink():
                         raise FirmwareError("Working directory must not be a symlink")
@@ -561,6 +610,23 @@ class Updater:
         print(json.dumps(response), file=sys.stderr, flush=True)
         return response, code
 
+    def desire(self, protocol: int, by: str) -> tuple[dict[str, Any], int]:
+        target = {"schema": 1, "protocol": protocol, "by": by}
+        try:
+            with reservation(self.paths.locks):
+                try:
+                    previous = desired_declaration(self.paths.desired)
+                except ConfigurationError:
+                    previous = None
+                changed = previous != target
+                if changed:
+                    save_json(self.paths.desired, target)
+            return {"protocol": protocol, "changed": changed}, 0
+        except BusyError as error:
+            return {"result": "busy", "reason": str(error)}, 75
+        except (OSError, FirmwareError) as error:
+            return {"result": "failed", "reason": str(error)}, 1
+
 
 def terminate(signum: int, frame: Any) -> None:
     raise DeadlineError("Firmware update deadline exceeded (SIGTERM)")
@@ -568,18 +634,25 @@ def terminate(signum: int, frame: Any) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["ensure"])
-    mode = parser.add_mutually_exclusive_group()
+    commands = parser.add_subparsers(dest="command", required=True)
+    ensure = commands.add_parser("ensure")
+    mode = ensure.add_mutually_exclusive_group()
     mode.add_argument("--boot", action="store_true")
     mode.add_argument("--adopt-bootsel", action="store_true")
-    parser.add_argument("--json", action="store_true")
+    ensure.add_argument("--json", action="store_true")
+    desire = commands.add_parser("desire")
+    desire.add_argument("protocol", type=int, choices=(1, 2))
+    desire.add_argument("--by", required=True, choices=("app-start", "initial"))
+    desire.add_argument("--json", action="store_true")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, terminate)
     if os.geteuid() != 0:
         result, code = {"result": "failed", "before": None, "after": None, "reason": "Root is required"}, 1
+    elif args.command == "desire":
+        result, code = Updater(Paths(), Hardware()).desire(args.protocol, args.by)
     else:
         result, code = Updater(Paths(), Hardware()).ensure(args.boot, args.adopt_bootsel)
-    if args.json:
+    if args.json or args.command == "desire":
         print(json.dumps(result), flush=True)
     return code
 

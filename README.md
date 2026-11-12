@@ -374,18 +374,36 @@ build recipe.
 ### Face display firmware
 
 Platform installs enable `palmimo-display-firmware.service`, which runs before
-Portal and retries interrupted face updates. The platform bundle includes
-firmware `0.1.3+6ea1932` in `/usr/local/lib/palmimo/display-firmware/` for boot
-and Portal platform updates. Firmware binaries are Jizai's copyrighted work,
+Portal and retries interrupted face updates. It converges to the protocol in
+`/var/lib/palmimo/display-firmware/desired.json`. When that file is absent,
+`ensure` returns `{"result":"undesired"}` without contacting the display or
+writing state; Portal selects the initial protocol before calling `ensure`.
+The bundle's schema 2 `firmware.json` declares each available protocol's version,
+SHA-256 and filename under `/usr/local/lib/palmimo/display-firmware/`.
+Protocol 1 currently ships as `face_serial_v1.bin.gz`; protocol 2 is not yet
+bundled. Selecting an unavailable protocol makes `ensure` fail with a
+configuration error before accessing hardware. Firmware binaries are Jizai's copyrighted work,
 excluded from this repository's license; third-party notices and full license
 texts are in `/usr/share/doc/palmimo-display-firmware/`.
 
+Select the desired protocol without flashing it with
+`sudo /usr/local/libexec/palmimo/palmimo-display-firmware desire 1 --by initial`.
+Use `--by app-start` for app-driven selection. This root-only command atomically
+saves `{"schema":1,"protocol":1,"by":"initial"}` and reports
+`{"protocol":1,"changed":true}`; repeating the same protocol and reason reports
+`changed:false`. Both selection and flashing take the display reservation
+without waiting, so selection cannot race an ongoing write.
+
 Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --json` to
-retry manually. The tool reserves the display, checks its identity and version,
+apply the desired protocol or retry manually. The tool reserves the display, checks its identity and version,
 and restores an awake face after an update. Progress goes to stderr/journal;
 the final JSON and `/var/lib/palmimo/display-firmware/state.json` report results.
 Boot retries wait up to 15 seconds for USB and stop writing after three consecutive
-write failures for the same declared version. A manual retry resets that count.
+write failures for the same desired protocol and declared version. Changing the
+protocol or its declared version starts a new count; changing the other
+protocol's declaration or only the selection reason does not. A manual retry
+resets that count. VERSION matching is exact, and switching in either direction
+uses the same identity and write-order checks.
 
 If a previously seen face disappears, check USB and use its BOOT + RST buttons
 to enter BOOTSEL for recovery. If the SD card was reimaged and the face is already

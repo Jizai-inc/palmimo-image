@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform with protected device identity relocation, app sandboxes, shared resources, and display firmware.",
@@ -84,7 +84,7 @@
         "mode": "0644"
       },
       {
-        "path": "usr/local/lib/palmimo/display-firmware/face_serial.bin.gz",
+        "path": "usr/local/lib/palmimo/display-firmware/face_serial_v1.bin.gz",
         "owner": "root",
         "group": "root",
         "mode": "0644"
@@ -312,6 +312,8 @@
       "ca-certificates": "20250419+deb13u1"
     }
   },
-  "retired": [],
+  "retired": [
+    "usr/local/lib/palmimo/display-firmware/face_serial.bin.gz"
+  ],
   "reflash_required": false
 }
