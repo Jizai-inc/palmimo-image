@@ -1754,20 +1754,35 @@ def test_install_ships_protocol_named_firmware_and_retires_legacy_file(installed
     directory = root / "usr/local/lib/palmimo/display-firmware"
     manifest = json.loads((directory / "firmware.json").read_text())
     assert manifest["schema"] == 2
-    assert manifest["firmware"]["1"]["file"] == "face_serial_v1.bin.gz"
-    assert (directory / "face_serial_v1.bin.gz").read_bytes() == (
-        PLATFORM_DIR / "files/usr/local/lib/palmimo/display-firmware/face_serial_v1.bin.gz"
-    ).read_bytes()
+    assert set(manifest["firmware"]) == {"1", "2"}
+    for protocol in (1, 2):
+        filename = f"face_serial_v{protocol}.bin.gz"
+        assert manifest["firmware"][str(protocol)]["file"] == filename
+        assert (directory / filename).read_bytes() == (
+            PLATFORM_DIR / "files/usr/local/lib/palmimo/display-firmware" / filename
+        ).read_bytes()
+    documentation = PLATFORM_DIR / "files/usr/share/doc/palmimo-display-firmware"
+    for source in documentation.rglob("*"):
+        if source.is_file():
+            assert (
+                root / "usr/share/doc/palmimo-display-firmware" / source.relative_to(documentation)
+            ).read_bytes() == source.read_bytes()
     legacy = directory / "face_serial.bin.gz"
     legacy.write_bytes(b"old bundle leftover")
     assert _run_install(root, accounts, uv_source).returncode == 0
     assert not legacy.exists()
 
 
-def test_install_ships_asset_store_and_empty_standard_catalog(installed_root: tuple[Path, Path, Path]) -> None:
+def test_install_ships_asset_store_and_standard_assets(installed_root: tuple[Path, Path, Path]) -> None:
     root, _accounts, _uv = installed_root
     catalog = root / "usr/local/share/palmimo/display-assets/catalog.json"
-    assert json.loads(catalog.read_text()) == {"schema": 1, "assets": []}
+    source = PLATFORM_DIR / "files/usr/local/share/palmimo/display-assets"
+    assert json.loads(catalog.read_text()) == json.loads((source / "catalog.json").read_text())
+    assert len(json.loads(catalog.read_text())["assets"]) == 14
+    expected = {path.name: path.read_bytes() for path in source.glob("*.bin")}
+    actual = {path.name: path.read_bytes() for path in catalog.parent.glob("*.bin")}
+    assert len(actual) == 17
+    assert actual == expected
     assert stat.S_IMODE(catalog.stat().st_mode) == 0o644
     helper = root / "usr/local/libexec/palmimo/display_assets.py"
     assert helper.read_bytes() == (PLATFORM_DIR / "files/usr/local/libexec/palmimo/display_assets.py").read_bytes()

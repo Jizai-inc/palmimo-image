@@ -6,6 +6,12 @@
       "sha256": "d08ee4aef0633f2640850eab1cd0f3f7cdec207353218b8cff5726baa3507a91",
       "source_commit": "36006f53ed9af6ebfa319c089e130bffac1a0a1d",
       "file": "face_serial_v1.bin.gz"
+    },
+    "2": {
+      "version": "2.0.0+83bccbc",
+      "sha256": "2c5dc057a95f536720f126227f03261b2cbc7d2d18e403bd0297696a33fc1371",
+      "source_commit": "83bccbc2904388bd361c24e42da8ec7ec10f4c0a",
+      "file": "face_serial_v2.bin.gz"
     }
   }
 }

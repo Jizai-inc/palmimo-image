@@ -331,7 +331,8 @@ The Jizai Inc. portions of the bundled face display firmware binaries (v1 and
 v2) and standard display assets are licensed under Apache-2.0, like this
 repository (see [LICENSE](LICENSE)). Third-party notices and full license texts
 remain in `files/boot/firmware/licenses/display-firmware/` and are also shipped
-under `/usr/share/doc/palmimo-display-firmware/`.
+under `/usr/share/doc/palmimo-display-firmware/`; `NOTICE-v2` records the
+v2 source notices and linked SDK/USB components.
 
 ### `/boot/firmware/licenses/`
 
@@ -388,8 +389,7 @@ Portal and retries interrupted face updates. It converges to the protocol in
 writing state; Portal selects the initial protocol before calling `ensure`.
 The bundle's schema 2 `firmware.json` declares each available protocol's version,
 SHA-256 and filename under `/usr/local/lib/palmimo/display-firmware/`.
-Protocol 1 currently ships as `face_serial_v1.bin.gz`; protocol 2 is not yet
-bundled. Selecting an unavailable protocol makes `ensure` fail with a
+Protocols 1 and 2 ship as `face_serial_v1.bin.gz` and `face_serial_v2.bin.gz`. Selecting an unavailable protocol makes `ensure` fail with a
 configuration error before accessing hardware. Licensing and third-party notices
 are described in [Licenses and corresponding source](#licenses-and-corresponding-source).
 
@@ -445,4 +445,8 @@ needed. Standard assets are kept. Local overrides, app assets and the launch
 sequence are private to root under `/var/lib/palmimo/display-assets/`.
 
 The standard catalog is `/usr/local/share/palmimo/display-assets/catalog.json`.
-It is currently empty; standard expression assets will be bundled separately.
+It provides 14 expression assets as SDK/agent vocabulary. The standard set is
+all 17 `.bin` files in that directory, including `system.idle`, `system.sleep`
+and `system.wake`, which are kept out of the vocabulary. Sync, overrides and
+capacity accounting use all 17. Portal enumerates the public `.bin` files for
+its replacement screen; no additional inventory CLI is needed.

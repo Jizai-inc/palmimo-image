@@ -13,11 +13,21 @@ FW とホストの通信は palmimo-devkit の `doc/reference/display-protocol.m
 | `/usr/local/lib/palmimo/display-firmware/face_serial_v1.bin.gz`・`face_serial_v2.bin.gz` | FW バイナリ | 同上 |
 | `/var/lib/palmimo/display-firmware/desired.json` | いま望む FW（下記） | root。書くのは `desire` サブコマンドだけ |
 | `/var/lib/palmimo/display-firmware/state.json` | 既存の書き込みの記録。連続失敗は**望む FW ごと**に数える | root |
-| `/usr/local/share/palmimo/display-assets/catalog.json` | 標準アセットの目録（形はアプリの `/run/palmimo/apps/<id>/assets.json` と同じ。id・説明・タグ・パラメータの説明・翻訳。種類と次元は書かない＝実機の `ASSET INFO` が正本） | root、読み取り専用。アプリから読める |
-| `/usr/local/share/palmimo/display-assets/<name>.bin` | 標準アセットの既定の中身（変換済み） | 同上 |
+| `/usr/local/share/palmimo/display-assets/catalog.json` | SDK・エージェント向けの語彙の目録。標準集合の部分集合（形はアプリの `/run/palmimo/apps/<id>/assets.json` と同じ。id・説明・タグ・パラメータの説明・翻訳。種類と次元は書かない＝実機の `ASSET INFO` が正本） | root、読み取り専用。アプリから読める |
+| `/usr/local/share/palmimo/display-assets/<name>.bin` | 標準集合の既定の中身（変換済み。system.* を含む） | 同上 |
 | `/var/lib/palmimo/display-assets/overrides/<name>.bin` | 利用者が Portal で差し替えた中身（変換済み） | root。書くのは `assets override` だけ。アプリには見せない |
 | `/var/lib/palmimo/display-assets/apps/<app ID>/<name>.bin` | アプリのアセット（インストール時に変換） | root。書くのは `assets install` だけ |
 | `/var/lib/palmimo/display-assets/launch.json` | アプリの起動の通し番号（古い順に外すため。時計は使わない） | root。`assets sync --app` が増やす |
+
+**標準集合**は `/usr/local/share/palmimo/display-assets/` 直下の有効な `<name>.bin` の通常ファイル全体。
+名前は `^[a-z0-9][a-z0-9._-]{0,39}$`（`include` は不可）、id は `palmimo/<name>`。
+symlink を辿らず、規則外の名前や通常ファイルでない `.bin` が混ざっていれば検査を失敗させる。
+`catalog.json` はこの集合のうち SDK・エージェントに提供する語彙・説明・翻訳の一覧で、全体の在庫には使わない。
+現在は標準集合が表情 14 種と `system.idle`・`system.sleep`・`system.wake` の **17 個**、目録は表情の **14 個**。
+system.* は標準集合に含め、目録には入れない。
+
+Portal は差し替え画面の名前をこの公開ディレクトリの `.bin` 一覧から直接列挙する（symlink は辿らず上と同じ規則で検査。新しい一覧 CLI は設けない）。
+system.* の表示名は Portal 側で持つ。SDK の語彙は引き続き catalog.json を読む。
 
 ## 変換器
 
@@ -95,17 +105,24 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
 `palmimo-display-firmware assets sync [--app <app ID>] --json`（root）。
 
 - `display.lock` を**待たずに**取る。取れなければ `{"result": "busy"}`。FW が v2 でなければ `{"result": "skipped"}`。
-- Flash に置くべき集合 = 標準アセット（差し替えがあればその中身）＋ `--app` のアプリのアセット。`ASSET LIST` の CRC と比べて、違う・無いものを `ASSET PUT`。
+- Flash に置くべき集合 = 上記の標準集合全体（目録に無い system.* も含み、差し替えがあればその中身）＋ `--app` のアプリのアセット。`ASSET LIST` の CRC と比べて、違う・無いものを `ASSET PUT`。
 - 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。
 - 結果は `{"result": "synced" | "busy" | "skipped" | "failed", "put": [...], "deleted": [...], "reason"}`。経過は標準エラーに 1 行ずつ。
 - 容量の条件は Portal がインストールと差し替えの時点で検査する。同期の道具は条件が守られている前提で動き、守られていなければ `failed`。
   - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
   - 1 アセットの占める量: `ceil(bytes / 4096) × 4096`。
-  - 条件: 標準アセット（差し替えを反映）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
+  - 条件: 標準集合全体（system.* と差し替えを反映し、目録の件数で絞らない）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
 
 ### 保存の入口（root、Portal が sudo で呼ぶ）
 
 - `assets install <app ID> <name> <変換済みの .bin>`: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
 - `assets uninstall <app ID>`: そのアプリの分を消す（Flash の分は次に場所が要るときに外れる）。
-- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準アセットの差し替え／標準に戻す。
+- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。
 - どれも出力は `{"ok": <bool>, "reason"}`。Portal は変換器を user で動かし、結果の `.bin` をこれらに渡す。
+
+### 同梱物の受け入れ契約
+
+- 全標準 `.bin` と catalog.json が bundle の owns.files に含まれ、すべての `.bin` が変換器の inspect を通る。
+- 目録の id は重複せず、標準集合の id の部分集合。目録と全 `.bin` の完全一致は要求しない。
+- 現在の同梱物は 17 個の `.bin` と 14 件の目録で、差は `palmimo/system.idle`・`palmimo/system.sleep`・`palmimo/system.wake` の 3 個だけ。
+- 同期・override・容量計算は同じ標準集合全体を使う。目録に無い system.* も同期でき、差し替えと reset ができ、容量の合計に入ることを試験する。

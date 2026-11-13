@@ -167,13 +167,19 @@ class Store:
         ):
             raise StoreError("Invalid standard catalog")
         names = []
+        with directory(self.catalog) as parent:
+            for filename in sorted(os.listdir(parent)):
+                if filename.endswith(".bin"):
+                    regular_at(parent, filename)
+                    names.append(asset_name(filename[:-4]))
+        seen: set[str] = set()
         for entry in catalog["assets"]:
             if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
                 raise StoreError("Invalid standard catalog entry")
             owner, name = identifier(entry["id"])
-            if owner != "palmimo" or name in names:
-                raise StoreError("Duplicate or nonstandard catalog ID")
-            names.append(name)
+            if owner != "palmimo" or name in seen or name not in names:
+                raise StoreError("Catalog IDs must be a unique subset of the standard assets")
+            seen.add(name)
         return names
 
     def install(self, app: str, name: str, source: Path) -> None:

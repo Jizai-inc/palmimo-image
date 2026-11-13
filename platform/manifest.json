@@ -160,6 +160,120 @@
         "owner": "root",
         "group": "root",
         "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/angry.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/batsu.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/curious.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/excited.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/groove.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/happy.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/love.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/maru.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/sad.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/shy.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/sleeping.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/sleepy.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/surprise.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/system.idle.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/system.sleep.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/system.wake.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/thinking.bin",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/lib/palmimo/display-firmware/face_serial_v2.bin.gz",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/share/doc/palmimo-display-firmware/NOTICE-v2",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
       }
     ],
     "managed_directories": [

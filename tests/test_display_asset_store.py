@@ -641,3 +641,91 @@ def test_uninstall_does_not_follow_symlinks(
     code, _result = invoke(monkeypatch, capsys, "uninstall", "zip.demo")
     assert (code == 0) is (link_type == "entry")
     assert target.read_bytes() == asset()
+
+
+def test_sync_includes_system_assets_absent_from_vocabulary(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, flash = rig
+    for name in ("system.idle", "system.sleep", "system.wake"):
+        (paths.catalog / f"{name}.bin").write_bytes(asset())
+    code, result = invoke(monkeypatch, capsys, "sync", "--json")
+    assert code == 0, result
+    assert set(result["put"]) == {"palmimo/system.idle", "palmimo/system.sleep", "palmimo/system.wake"}
+    assert set(flash.assets) == set(result["put"])
+    assert json.loads((paths.catalog / "catalog.json").read_text())["assets"] == []
+
+
+@pytest.mark.parametrize("name", ["system.idle", "system.sleep", "system.wake"])
+def test_override_accepts_system_assets_absent_from_vocabulary(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    paths, flash = rig
+    (paths.catalog / f"{name}.bin").write_bytes(asset())
+    source = tmp_path / "source.bin"
+    source.write_bytes(asset(value=1))
+    assert invoke(monkeypatch, capsys, "override", name, str(source))[0] == 0
+    assert invoke(monkeypatch, capsys, "sync", "--json")[0] == 0
+    assert flash.assets[f"palmimo/{name}"][1] == source.read_bytes()
+    assert invoke(monkeypatch, capsys, "override", "--reset", name)[0] == 0
+    assert invoke(monkeypatch, capsys, "sync", "--json")[0] == 0
+    assert flash.assets[f"palmimo/{name}"][1] == asset()
+
+
+def test_capacity_includes_system_assets_absent_from_vocabulary(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, flash = rig
+    (paths.catalog / "system.idle.bin").write_bytes(asset(256))
+    for i in range(4):
+        installed(paths, "zip.demo", f"part{i}", asset(256))
+    code, result = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
+    assert code != 0 and result["result"] == "failed"
+    assert not flash.puts and not flash.deleted
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "invalid-name"])
+def test_sync_rejects_invalid_standard_directory_entries(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    paths, flash = rig
+    target = paths.catalog / "system.idle.bin"
+    if kind == "symlink":
+        source = tmp_path / "outside.bin"
+        source.write_bytes(asset())
+        target.symlink_to(source)
+    elif kind == "directory":
+        target.mkdir()
+    else:
+        (paths.catalog / "Upper.bin").write_bytes(asset())
+    assert invoke(monkeypatch, capsys, "sync", "--json")[1]["result"] == "failed"
+    assert not flash.puts and not flash.deleted
+
+
+def test_shipped_standard_assets_sync_as_complete_set(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, flash = rig
+    paths.catalog = SCRIPT.parents[2] / "share/palmimo/display-assets"
+    catalog = json.loads((paths.catalog / "catalog.json").read_text())
+    vocabulary = {entry["id"] for entry in catalog["assets"]}
+    files = {f"palmimo/{path.stem}": path for path in paths.catalog.glob("*.bin")}
+    systems = {"palmimo/system.idle", "palmimo/system.sleep", "palmimo/system.wake"}
+    assert len(catalog["assets"]) == len(vocabulary) == 14
+    assert len(files) == 17
+    assert set(files) - vocabulary == systems
+    assert vocabulary <= files.keys()
+    code, result = invoke(monkeypatch, capsys, "sync", "--json")
+    assert code == 0, result
+    assert set(result["put"]) == set(files)
+    assert {name: data for name, (_, data) in flash.assets.items()} == {
+        name: path.read_bytes() for name, path in files.items()
+    }

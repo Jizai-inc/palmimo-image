@@ -1,0 +1,163 @@
+Jizai Inc. face display firmware v2
+Version: 2.0.0+83bccbc
+Source commit: 83bccbc2904388bd361c24e42da8ec7ec10f4c0a
+
+The Jizai Inc. portions are licensed under Apache-2.0; see NOTICE for the
+shared licensing statement. Third-party source notices for v2 follow below.
+Source paths in that notice refer to the firmware source tree.
+
+This binary also links Raspberry Pi Pico SDK (BSD-3-Clause) and TinyUSB (MIT).
+Their full license texts are licenses/BSD-3-Clause.txt and
+licenses/MIT-TinyUSB.txt. The STMicroelectronics font license is also reproduced
+in licenses/BSD-3-Clause-STMicroelectronics.txt.
+
+palmimo devkit — RP2350 face display firmware
+=============================================
+
+This firmware bundles third-party source. Every bundled file is covered by one
+of the licenses below; full texts are in `licenses/`.
+
+  Waveshare RP2350-Touch-LCD-2.8C demo   Apache-2.0    licenses/Apache-2.0.txt
+  Raspberry Pi board header              BSD-3-Clause  licenses/BSD-3-Clause.txt
+  Raspberry Pi pico_sdk_import.cmake     BSD-3-Clause  full text inside the file
+  STMicroelectronics bitmap fonts        BSD-3-Clause  full text in each file
+
+
+1. Waveshare board support code (Apache-2.0)
+--------------------------------------------
+
+    vendor/bsp/    — ST7701S RGB driver, PIO scan-out, I2C, GT911 touch,
+                     QMI8658 IMU, PCF85063 RTC, battery, buzzer, DMA IRQ helpers
+    vendor/GUI/    — GUI_Paint drawing helpers
+    vendor/CMakeLists.txt, vendor/*/CMakeLists.txt
+                   — build glue. Waveshare's, Apache-2.0 like the rest of the
+                     demo, and carrying no per-file license header. This
+                     includes vendor/Fonts/CMakeLists.txt: the fonts beside it
+                     are STMicroelectronics' (§2), but the build glue is not.
+
+Upstream: https://github.com/waveshareteam/RP2350-Touch-LCD-2.8C
+          (examples/C/libraries/), Copyright 2026 Waveshare, Apache-2.0.
+
+Waveshare published this repository on 2026-08-07 in response to our request.
+The sources are identical to the demo ZIP previously distributed from the
+product wiki after line-ending normalization (the ZIP ships CRLF): every file
+below matches the sha256 we had pinned against that ZIP. Apache-2.0 §4 lets us
+redistribute these files, modified, as long as the license text travels with
+them and modified files say so.
+
+The canonical Apache-2.0 text is in licenses/Apache-2.0.txt. Sections 1-9
+are identical to upstream's copy; the appendix remains the unfilled template.
+
+Upstream ships a LICENSE but no NOTICE file, so §4(d) adds nothing to carry
+over here (checked 2026-08-08).
+
+All 35 files under vendor/, plus boards/waveshare_rp2350_touch_lcd_2.8c.h and
+pico_sdk_import.cmake, were compared against upstream file by file (37 in
+total — upstream's own LICENSE is not among them, and is not vendored: see the
+paragraph above): 28 are byte-identical to it after line-ending normalization,
+and the modified ones are exactly the nine listed below. Each carries a notice
+at the top of the file, per §4(b):
+
+  - vendor/bsp/bsp_gt911.c
+      * g_gt911_irq_flag marked volatile — written in the GPIO IRQ callback,
+        read in the main loop.
+      * read buffer zero-initialized — an uninitialized buffer let a failed
+        I2C read present a stale data-ready bit. Touch is an exercised path.
+      * product-id buffer widened to data[5]={0} so the 4-byte read is
+        NUL-terminated before strstr()/printf("%s") (stack over-read).
+  - vendor/bsp/bsp_gt911.h
+      * exported bsp_gt911_reset() and bsp_gt911_reg_read_byte() so the
+        application can re-initialize a misbehaving GT911 with a bounded retry
+        (bsp_gt911_init() retries forever and would hang the main loop).
+  - vendor/bsp/bsp_st7701s.h
+      * BSP_LCD_PCLK_FREQ is explicit at 16 MHz (~61.5 Hz); the application
+        schedules 40-row asset bands after DMA consumption.
+  - vendor/bsp/bsp_dma_channel_irq.c
+      * DMA_IRQ_1 uses the highest priority, preempting USB workers so the
+        software rearm of RGB DMA does not leave the pixel FIFO empty.
+  - vendor/bsp/pio_rgb.h
+      * exports the DMA cursor/count, active starvation and IRQ observation API.
+  - vendor/bsp/pio_rgb.c
+      * exposes coherent DMA cursor/count samples and RGB PIO FIFO stall
+        observations; counts completed DMA bands that overlap framebuffer writes.
+      * two manual pixel-copy loops replaced with memcpy (the DMA-complete ISR
+        copy and the framebuffer blit). Both run every frame.
+  - vendor/bsp/CMakeLists.txt
+      * dropped the no-OS-FatFS-SD link; comments trimmed.
+  - vendor/CMakeLists.txt
+      * dropped the lvgl and no-OS-FatFS-SD add_subdirectory lines; the face
+        firmware uses neither.
+  - boards/waveshare_rp2350_touch_lcd_2.8c.h  (Raspberry Pi BSD-3, see §3)
+      * PICO_PLATFORM set via comment-form for pico-sdk 2.1.1 compatibility
+        (see README.md build notes).
+      * PICO_FLASH_SIZE_BYTES default raised 4 MB -> 16 MB to match the board
+        actually shipped; the #define below it already assumed 16 MB.
+
+Not vendored from upstream:
+
+  - bsp_sd_card.* and the no-OS-FatFS-SD dependency — the face firmware does
+    not use the microSD slot.
+  - lvgl — not used by the face firmware.
+  - The wiki's schematic PDF is not redistributed here: it is not part of the
+    Apache-2.0 repository. See README.md for the official link.
+
+Known upstream issue worked around at the call site (not patched here, so the
+vendored file stays identical to upstream):
+
+  - GUI_Paint.c Paint_DrawString_EN swaps foreground and background before
+    handing them to Paint_DrawChar. Every src/face_serial.c call compensates by
+    passing the arguments as (background, foreground); the reason is spelled out
+    once, at the first call site in draw_confirm(). Patching the vendored file
+    instead would silently break all of those calls.
+
+Known upstream issues left as-is (not exercised by the face firmware, kept
+faithful so upstream diffs stay readable):
+
+  - bsp_battery.c average_filter: uninitialized accumulator + per-element
+    division. The battery module is not called by face_serial.
+  - bsp_qmi8658.c: double-precision sqrt/atan (IMU module, not used yet).
+  - bsp_pcf85063.c: unused local (RTC module, not used).
+  - GUI_Paint.c (Scale==2 path): `Color&0xff == BLACK` operator-precedence bug.
+    face_serial draws with native scale65, not the 1bpp path.
+  - GUI_Paint.c Paint_DrawNum: the digit buffer can be overrun by a
+    sufficiently long number. face_serial does not call it.
+
+
+2. STMicroelectronics bitmap fonts (BSD-3-Clause)
+-------------------------------------------------
+
+    vendor/Fonts/  — font8/12/16/20/24 ASCII plus font12CN/font24CN
+                     (CMakeLists.txt in that directory is Waveshare's build
+                     glue and belongs to §1, not here)
+
+Copyright (c) 2014 STMicroelectronics. Redistributed by Waveshare in the demo
+above and vendored here unmodified; each of the font files listed above carries
+the full license text in its own header, so no copy is needed in licenses/. The
+CN fonts are unused by this firmware but kept so the tree matches upstream.
+
+
+3. Raspberry Pi board header and SDK import (BSD-3-Clause)
+----------------------------------------------------------
+
+    boards/waveshare_rp2350_touch_lcd_2.8c.h  — Copyright (c) 2020 Raspberry Pi
+                                                (Trading) Ltd. Carries an SPDX
+                                                identifier but no license text,
+                                                so the full text is vendored as
+                                                licenses/BSD-3-Clause.txt.
+                                                Modified — see §1.
+    pico_sdk_import.cmake                     — Copyright (c) 2020 Raspberry Pi
+                                                (Trading) Ltd. Full license text
+                                                is in the file. Unmodified.
+
+licenses/BSD-3-Clause.txt is reproduced verbatim from pico-sdk's LICENSE.TXT,
+including the duplicated year in "Copyright 2020 (c) 2020 Raspberry Pi (Trading)
+Ltd." — that is upstream's wording, not a typo introduced here. Do not "fix" it:
+the point of the file is to be the license text as the copyright holder wrote it.
+
+
+Not included in this tree
+-------------------------
+
+  - Raspberry Pi Pico SDK (pico-sdk, tag 2.1.1) — fetched separately via
+    PICO_SDK_PATH. BSD-3-Clause, (c) Raspberry Pi Ltd.
+  - Prebuilt pioasm / picotool — see README.md build notes.

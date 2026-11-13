@@ -1,7 +1,7 @@
 Palmimo face display firmware
 
 This bundle declares its available protocols in firmware.json under
-/usr/local/lib/palmimo/display-firmware. Protocol 1 uses face_serial_v1.bin.gz.
+/usr/local/lib/palmimo/display-firmware. Protocols 1 and 2 use face_serial_v1.bin.gz and face_serial_v2.bin.gz.
 The updater installs it during boot and Portal platform updates.
 
 The Jizai Inc. portions of the face display firmware binaries (v1 and v2)
@@ -9,3 +9,6 @@ and standard display assets are licensed under Apache-2.0, like this repository.
 Third-party portions retain their own licenses; their notices and full license
 texts are in NOTICE and licenses/ in this directory. The canonical copies are in the repository's
 files/boot/firmware/licenses/display-firmware/; tests require byte equality.
+
+NOTICE-v2 records the v2 source notices and linked Pico SDK / TinyUSB components.
+The shared license texts remain in licenses/.

@@ -1,1 +1,201 @@
-{"schema":1,"assets":[]}
+{
+  "schema": 1,
+  "assets": [
+    {
+      "id": "palmimo/happy",
+      "description": "Express warm happiness after good news or a friendly interaction.",
+      "tags": [
+        "face",
+        "positive"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "良い知らせや親しいやり取りへの喜びを表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/shy",
+      "description": "Show bashful appreciation when receiving praise or attention.",
+      "tags": [
+        "face",
+        "positive"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "褒められたり注目されたときの照れを表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/excited",
+      "description": "Show energetic excitement about something eagerly anticipated.",
+      "tags": [
+        "face",
+        "positive"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "楽しみにしていることへの高揚を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/surprise",
+      "description": "React to an unexpected event or surprising information.",
+      "tags": [
+        "face",
+        "reaction"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "予期しない出来事や意外な情報への驚きを表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/curious",
+      "description": "Show interest while observing something unfamiliar.",
+      "tags": [
+        "face",
+        "attention"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "見慣れないものを観察するときの関心を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/thinking",
+      "description": "Signal a pause to consider a question or decision.",
+      "tags": [
+        "face",
+        "attention"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "質問や判断について考えている間を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/angry",
+      "description": "Express frustration or disapproval of an upsetting situation.",
+      "tags": [
+        "face",
+        "negative"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "困った状況へのいらだちや不満を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/sad",
+      "description": "Express sadness or empathy after disappointing news.",
+      "tags": [
+        "face",
+        "negative"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "残念な知らせへの悲しみや共感を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/sleepy",
+      "description": "Show drowsiness when activity is winding down.",
+      "tags": [
+        "face",
+        "rest"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "活動が落ち着いてきたときの眠気を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/love",
+      "description": "Express affection or heartfelt appreciation toward someone.",
+      "tags": [
+        "face",
+        "positive"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "相手への愛情や心からの感謝を表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/sleeping",
+      "description": "Depict peaceful sleep during a quiet resting moment.",
+      "tags": [
+        "face",
+        "rest"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "静かに休んでいる場面で穏やかな眠りを表します。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/maru",
+      "description": "Confirm a correct answer or a positive choice with a circle.",
+      "tags": [
+        "symbol",
+        "confirmation"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "正解や肯定の選択を丸で伝えます。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/batsu",
+      "description": "Indicate an incorrect answer or a declined choice with a cross.",
+      "tags": [
+        "symbol",
+        "confirmation"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "不正解や否定の選択をバツで伝えます。"
+        }
+      }
+    },
+    {
+      "id": "palmimo/groove",
+      "description": "Move with a playful rainbow rhythm during music or dancing.",
+      "tags": [
+        "face",
+        "music"
+      ],
+      "params": {},
+      "translations": {
+        "ja": {
+          "description": "音楽やダンスに合わせた楽しい虹色のリズムを表します。"
+        }
+      }
+    }
+  ]
+}
