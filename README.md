@@ -325,6 +325,14 @@ the result can't be mistaken for shippable.
 The corresponding-source addition to image size is not yet measured
 against a real build.
 
+### Face display firmware and standard assets
+
+The Jizai Inc. portions of the bundled face display firmware binaries (v1 and
+v2) and standard display assets are licensed under Apache-2.0, like this
+repository (see [LICENSE](LICENSE)). Third-party notices and full license texts
+remain in `files/boot/firmware/licenses/display-firmware/` and are also shipped
+under `/usr/share/doc/palmimo-display-firmware/`.
+
 ### `/boot/firmware/licenses/`
 
 MIT, BSD, Apache-2.0, and OFL all require attaching copyright notices and
@@ -382,9 +390,8 @@ The bundle's schema 2 `firmware.json` declares each available protocol's version
 SHA-256 and filename under `/usr/local/lib/palmimo/display-firmware/`.
 Protocol 1 currently ships as `face_serial_v1.bin.gz`; protocol 2 is not yet
 bundled. Selecting an unavailable protocol makes `ensure` fail with a
-configuration error before accessing hardware. Firmware binaries are Jizai's copyrighted work,
-excluded from this repository's license; third-party notices and full license
-texts are in `/usr/share/doc/palmimo-display-firmware/`.
+configuration error before accessing hardware. Licensing and third-party notices
+are described in [Licenses and corresponding source](#licenses-and-corresponding-source).
 
 Select the desired protocol without flashing it with
 `sudo /usr/local/libexec/palmimo/palmimo-display-firmware desire 1 --by initial`.
