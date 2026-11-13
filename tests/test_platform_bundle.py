@@ -1762,3 +1762,12 @@ def test_install_ships_protocol_named_firmware_and_retires_legacy_file(installed
     legacy.write_bytes(b"old bundle leftover")
     assert _run_install(root, accounts, uv_source).returncode == 0
     assert not legacy.exists()
+
+
+def test_install_ships_asset_store_and_empty_standard_catalog(installed_root: tuple[Path, Path, Path]) -> None:
+    root, _accounts, _uv = installed_root
+    catalog = root / "usr/local/share/palmimo/display-assets/catalog.json"
+    assert json.loads(catalog.read_text()) == {"schema": 1, "assets": []}
+    assert stat.S_IMODE(catalog.stat().st_mode) == 0o644
+    helper = root / "usr/local/libexec/palmimo/display_assets.py"
+    assert helper.read_bytes() == (PLATFORM_DIR / "files/usr/local/libexec/palmimo/display_assets.py").read_bytes()

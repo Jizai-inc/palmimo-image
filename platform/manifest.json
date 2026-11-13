@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 11,
   "requires_portal": "0.2.0",
   "restart_portal": true,
   "summary": "App execution platform with protected device identity relocation, app sandboxes, shared resources, and display firmware.",
@@ -148,6 +148,18 @@
         "owner": "root",
         "group": "root",
         "mode": "0755"
+      },
+      {
+        "path": "usr/local/libexec/palmimo/display_assets.py",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/catalog.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
       }
     ],
     "managed_directories": [

@@ -416,3 +416,26 @@ never adopt an unrecorded device automatically. After intentionally removing or 
 stop display users and remove `state.json` to forget its identity. To disable boot
 updates, create `/etc/palmimo/display-firmware.disabled`; platform verification
 checks the unit file, not whether the unit is enabled.
+
+
+### Face display assets
+
+The root-only `palmimo-display-firmware assets` commands store validated assets
+and synchronize them with protocol 2 firmware. Convert a source with
+`/usr/local/libexec/palmimo/palmimo-display-assets convert source.json -o asset.bin --json`, then install it
+with `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets install zip.my-app welcome asset.bin`.
+`assets uninstall zip.my-app` removes the local app assets; flash copies remain
+until space is needed. `assets override happy asset.bin` replaces a catalogued
+standard asset, and `assets override --reset happy` restores its bundled default.
+
+Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets sync --app zip.my-app --json` before
+starting that app, or omit `--app` to synchronize only the standard assets.
+Sync skips firmware that does not advertise protocol 2 and returns busy when
+the display is reserved. Transfers use bounded windows and cumulative ACKs;
+only the final firmware reply confirms success. When flash space is fragmented,
+sync evicts other apps in launch order, then reloads the selected app's assets if
+needed. Standard assets are kept. Local overrides, app assets and the launch
+sequence are private to root under `/var/lib/palmimo/display-assets/`.
+
+The standard catalog is `/usr/local/share/palmimo/display-assets/catalog.json`.
+It is currently empty; standard expression assets will be bundled separately.

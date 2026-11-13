@@ -8,6 +8,8 @@ import contextlib
 import fcntl
 import gzip
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pwd
@@ -54,9 +56,12 @@ class Paths:
         work: Path = Path("/run/palmimo-display-firmware"),
         locks: Path = Path("/run/lock/palmimo"),
         desired: Path | None = None,
+        assets: Path = Path("/var/lib/palmimo/display-assets"),
+        catalog: Path = Path("/usr/local/share/palmimo/display-assets"),
     ) -> None:
         self.firmware, self.state, self.work, self.locks = firmware, state, work, locks
         self.desired = desired if desired is not None else state.with_name("desired.json")
+        self.assets, self.catalog = assets, catalog
 
 
 def declaration(path: Path) -> dict[str, dict[str, str]]:
@@ -273,6 +278,14 @@ class Hardware:
                     if line and not line.startswith("EVT ") and line.startswith(("ERR", command.split()[0], "OK")):
                         return line
         return ""
+
+    @contextlib.contextmanager
+    def asset_connection(self, port: str) -> Iterator[Any]:
+        import serial
+
+        with serial.Serial(port, 115200, timeout=0.05, write_timeout=2) as connection:
+            connection.reset_input_buffer()
+            yield connection
 
     def touch(self, port: str) -> None:
         import serial
@@ -628,6 +641,41 @@ class Updater:
             return {"result": "failed", "reason": str(error)}, 1
 
 
+def asset_commands(args: Any, paths: Paths, hardware: Hardware) -> tuple[dict[str, Any], int]:
+    sync = args.action == "sync"
+    errors: tuple[type[Exception], ...] = (FirmwareError, OSError, ValueError, ImportError)
+    try:
+        loader = importlib.machinery.SourceFileLoader(
+            "display_asset_store", str(Path(__file__).with_name("display_assets.py"))
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        errors += (module.StoreError,)
+        store = module.Store(paths.assets, paths.catalog)
+        if sync:
+            if args.app is not None:
+                module.app_id(args.app)
+            with reservation(paths.locks):
+                return module.synchronize(store, hardware, args.app)
+        if args.action == "install":
+            store.install(args.app, args.name, args.source)
+        elif args.action == "uninstall":
+            store.uninstall(args.app)
+        elif args.action == "override":
+            if (args.reset and args.source is not None) or (not args.reset and args.source is None):
+                raise FirmwareError("override requires either --reset or an input file")
+            store.override(args.name, None if args.reset else args.source)
+        return {"ok": True, "reason": None}, 0
+    except BusyError as error:
+        return {"result": "busy", "put": [], "deleted": [], "reason": str(error)}, 75
+    except errors as error:
+        if sync:
+            return {"result": "failed", "put": [], "deleted": [], "reason": str(error)}, 1
+        return {"ok": False, "reason": str(error)}, 1
+
+
 def terminate(signum: int, frame: Any) -> None:
     raise DeadlineError("Firmware update deadline exceeded (SIGTERM)")
 
@@ -644,15 +692,44 @@ def main() -> int:
     desire.add_argument("protocol", type=int, choices=(1, 2))
     desire.add_argument("--by", required=True, choices=("app-start", "initial"))
     desire.add_argument("--json", action="store_true")
+    assets = commands.add_parser("assets")
+    actions = assets.add_subparsers(dest="action", required=True)
+    install = actions.add_parser("install")
+    install.add_argument("app")
+    install.add_argument("name")
+    install.add_argument("source", type=Path)
+    uninstall = actions.add_parser("uninstall")
+    uninstall.add_argument("app")
+    override = actions.add_parser("override")
+    override.add_argument("--reset", action="store_true")
+    override.add_argument("name")
+    override.add_argument("source", type=Path, nargs="?")
+    sync = actions.add_parser("sync")
+    sync.add_argument("--app")
+    for action in (install, uninstall, override, sync):
+        action.add_argument("--json", action="store_true")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, terminate)
+    result: dict[str, Any]
     if os.geteuid() != 0:
-        result, code = {"result": "failed", "before": None, "after": None, "reason": "Root is required"}, 1
+        if args.command == "assets":
+            result, code = (
+                (
+                    {"result": "failed", "put": [], "deleted": [], "reason": "Root is required"}
+                    if args.action == "sync"
+                    else {"ok": False, "reason": "Root is required"}
+                ),
+                1,
+            )
+        else:
+            result, code = {"result": "failed", "before": None, "after": None, "reason": "Root is required"}, 1
+    elif args.command == "assets":
+        result, code = asset_commands(args, Paths(), Hardware())
     elif args.command == "desire":
         result, code = Updater(Paths(), Hardware()).desire(args.protocol, args.by)
     else:
         result, code = Updater(Paths(), Hardware()).ensure(args.boot, args.adopt_bootsel)
-    if args.json or args.command == "desire":
+    if args.json or args.command in ("desire", "assets"):
         print(json.dumps(result), flush=True)
     return code
 
