@@ -729,3 +729,352 @@ def test_shipped_standard_assets_sync_as_complete_set(
     assert {name: data for name, (_, data) in flash.assets.items()} == {
         name: path.read_bytes() for name, path in files.items()
     }
+
+
+def test_status_reports_effective_defaults_apps_and_orphans(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import subprocess
+
+    paths, flash = rig
+    source = tmp_path / "neon.bin"
+    subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT.with_name("palmimo-display-assets")),
+            "convert",
+            str(Path(__file__).parent / "fixtures/display-assets/happy_neon.json"),
+            "-o",
+            str(source),
+            "--json",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    standard(paths, "happy", source.read_bytes())
+    (paths.catalog / "system.idle.bin").write_bytes(asset())
+    stream = struct.pack("<16H", *([0xFFFF, 0] * 7 + [0x83FF, 0]))
+    body = struct.pack("<20sHHII", b"IMAGE", 1, 0, 64, 0) + struct.pack("<3I", 76, 16, 0) + stream
+    image = struct.pack("<4sHHII16x", b"PIMG", 2, 1, 32 + len(body), zlib.crc32(body)) + body
+    installed(paths, "zip.first", "a", asset())
+    installed(paths, "zip.first", "b", asset(4))
+    installed(paths, "zip.second", "c", asset(2))
+    overrides = paths.assets / "overrides"
+    overrides.mkdir()
+    (overrides / "happy.bin").write_bytes(image)
+    (overrides / "removed.bin").write_bytes(asset())
+    code, result = invoke(monkeypatch, capsys, "status", "--json")
+    assert code == 0, result
+    assert result["capacity"] == 6275072
+    assert result["standard"][0] == {
+        "name": "happy",
+        "bytes": len(image),
+        "kind": "image",
+        "params": [],
+        "overridden": True,
+        "default_bytes": source.stat().st_size,
+        "default_kind": "vector",
+        "default_params": ["eye_color"],
+    }
+    assert result["standard"][1]["name"] == "system.idle"
+    assert result["standard"][1]["overridden"] is False
+    assert result["apps"] == {
+        "zip.first": {"bytes": 20480, "largest": 16384, "names": ["a", "b"]},
+        "zip.second": {"bytes": 8192, "largest": 8192, "names": ["c"]},
+    }
+    assert result["orphan_overrides"] == ["removed"]
+    assert not flash.commands
+
+
+@pytest.mark.parametrize("damage", ["unexpected-file", "symlink", "bad-default", "bad-override"])
+def test_status_rejects_invalid_store_content(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    paths, flash = rig
+    standard(paths, "happy", asset())
+    installed(paths, "zip.demo", "a", asset())
+    if damage == "unexpected-file":
+        (paths.assets / "apps/zip.demo/extra.txt").write_text("x")
+    elif damage == "symlink":
+        (paths.assets / "apps/zip.demo/link.bin").symlink_to(paths.catalog / "happy.bin")
+    elif damage == "bad-default":
+        (paths.catalog / "happy.bin").write_bytes(b"bad")
+    else:
+        (paths.assets / "overrides").mkdir()
+        (paths.assets / "overrides/happy.bin").write_bytes(b"bad")
+    code, result = invoke(monkeypatch, capsys, "status", "--json")
+    assert code == 1 and result["ok"] is False
+    assert not flash.commands
+
+
+@pytest.mark.parametrize("case", ["new", "changed", "empty"])
+def test_replace_publishes_complete_app_collection(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+) -> None:
+    paths, flash = rig
+    installed(paths, "zip.other", "keep", asset())
+    if case != "new":
+        installed(paths, "zip.demo", "a", asset())
+        installed(paths, "zip.demo", "b", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    expected = {} if case == "empty" else {"a.bin": asset(2, 1), "c.bin": asset(3, 2)}
+    for name, data in expected.items():
+        (source / name).write_bytes(data)
+    assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(source)) == (0, {"ok": True, "reason": None})
+    target = paths.assets / "apps/zip.demo"
+    assert {p.name: p.read_bytes() for p in target.glob("*")} == expected
+    assert target.exists() is bool(expected)
+    assert (paths.assets / "apps/zip.other/keep.bin").read_bytes() == asset()
+    assert not flash.commands
+
+
+@pytest.mark.parametrize("damage", ["bad-bin", "symlink", "subdirectory", "non-bin", "source-symlink"])
+def test_replace_invalid_candidate_preserves_collection(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    damage: str,
+) -> None:
+    paths, _ = rig
+    installed(paths, "zip.demo", "old", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "good.bin").write_bytes(asset())
+    if damage == "bad-bin":
+        (source / "bad.bin").write_bytes(b"bad")
+    elif damage == "symlink":
+        (source / "link.bin").symlink_to(source / "good.bin")
+    elif damage == "subdirectory":
+        (source / "nested.bin").mkdir()
+    elif damage == "non-bin":
+        (source / "extra.txt").write_text("x")
+    else:
+        link = tmp_path / "link"
+        link.symlink_to(source, target_is_directory=True)
+        source = link
+    code, result = invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))
+    assert code == 1 and result["ok"] is False
+    assert {p.name: p.read_bytes() for p in (paths.assets / "apps/zip.demo").glob("*")} == {"old.bin": asset()}
+
+
+def test_replace_capacity_failure_reports_shortfall_without_mutation(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, _ = rig
+    (paths.catalog / "system.idle.bin").write_bytes(asset(256))
+    installed(paths, "zip.demo", "old", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    for i in range(4):
+        (source / f"part{i}.bin").write_bytes(asset(256))
+    code, result = invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))
+    assert code == 1 and result["ok"] is False and result["short_by"] == 16384
+    assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
+
+
+def test_interrupted_replace_is_empty_and_can_be_retried(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, _ = rig
+    installed(paths, "zip.demo", "old", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "new.bin").write_bytes(asset(value=1))
+    rename = fw.os.rename
+
+    def interrupt(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        if str(src).endswith(".replace-zip.demo"):
+            raise OSError("Interrupted before new collection publication")
+        rename(src, dst, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fw.os, "rename", interrupt)
+        assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))[0] == 1
+    assert not (paths.assets / "apps/zip.demo").exists()
+    sync_code, synced = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
+    assert sync_code == 0 and synced["result"] == "synced" and synced["put"] == []
+    code, status = invoke(monkeypatch, capsys, "status", "--json")
+    assert code == 0 and "zip.demo" not in status["apps"]
+    assert not any(p.name.startswith((".replace-", ".old-")) for p in (paths.assets / "apps").iterdir())
+    assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))[0] == 0
+    assert (paths.assets / "apps/zip.demo/new.bin").read_bytes() == asset(value=1)
+
+
+@pytest.mark.parametrize("action", ["replace", "uninstall", "status"])
+def test_store_entries_clean_abandoned_collections(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    paths, _ = rig
+    for name in (".replace-zip.old", ".old-zip.old"):
+        directory = paths.assets / "apps" / name
+        directory.mkdir(parents=True)
+        (directory / "a.bin").write_bytes(asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    args = (
+        ("replace", "zip.demo", str(source))
+        if action == "replace"
+        else ("uninstall", "zip.demo")
+        if action == "uninstall"
+        else ("status", "--json")
+    )
+    assert invoke(monkeypatch, capsys, *args)[0] == 0
+    assert not list((paths.assets / "apps").glob(".*"))
+
+
+@pytest.mark.parametrize("app", [".replace-x", ".replace-zip.demo", ".old-zip.demo"])
+def test_replace_rejects_reserved_work_names(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    app: str,
+) -> None:
+    source = tmp_path / "staging"
+    source.mkdir()
+    assert invoke(monkeypatch, capsys, "replace", app, str(source))[0] == 1
+
+
+def test_override_checks_all_apps_and_reports_maximum_shortfall(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, _ = rig
+    standard(paths, "happy", asset())
+    for app in ("zip.first", "zip.second"):
+        for i in range(4):
+            installed(paths, app, f"part{i}", asset(256))
+    installed(paths, "zip.second", "half", asset(128))
+    (paths.assets / "overrides").mkdir()
+    target = paths.assets / "overrides/happy.bin"
+    target.write_bytes(asset(value=1))
+    source = tmp_path / "source.bin"
+    source.write_bytes(asset(256))
+    code, result = invoke(monkeypatch, capsys, "override", "happy", str(source))
+    assert code == 1 and result["ok"] is False and result["short_by"] == 540672
+    assert target.read_bytes() == asset(value=1)
+
+
+def test_override_reset_removes_orphan(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, _ = rig
+    directory = paths.assets / "overrides"
+    directory.mkdir(parents=True)
+    target = directory / "removed.bin"
+    target.write_bytes(asset())
+    assert invoke(monkeypatch, capsys, "override", "--reset", "removed") == (0, {"ok": True, "reason": None})
+    assert not target.exists()
+
+
+@contextlib.contextmanager
+def held_store_lock(paths: Any) -> Any:
+    import subprocess
+
+    paths.assets.mkdir(parents=True, exist_ok=True)
+    program = "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read(1)"
+    child = subprocess.Popen(
+        [sys.executable, "-c", program, str(paths.assets / ".lock")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None and child.stdin is not None
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        yield child
+    finally:
+        if child.poll() is None:
+            try:
+                with contextlib.suppress(BrokenPipeError):
+                    child.stdin.write("x")
+                    child.stdin.flush()
+                child.wait(timeout=5)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+        with contextlib.suppress(BrokenPipeError):
+            child.stdin.close()
+        child.stdout.close()
+
+
+def test_replace_waits_for_other_process_then_publishes(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import threading
+
+    paths, _ = rig
+    installed(paths, "zip.demo", "old", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "new.bin").write_bytes(asset(value=1))
+    observed = []
+    with held_store_lock(paths) as child:
+
+        def release() -> None:
+            observed.append((paths.assets / "apps/zip.demo/old.bin").read_bytes())
+            child.stdin.write("x")
+            child.stdin.flush()
+
+        timer = threading.Timer(0.2, release)
+        timer.start()
+        try:
+            code, result = invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))
+        finally:
+            timer.join()
+    assert code == 0, result
+    assert observed == [asset()]
+    assert (paths.assets / "apps/zip.demo/new.bin").read_bytes() == asset(value=1)
+    assert not (paths.assets / "apps/zip.demo/old.bin").exists()
+
+
+@pytest.mark.parametrize("action", ["replace", "uninstall", "override", "status", "install", "sync"])
+def test_store_lock_timeout_and_sync_nonblocking_return_75(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    import time
+
+    paths, flash = rig
+    standard(paths, "happy", asset())
+    installed(paths, "zip.demo", "old", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    candidate = source / "new.bin"
+    candidate.write_bytes(asset())
+    arguments = {
+        "replace": ["replace", "zip.demo", str(source)],
+        "uninstall": ["uninstall", "zip.demo"],
+        "override": ["override", "happy", str(candidate)],
+        "status": ["status", "--json"],
+        "install": ["install", "zip.demo", "new", str(candidate)],
+        "sync": ["sync", "--json"],
+    }
+    now = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    with held_store_lock(paths), monkeypatch.context() as patch:
+        patch.setattr(time, "monotonic", lambda: now)
+        patch.setattr(time, "sleep", sleep)
+        code, result = invoke(monkeypatch, capsys, *arguments[action])
+    assert code == 75
+    assert now == pytest.approx(0 if action == "sync" else 120)
+    assert (result["result"] == "busy") if action == "sync" else (result["ok"] is False)
+    assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
+    assert not flash.puts and not flash.deleted

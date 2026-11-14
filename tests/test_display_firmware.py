@@ -163,12 +163,13 @@ def test_unidentified_devices_are_never_written(rig: tuple[Any, Fake], case: str
 
 
 @pytest.mark.parametrize("seen", [False, True])
-def test_absence_remembers_previous_face(rig: tuple[Any, Fake], seen: bool) -> None:
+def test_absence_reports_known_and_unknown_face(rig: tuple[Any, Fake], seen: bool) -> None:
     updater, hw = rig
     updater.save({"seen": seen})
     hw.ports = []
     result, code = updater.ensure(boot=True)
-    assert (result["result"], code) == (("failed", 1) if seen else ("absent", 0))
+    assert (result["result"], result["before"], result["after"], code) == ("absent", None, None, 0)
+    assert bool(result["reason"]) is seen
     assert json.loads(updater.paths.state.read_text())["consecutive_failures"] == 0
 
 
@@ -1108,3 +1109,18 @@ def test_release_validation_checks_each_declared_protocol(rig: tuple[Any, Fake],
     else:
         with pytest.raises(fw.FirmwareError):
             fw.validate_artifact(directory, [])
+
+
+def test_known_absence_preserves_boot_write_failure_count(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    updater.save(
+        {"seen": True, "chip_id": hw.chip, "desired_protocol": 1, "declared_version": "new", "consecutive_failures": 3}
+    )
+    hw.ports = []
+    result, code = updater.ensure(boot=True)
+    assert (result["result"], result["before"], result["after"], code) == ("absent", None, None, 0)
+    assert result["reason"]
+    state = json.loads(updater.paths.state.read_text())
+    assert state["consecutive_failures"] == 3
+    assert state["last_result"] == "absent" and state["last_reason"] == result["reason"]
+    assert not hw.commands and not hw.power

@@ -412,7 +412,8 @@ protocol's declaration or only the selection reason does not. A manual retry
 resets that count. VERSION matching is exact, and switching in either direction
 uses the same identity and write-order checks.
 
-If a previously seen face disappears, check USB and use its BOOT + RST buttons
+If a face is absent, `ensure` returns `absent` successfully so apps can still
+start. A previously seen face also includes a recovery reason; check USB and use its BOOT + RST buttons
 to enter BOOTSEL for recovery. If the SD card was reimaged and the face is already
 in BOOTSEL, disconnect every Pico except the face and explicitly adopt it with
 `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --adopt-bootsel --json`.
@@ -450,3 +451,20 @@ all 17 `.bin` files in that directory, including `system.idle`, `system.sleep`
 and `system.wake`, which are kept out of the vocabulary. Sync, overrides and
 capacity accounting use all 17. Portal enumerates the public `.bin` files for
 its replacement screen; no additional inventory CLI is needed.
+
+
+Portal installs and updates an app's complete collection with
+`palmimo-display-firmware assets replace <app-id> <staging-dir>` (using the same
+`/usr/local/libexec/palmimo/` path as above). A staging directory contains only
+validated `<name>.bin` files; an empty directory removes the app's collection.
+The tool stages the full collection before renaming it into place. Interruption
+between the two renames can leave an empty collection; the next replace,
+uninstall or status removes abandoned work directories.
+
+`assets status --json` reports effective and default standard metadata, per-app
+allocation, and orphan overrides without contacting the display. Portal reads
+this root-owned state through the tool instead of reading private files.
+Replace and override recheck capacity before saving; a rejected request reports
+`short_by` and leaves the previous content. Reset can also remove orphan
+overrides. Store operations wait up to 120 seconds for the store lock and return
+exit 75 if it stays busy; sync keeps its immediate busy response.

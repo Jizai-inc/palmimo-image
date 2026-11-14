@@ -15,6 +15,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 import zlib
 from collections.abc import Iterator
 from pathlib import Path
@@ -33,6 +34,32 @@ class StoreError(Exception):
 
 class NoSpaceError(StoreError):
     pass
+
+
+class BusyError(StoreError):
+    pass
+
+
+class CapacityError(StoreError):
+    def __init__(self, short_by: int) -> None:
+        super().__init__("Assets exceed display capacity including replacement space")
+        self.short_by = short_by
+
+
+def shortfall(standard: dict[str, bytes], app: dict[str, bytes]) -> int:
+    sizes = [(len(data) + 4095) // 4096 * 4096 for data in (*standard.values(), *app.values())]
+    return max(0, sum(sizes) + max(sizes, default=0) - CAPACITY)
+
+
+def remove_collection(path: Path) -> None:
+    try:
+        with directory(path):
+            pass
+    except FileNotFoundError:
+        return
+    with directory(path.parent) as parent:
+        shutil.rmtree(path.name, dir_fd=parent)
+        os.fsync(parent)
 
 
 def app_id(value: str) -> str:
@@ -137,23 +164,29 @@ class Store:
         loader.exec_module(self.converter)
 
     @contextlib.contextmanager
-    def transaction(self) -> Iterator[None]:
+    def transaction(self, wait_s: float = 0) -> Iterator[None]:
         with directory(self.root, create=True) as parent:
             fd = os.open(".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise StoreError("Asset store lock must be a regular file")
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    raise StoreError("Asset store is busy") from error
+                end = time.monotonic() + wait_s
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError as error:
+                        remaining = end - time.monotonic()
+                        if remaining <= 0:
+                            raise BusyError("Asset store is busy") from error
+                        time.sleep(min(0.1, remaining))
                 yield
             finally:
                 os.close(fd)
 
-    def inspect(self, data: bytes) -> None:
+    def inspect(self, data: bytes) -> dict[str, Any]:
         try:
-            self.converter.inspect(data)
+            return self.converter.inspect(data)
         except ValueError as error:
             raise StoreError(f"Invalid asset: {error}") from error
 
@@ -182,39 +215,131 @@ class Store:
             seen.add(name)
         return names
 
+    def blob_names(self, path: Path, missing: bool = False) -> list[str]:
+        try:
+            with directory(path) as parent:
+                result = []
+                for filename in sorted(os.listdir(parent)):
+                    if not filename.endswith(".bin"):
+                        raise StoreError("Unexpected entry in asset directory")
+                    regular_at(parent, filename)
+                    result.append(asset_name(filename[:-4]))
+                return result
+        except FileNotFoundError:
+            if missing:
+                return []
+            raise
+
+    def blobs(self, path: Path, missing: bool = False) -> dict[str, bytes]:
+        result = {}
+        for name in self.blob_names(path, missing):
+            data = read_file(path / f"{name}.bin")
+            self.inspect(data)
+            result[name] = data
+        return result
+
+    def standard_files(self) -> dict[str, bytes]:
+        result = {}
+        for name in self.standards():
+            try:
+                data = read_file(self.root / "overrides" / f"{name}.bin")
+            except FileNotFoundError:
+                data = read_file(self.catalog / f"{name}.bin")
+            self.inspect(data)
+            result[name] = data
+        return result
+
+    def app_names(self) -> list[str]:
+        try:
+            with directory(self.root / "apps") as parent:
+                names = [app_id(name) for name in sorted(os.listdir(parent)) if not name.startswith(".")]
+            for name in names:
+                with directory(self.root / "apps" / name):
+                    pass
+            return names
+        except FileNotFoundError:
+            return []
+
+    def cleanup(self) -> None:
+        try:
+            with directory(self.root / "apps") as parent:
+                names = sorted(os.listdir(parent))
+        except FileNotFoundError:
+            return
+        for name in names:
+            if name.startswith((".replace-", ".old-")):
+                remove_collection(self.root / "apps" / name)
+
     def install(self, app: str, name: str, source: Path) -> None:
         app_id(app)
         asset_name(name)
         data = read_file(source)
         self.inspect(data)
-        with self.transaction():
+        with self.transaction(wait_s=120):
             atomic_file(self.root / "apps" / app / f"{name}.bin", data)
 
     def uninstall(self, app: str) -> None:
         app_id(app)
-        with self.transaction():
-            try:
-                with directory(self.root / "apps") as parent:
-                    try:
-                        with directory(self.root / "apps" / app):
-                            pass
-                    except FileNotFoundError:
-                        return
-                    shutil.rmtree(app, dir_fd=parent)
+        with self.transaction(wait_s=120):
+            self.cleanup()
+            remove_collection(self.root / "apps" / app)
+
+    def replace(self, app: str, source: Path) -> None:
+        app_id(app)
+        candidate = self.blobs(source)
+        shortage = shortfall(self.standard_files(), candidate)
+        if shortage:
+            raise CapacityError(shortage)
+        with self.transaction(wait_s=120):
+            self.cleanup()
+            # A waiting writer must not rely on the override snapshot from before the lock.
+            shortage = shortfall(self.standard_files(), candidate)
+            if shortage:
+                raise CapacityError(shortage)
+            apps = self.root / "apps"
+            if not candidate:
+                remove_collection(apps / app)
+                return
+            staging, previous = f".replace-{app}", f".old-{app}"
+            with directory(apps, create=True) as parent:
+                try:
+                    info = os.stat(app, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    existing = False
+                else:
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise StoreError("Existing app collection must be a directory without symlinks")
+                    with directory(apps / app):
+                        pass
+                    existing = True
+                with directory(apps / staging, create=True) as stage:
+                    for name, data in candidate.items():
+                        atomic_file(apps / staging / f"{name}.bin", data)
+                    os.fsync(stage)
+                if existing:
+                    os.rename(app, previous, src_dir_fd=parent, dst_dir_fd=parent)
                     os.fsync(parent)
-            except FileNotFoundError:
-                pass
+                os.rename(staging, app, src_dir_fd=parent, dst_dir_fd=parent)
+                os.fsync(parent)
+                if existing:
+                    remove_collection(apps / previous)
 
     def override(self, name: str, source: Path | None) -> None:
         asset_name(name)
-        if name not in self.standards():
-            raise StoreError("Unknown standard asset")
         data = read_file(source) if source is not None else None
         if data is not None:
             self.inspect(data)
-        with self.transaction():
+        with self.transaction(wait_s=120):
             target = self.root / "overrides" / f"{name}.bin"
             if data is not None:
+                standard = self.standard_files()
+                if name not in standard:
+                    raise StoreError("Unknown standard asset")
+                standard[name] = data
+                shortages = [shortfall(standard, self.blobs(self.root / "apps" / app)) for app in self.app_names()]
+                shortage = max(shortages, default=shortfall(standard, {}))
+                if shortage:
+                    raise CapacityError(shortage)
                 atomic_file(target, data)
             else:
                 try:
@@ -225,35 +350,51 @@ class Store:
                 except FileNotFoundError:
                     pass
 
+    def status(self) -> dict[str, Any]:
+        with self.transaction(wait_s=120):
+            self.cleanup()
+            standard = []
+            names = self.standards()
+            for name in names:
+                default_data = read_file(self.catalog / f"{name}.bin")
+                default_meta = self.inspect(default_data)
+                try:
+                    data = read_file(self.root / "overrides" / f"{name}.bin")
+                except FileNotFoundError:
+                    data, overridden = default_data, False
+                else:
+                    overridden = True
+                meta = self.inspect(data)
+                standard.append(
+                    {
+                        "name": name,
+                        "bytes": len(data),
+                        "kind": meta["kind"],
+                        "params": sorted(meta["params"]),
+                        "overridden": overridden,
+                        "default_bytes": len(default_data),
+                        "default_kind": default_meta["kind"],
+                        "default_params": sorted(default_meta["params"]),
+                    }
+                )
+            apps = {}
+            for app in self.app_names():
+                files = self.blobs(self.root / "apps" / app)
+                sizes = [(len(data) + 4095) // 4096 * 4096 for data in files.values()]
+                apps[app] = {"bytes": sum(sizes), "largest": max(sizes, default=0), "names": list(files)}
+            orphans = [name for name in self.blob_names(self.root / "overrides", missing=True) if name not in names]
+            return {"capacity": CAPACITY, "standard": standard, "apps": apps, "orphan_overrides": orphans}
+
     def desired(self, app: str | None) -> dict[str, bytes]:
-        result = {}
-        for name in self.standards():
-            override = self.root / "overrides" / f"{name}.bin"
-            try:
-                data = read_file(override)
-            except FileNotFoundError:
-                data = read_file(self.catalog / f"{name}.bin")
-            self.inspect(data)
-            result[f"palmimo/{name}"] = data
-        if app is not None:
-            app_id(app)
-            path = self.root / "apps" / app
-            try:
-                with directory(path) as parent:
-                    names = sorted(os.listdir(parent))
-            except FileNotFoundError:
-                names = []
-            for filename in names:
-                if not filename.endswith(".bin"):
-                    raise StoreError("Unexpected entry in app asset directory")
-                name = asset_name(filename[:-4])
-                data = read_file(path / filename)
-                self.inspect(data)
-                result[f"{app}/{name}"] = data
-        sizes = [(len(data) + 4095) // 4096 * 4096 for data in result.values()]
-        if sum(sizes) + max(sizes, default=0) > CAPACITY:
-            raise StoreError("Desired assets exceed display capacity including replacement space")
-        return result
+        standard = self.standard_files()
+        candidate = self.blobs(self.root / "apps" / app_id(app), missing=True) if app is not None else {}
+        shortage = shortfall(standard, candidate)
+        if shortage:
+            raise CapacityError(shortage)
+        return {
+            **{f"palmimo/{name}": data for name, data in standard.items()},
+            **{f"{app}/{name}": data for name, data in candidate.items()},
+        }
 
     def launches(self, app: str | None) -> dict[str, int]:
         path = self.root / "launch.json"
@@ -467,6 +608,9 @@ def synchronize(store: Store, hardware: Any, app: str | None) -> tuple[dict[str,
                     result["result"] = "synced"
             finally:
                 connection.dtr = False
+    except BusyError as error:
+        result.update(result="busy", reason=str(error))
+        return result, 75
     except (StoreError, OSError, ValueError, ImportError) as error:
         result["reason"] = str(error)
         return result, 1

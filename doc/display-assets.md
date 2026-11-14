@@ -16,7 +16,7 @@ FW とホストの通信は palmimo-devkit の `doc/reference/display-protocol.m
 | `/usr/local/share/palmimo/display-assets/catalog.json` | SDK・エージェント向けの語彙の目録。標準集合の部分集合（形はアプリの `/run/palmimo/apps/<id>/assets.json` と同じ。id・説明・タグ・パラメータの説明・翻訳。種類と次元は書かない＝実機の `ASSET INFO` が正本） | root、読み取り専用。アプリから読める |
 | `/usr/local/share/palmimo/display-assets/<name>.bin` | 標準集合の既定の中身（変換済み。system.* を含む） | 同上 |
 | `/var/lib/palmimo/display-assets/overrides/<name>.bin` | 利用者が Portal で差し替えた中身（変換済み） | root。書くのは `assets override` だけ。アプリには見せない |
-| `/var/lib/palmimo/display-assets/apps/<app ID>/<name>.bin` | アプリのアセット（インストール時に変換） | root。書くのは `assets install` だけ |
+| `/var/lib/palmimo/display-assets/apps/<app ID>/<name>.bin` | アプリのアセット（インストール時に変換） | root。Portal が書くのは `assets replace`。手動の `assets install` も可 |
 | `/var/lib/palmimo/display-assets/launch.json` | アプリの起動の通し番号（古い順に外すため。時計は使わない） | root。`assets sync --app` が増やす |
 
 **標準集合**は `/usr/local/share/palmimo/display-assets/` 直下の有効な `<name>.bin` の通常ファイル全体。
@@ -26,7 +26,7 @@ symlink を辿らず、規則外の名前や通常ファイルでない `.bin` �
 現在は標準集合が表情 14 種と `system.idle`・`system.sleep`・`system.wake` の **17 個**、目録は表情の **14 個**。
 system.* は標準集合に含め、目録には入れない。
 
-Portal は差し替え画面の名前をこの公開ディレクトリの `.bin` 一覧から直接列挙する（symlink は辿らず上と同じ規則で検査。新しい一覧 CLI は設けない）。
+Portal は差し替え画面の名前をこの公開ディレクトリの `.bin` 一覧から直接列挙する（symlink は辿らず上と同じ規則で検査。名前の事前照合もこの一覧を使う。差し替えの有無・大きさ・容量の情報は root の `assets status` を使う）。
 system.* の表示名は Portal 側で持つ。SDK の語彙は引き続き catalog.json を読む。
 
 ## 変換器
@@ -95,10 +95,14 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
 - 起動時の unit・platform 更新の段・手動の書き直しは、どれも `desired.json` の `protocol` の FW へ収束させる（`ensure`）。
 - **`desired.json` が無いとき、`ensure` は何も書かない**（`{"result": "undesired"}`）。起動時の unit は Portal より前に動き、autostart の情報を持たないため。
 - `desired.json` を書くのは `palmimo-display-firmware desire <1|2> --by <app-start|initial>`（root、Portal が sudo で呼ぶ）だけ。
-  Portal は起動時と platform 更新の段で、`desired.json` が無ければ初期値（autostart のアプリがあればその要求、無ければ 2）を `--by initial` で書いてから `ensure` する。
+  Portal は起動時と platform 更新の段で、`desired.json` が無ければ初期値（preempt で止めたアプリの要求 ＞ 動いている motor_display アプリの要求 ＞ autostart の先頭の要求 ＞ 2。要求の無いアプリは飛ばす）を `--by initial` で書いてから `ensure` する。
   アプリの起動の判定では `--by app-start` で書く。`desire` の出力は `{"protocol": <int>, "changed": <bool>}`。
 - アプリの要求は、アプリの環境にインストールされた palmimo-sdk の `display_firmware.json` をファイルとして読む（devkit の
   `display-protocol.md`「Firmware selection」）。
+
+`ensure` は機器が無い場合、初めて確認する機体でも過去に顔を確認した機体でも absent・終了 0 を返す。
+前者の reason は null、後者には USB 接続や復旧を案内する reason を付ける。before/after は null。
+顔が無いことを起動の失敗とせず、起動時の書き込み失敗回数も増やさない。
 
 ## アセットの同期
 
@@ -108,17 +112,37 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
 - Flash に置くべき集合 = 上記の標準集合全体（目録に無い system.* も含み、差し替えがあればその中身）＋ `--app` のアプリのアセット。`ASSET LIST` の CRC と比べて、違う・無いものを `ASSET PUT`。
 - 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。
 - 結果は `{"result": "synced" | "busy" | "skipped" | "failed", "put": [...], "deleted": [...], "reason"}`。経過は標準エラーに 1 行ずつ。
-- 容量の条件は Portal がインストールと差し替えの時点で検査する。同期の道具は条件が守られている前提で動き、守られていなければ `failed`。
+- 容量の条件は Portal が先に検査し、`replace`・`override` も保存時に検査する。同期でも守られていなければ `failed`。保存時の不足は `{"ok": false, "reason": "...", "short_by": <不足バイト>}`・終了 1。
   - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
   - 1 アセットの占める量: `ceil(bytes / 4096) × 4096`。
   - 条件: 標準集合全体（system.* と差し替えを反映し、目録の件数で絞らない）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
 
+store の `.lock` は `status`・`replace`・`uninstall`・`override`・`install` が最大 120 秒待つ。
+0.1 秒おきに非ブロック flock を試し、期限は monotonic で測る。待ち切れなければ `{"ok": false, "reason": "Asset store is busy"}`・終了 75。
+`sync` は display.lock と store ロックの両方を非ブロックで取り、どちらも待たずに busy・終了 75 を返す。
+
 ### 保存の入口（root、Portal が sudo で呼ぶ）
 
-- `assets install <app ID> <name> <変換済みの .bin>`: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
+- `assets replace <app ID> <dir>`: Portal の staging ディレクトリの直下を、すべて有効な `<name>.bin` の通常ファイルとして symlink を辿らず読み、全件 inspect する。標準集合全体＋候補集合の容量条件も検査し、不合格なら現在の集合を変更しない。
+  保存前に store ロックを待って取り、容量はロック内でも再確認する。`apps/.replace-<app ID>/` に全件を原子的に保存して fsync → 旧集合があれば `.old-<app ID>` に rename → 新集合を `apps/<app ID>` に rename → 親を fsync → 旧集合を削除する。空の候補はアプリの集合を削除する。
+  2 回の rename の間で中断されると、現在の集合は不在（空集合）になり得る。`.replace-*`・`.old-*` は次の replace・uninstall・status の冒頭で掃除し、status のアプリ一覧には出さない。sync は指定された `apps/<app ID>/` だけを読む。
+- `assets install <app ID> <name> <変換済みの .bin>`（手動互換用。Portal は replace を使う）: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
 - `assets uninstall <app ID>`: そのアプリの分を消す（Flash の分は次に場所が要るときに外れる）。
-- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。
-- どれも出力は `{"ok": <bool>, "reason"}`。Portal は変換器を user で動かし、結果の `.bin` をこれらに渡す。
+- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。差し替えは候補を反映した標準集合＋インストール済みの各アプリについて容量を検査し、最大の不足量を short_by で返す。reset は容量を検査せず、標準集合から消えた孤児の名前も削除できる。
+- 上の保存操作の出力は `{"ok": <bool>, "reason"}`。Portal は変換器を user で動かし、結果の `.bin` をこれらに渡す。
+
+### 保存内容の照会（root）
+
+`assets status [--json]` は store ロックを待ち、以下の 1 行 JSON を返す（成功は終了 0、検査や読み取り失敗は ok:false・終了 1、ロック期限は終了 75）。USB には触れない。
+
+```json
+{"capacity":6275072,"standard":[{"name":"happy","bytes":12345,"kind":"vector","params":["eye_color"],"overridden":false,"default_bytes":12345,"default_kind":"vector","default_params":["eye_color"]}],"apps":{"zip.example":{"bytes":20480,"largest":16384,"names":["bye","welcome"]}},"orphan_overrides":["removed"]}
+```
+
+standard は標準集合の名前順。bytes/kind/params は有効な差し替えを反映し、default_* は既定の .bin。params は inspect で得る sid の一覧。
+apps の bytes は 4KB 単位の占有量の和、largest は最大の 1 個（空集合は 0）、names は名前順。
+orphan_overrides は overrides に残り、現在の標準集合には無い名前。apps の直下の `.` で始まる作業用項目は一覧から除外する。
+各アプリの中は通常の `<name>.bin` だけを認め、symlink・サブディレクトリ・他の項目があれば失敗とする。
 
 ### 同梱物の受け入れ契約
 

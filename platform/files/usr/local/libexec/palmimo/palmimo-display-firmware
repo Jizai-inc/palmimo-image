@@ -356,6 +356,7 @@ class Updater:
         self.recovery_chip: str | None = None
         self.target_chip: str | None = None
         self.in_bootsel = False
+        self.absence_reason: str | None = None
         self.before: str | None = None
         self.after: str | None = None
 
@@ -451,9 +452,7 @@ class Updater:
             raise FirmwareError("--adopt-bootsel requires no CDC and one RP2350 BOOTSEL; disconnect other Pico boards")
         if not ports and not usb:
             if state.get("seen"):
-                raise FirmwareError(
-                    "Known display is missing; check USB or use BOOT + RST; clear state only after removing/replacing the face"
-                )
+                self.absence_reason = "Known display is missing; check USB or use BOOT + RST; clear state only after removing/replacing the face"
             return "absent"
         port = ""
         power_on = False
@@ -544,6 +543,7 @@ class Updater:
     def ensure(self, boot: bool = False, adopt_bootsel: bool = False) -> tuple[dict[str, Any], int]:
         self.end = self.hw.monotonic() + UPDATE_BUDGET_SECONDS
         self.before = self.after = None
+        self.absence_reason = None
         self.writing = False
         self.recovery_chip = None
         self.target_chip = None
@@ -594,6 +594,8 @@ class Updater:
                     self.paths.work.mkdir(mode=0o700, parents=True)
                     self.save(state)
                     result = self.update(declared, state, boot, adopt_bootsel)
+                    if result == "absent":
+                        reason = self.absence_reason
                     if result == "skipped":
                         reason = state.get("last_reason") or "Repeated boot write failures; retry manually"
                     code = 0
@@ -644,6 +646,7 @@ class Updater:
 def asset_commands(args: Any, paths: Paths, hardware: Hardware) -> tuple[dict[str, Any], int]:
     sync = args.action == "sync"
     errors: tuple[type[Exception], ...] = (FirmwareError, OSError, ValueError, ImportError)
+    store_busy: type[Exception] | None = None
     try:
         loader = importlib.machinery.SourceFileLoader(
             "display_asset_store", str(Path(__file__).with_name("display_assets.py"))
@@ -653,13 +656,18 @@ def asset_commands(args: Any, paths: Paths, hardware: Hardware) -> tuple[dict[st
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
         errors += (module.StoreError,)
+        store_busy = module.BusyError
         store = module.Store(paths.assets, paths.catalog)
         if sync:
             if args.app is not None:
                 module.app_id(args.app)
             with reservation(paths.locks):
                 return module.synchronize(store, hardware, args.app)
-        if args.action == "install":
+        if args.action == "status":
+            return store.status(), 0
+        if args.action == "replace":
+            store.replace(args.app, args.source)
+        elif args.action == "install":
             store.install(args.app, args.name, args.source)
         elif args.action == "uninstall":
             store.uninstall(args.app)
@@ -671,9 +679,19 @@ def asset_commands(args: Any, paths: Paths, hardware: Hardware) -> tuple[dict[st
     except BusyError as error:
         return {"result": "busy", "put": [], "deleted": [], "reason": str(error)}, 75
     except errors as error:
+        busy = store_busy is not None and isinstance(error, store_busy)
         if sync:
-            return {"result": "failed", "put": [], "deleted": [], "reason": str(error)}, 1
-        return {"ok": False, "reason": str(error)}, 1
+            return {
+                "result": "busy" if busy else "failed",
+                "put": [],
+                "deleted": [],
+                "reason": str(error),
+            }, 75 if busy else 1
+        response: dict[str, Any] = {"ok": False, "reason": str(error)}
+        shortage = getattr(error, "short_by", None)
+        if isinstance(shortage, int):
+            response["short_by"] = shortage
+        return response, 75 if busy else 1
 
 
 def terminate(signum: int, frame: Any) -> None:
@@ -694,6 +712,10 @@ def main() -> int:
     desire.add_argument("--json", action="store_true")
     assets = commands.add_parser("assets")
     actions = assets.add_subparsers(dest="action", required=True)
+    status = actions.add_parser("status")
+    replace = actions.add_parser("replace")
+    replace.add_argument("app")
+    replace.add_argument("source", type=Path)
     install = actions.add_parser("install")
     install.add_argument("app")
     install.add_argument("name")
@@ -706,7 +728,7 @@ def main() -> int:
     override.add_argument("source", type=Path, nargs="?")
     sync = actions.add_parser("sync")
     sync.add_argument("--app")
-    for action in (install, uninstall, override, sync):
+    for action in (install, uninstall, override, sync, status, replace):
         action.add_argument("--json", action="store_true")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, terminate)
