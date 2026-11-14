@@ -533,8 +533,8 @@ def test_lottie_source_limits_accept_strings_across_read_boundaries(monkeypatch:
     raw = json.dumps(doc).encode()
 
     class Chunked(io.BytesIO):
-        def read(self, size: int = -1) -> bytes:
-            return super().read(min(size, 3))
+        def read(self, size: int | None = -1) -> bytes:
+            return super().read(min(size, 3) if size is not None and size >= 0 else 3)
 
     monkeypatch.setattr(converter, "MAX_SOURCE_BYTES", len(raw))
     monkeypatch.setattr(converter, "MAX_JSON_TOKENS", 8)
