@@ -903,7 +903,7 @@ def test_replace_capacity_failure_reports_shortfall_without_mutation(
     assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
 
 
-def test_interrupted_replace_is_empty_and_can_be_retried(
+def test_interrupted_replace_restores_previous_collection_and_can_be_retried(
     rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     paths, _ = rig
@@ -922,10 +922,12 @@ def test_interrupted_replace_is_empty_and_can_be_retried(
         patch.setattr(fw.os, "rename", interrupt)
         assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))[0] == 1
     assert not (paths.assets / "apps/zip.demo").exists()
-    sync_code, synced = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
-    assert sync_code == 0 and synced["result"] == "synced" and synced["put"] == []
+    # Without rollback, a power loss between renames silently discards the complete old collection.
     code, status = invoke(monkeypatch, capsys, "status", "--json")
-    assert code == 0 and "zip.demo" not in status["apps"]
+    assert code == 0 and status["apps"]["zip.demo"]["names"] == ["old"]
+    assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
+    sync_code, synced = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
+    assert sync_code == 0 and synced["put"] == ["zip.demo/old"]
     assert not any(p.name.startswith((".replace-", ".old-")) for p in (paths.assets / "apps").iterdir())
     assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))[0] == 0
     assert (paths.assets / "apps/zip.demo/new.bin").read_bytes() == asset(value=1)

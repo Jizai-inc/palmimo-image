@@ -125,7 +125,7 @@ store の `.lock` は `status`・`replace`・`uninstall`・`override`・`install
 
 - `assets replace <app ID> <dir>`: Portal の staging ディレクトリの直下を、すべて有効な `<name>.bin` の通常ファイルとして symlink を辿らず読み、全件 inspect する。標準集合全体＋候補集合の容量条件も検査し、不合格なら現在の集合を変更しない。
   保存前に store ロックを待って取り、容量はロック内でも再確認する。`apps/.replace-<app ID>/` に全件を原子的に保存して fsync → 旧集合があれば `.old-<app ID>` に rename → 新集合を `apps/<app ID>` に rename → 親を fsync → 旧集合を削除する。空の候補はアプリの集合を削除する。
-  2 回の rename の間で中断されると、現在の集合は不在（空集合）になり得る。`.replace-*`・`.old-*` は次の replace・uninstall・status の冒頭で掃除し、status のアプリ一覧には出さない。sync は指定された `apps/<app ID>/` だけを読む。
+  2 回の rename の間で中断された場合、次の replace・uninstall・status の冒頭で `.old-<app ID>` を元へ戻し、旧集合に戻る。公開済みの集合があれば `.old-*` は削除し、`.replace-*` は常に捨てる。作業用の名前は status のアプリ一覧には出さない。sync は指定された `apps/<app ID>/` だけを読む。
 - `assets install <app ID> <name> <変換済みの .bin>`（手動互換用。Portal は replace を使う）: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
 - `assets uninstall <app ID>`: そのアプリの分を消す（Flash の分は次に場所が要るときに外れる）。
 - `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。差し替えは候補を反映した標準集合＋インストール済みの各アプリについて容量を検査し、最大の不足量を short_by で返す。reset は容量を検査せず、標準集合から消えた孤児の名前も削除できる。

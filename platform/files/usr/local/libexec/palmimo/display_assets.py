@@ -267,7 +267,12 @@ class Store:
         except FileNotFoundError:
             return
         for name in names:
-            if name.startswith((".replace-", ".old-")):
+            if name.startswith(".old-") and name[5:] not in names:
+                app = app_id(name[5:])
+                with directory(self.root / "apps" / name), directory(self.root / "apps") as parent:
+                    os.rename(name, app, src_dir_fd=parent, dst_dir_fd=parent)
+                    os.fsync(parent)
+            elif name.startswith((".replace-", ".old-")):
                 remove_collection(self.root / "apps" / name)
 
     def install(self, app: str, name: str, source: Path) -> None:
