@@ -116,6 +116,8 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
   - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
   - 1 アセットの占める量: `ceil(bytes / 4096) × 4096`。
   - 条件: 標準集合全体（system.* と差し替えを反映し、目録の件数で絞らない）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
+  - FW の目録にも同じ集合が収まること。`palmimo/<name>`・`<app ID>/<name>` の完全な ASCII ID ごとに `align4(13 + ID のバイト長)` を加算し、合計 ≤ 4,076 バイト（4,092 − ヘッダ16）、件数 ≤ 254。目録は同じ ID の更新で項目を置き換えるため、本体のような最大1個分の余裕は不要。
+  - `replace`・`override`・同期の望む集合で本体と FW 目録の両条件を検査する。`override` は各インストール済みアプリとの組み合わせを検査する。目録不足の reason は `Assets exceed display directory capacity`、保存時の `short_by` は不足バイト（件数超過は超過1件につき最小項目長16バイト）を返す。同期では DEL・PUT の前に `failed` にする。
 
 store の `.lock` は `status`・`replace`・`uninstall`・`override`・`install` が最大 120 秒待つ。
 0.1 秒おきに非ブロック flock を試し、期限は monotonic で測る。待ち切れなければ `{"ok": false, "reason": "Asset store is busy"}`・終了 75。

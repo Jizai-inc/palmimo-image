@@ -903,6 +903,71 @@ def test_replace_capacity_failure_reports_shortfall_without_mutation(
     assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
 
 
+@pytest.mark.parametrize("action", ["replace", "override", "sync"])
+@pytest.mark.parametrize("count,short_by", [(40, 0), (41, 100)])
+def test_directory_capacity_checks_full_ids_before_mutation(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+    count: int,
+    short_by: int,
+) -> None:
+    paths, flash = rig
+    app = "zip." + "a" * 40
+    standard(paths, "happy", asset())
+    standard(paths, "s" * 24, asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    for i in range(count):
+        (source / f"{i:040d}.bin").write_bytes(asset())
+    # The two standard entries occupy 76 bytes; forty full app IDs occupy 4,000.
+    args: tuple[str, ...]
+    if action == "replace":
+        installed(paths, app, "old", asset(value=1))
+        args = ("replace", app, str(source))
+    else:
+        for candidate in source.iterdir():
+            installed(paths, app, candidate.stem, candidate.read_bytes())
+        if action == "override":
+            installed(paths, "zip.other", "keep", asset())
+            override = paths.assets / "overrides/happy.bin"
+            override.parent.mkdir()
+            override.write_bytes(asset(value=1))
+            args = ("override", "happy", str(source / f"{0:040d}.bin"))
+        else:
+            flash.assets["palmimo/happy"] = (0, asset(value=1))
+            args = ("sync", "--app", app, "--json")
+    before = {p.relative_to(paths.assets): p.read_bytes() for p in paths.assets.rglob("*.bin")}
+    flash_before = dict(flash.assets)
+    code, result = invoke(monkeypatch, capsys, *args)
+    if short_by:
+        assert code == 1
+        assert "directory" in result["reason"].lower()
+        if action == "sync":
+            assert result["result"] == "failed"
+            assert result["put"] == result["deleted"] == []
+        else:
+            assert result["ok"] is False and result["short_by"] == short_by
+        assert {p.relative_to(paths.assets): p.read_bytes() for p in paths.assets.rglob("*.bin")} == before
+        assert flash.assets == flash_before
+        assert not flash.puts and not flash.deleted
+    else:
+        assert code == 0, result
+        if action == "replace":
+            assert {p.name: p.read_bytes() for p in (paths.assets / "apps" / app).glob("*.bin")} == {
+                p.name: p.read_bytes() for p in source.iterdir()
+            }
+        elif action == "override":
+            assert (paths.assets / "overrides/happy.bin").read_bytes() == asset()
+        else:
+            assert result["result"] == "synced"
+            assert set(flash.assets) == {"palmimo/happy", "palmimo/" + "s" * 24} | {
+                f"{app}/{i:040d}" for i in range(count)
+            }
+
+
 def test_interrupted_replace_restores_previous_collection_and_can_be_retried(
     rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

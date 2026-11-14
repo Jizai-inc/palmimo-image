@@ -23,6 +23,9 @@ from typing import Any
 
 
 CAPACITY = 6_275_072
+# The v2 directory sector reserves 16 bytes for its header and 4 for its CRC.
+DIRECTORY_CAPACITY = 4092 - 16
+DIRECTORY_ENTRIES = 254
 APP = re.compile(r"[a-z0-9][a-z0-9-]{0,39}\.[a-z][a-z0-9-]{0,39}")
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 CRC = re.compile(r"[0-9a-f]{8}")
@@ -41,14 +44,21 @@ class BusyError(StoreError):
 
 
 class CapacityError(StoreError):
-    def __init__(self, short_by: int) -> None:
-        super().__init__("Assets exceed display capacity including replacement space")
+    def __init__(self, short_by: int, reason: str) -> None:
+        super().__init__(reason)
         self.short_by = short_by
 
 
-def shortfall(standard: dict[str, bytes], app: dict[str, bytes]) -> int:
+def shortfall(standard: dict[str, bytes], app: dict[str, bytes], owner: str | None) -> tuple[int, str]:
     sizes = [(len(data) + 4095) // 4096 * 4096 for data in (*standard.values(), *app.values())]
-    return max(0, sum(sizes) + max(sizes, default=0) - CAPACITY)
+    ids = [f"palmimo/{name}" for name in standard] + [f"{owner}/{name}" for name in app]
+    directory_bytes = sum((13 + len(name) + 3) // 4 * 4 for name in ids)
+    directory_shortage = max(directory_bytes - DIRECTORY_CAPACITY, (len(ids) - DIRECTORY_ENTRIES) * 16)
+    if directory_shortage > 0:
+        return directory_shortage, "Assets exceed display directory capacity"
+    return max(0, sum(sizes) + max(sizes, default=0) - CAPACITY), (
+        "Assets exceed display capacity including replacement space"
+    )
 
 
 def remove_collection(path: Path) -> None:
@@ -292,15 +302,15 @@ class Store:
     def replace(self, app: str, source: Path) -> None:
         app_id(app)
         candidate = self.blobs(source)
-        shortage = shortfall(self.standard_files(), candidate)
-        if shortage:
-            raise CapacityError(shortage)
+        shortage = shortfall(self.standard_files(), candidate, app)
+        if shortage[0]:
+            raise CapacityError(*shortage)
         with self.transaction(wait_s=120):
             self.cleanup()
             # A waiting writer must not rely on the override snapshot from before the lock.
-            shortage = shortfall(self.standard_files(), candidate)
-            if shortage:
-                raise CapacityError(shortage)
+            shortage = shortfall(self.standard_files(), candidate, app)
+            if shortage[0]:
+                raise CapacityError(*shortage)
             apps = self.root / "apps"
             if not candidate:
                 remove_collection(apps / app)
@@ -341,10 +351,10 @@ class Store:
                 if name not in standard:
                     raise StoreError("Unknown standard asset")
                 standard[name] = data
-                shortages = [shortfall(standard, self.blobs(self.root / "apps" / app)) for app in self.app_names()]
-                shortage = max(shortages, default=shortfall(standard, {}))
-                if shortage:
-                    raise CapacityError(shortage)
+                shortages = [shortfall(standard, self.blobs(self.root / "apps" / app), app) for app in self.app_names()]
+                shortage = max(shortages, key=lambda item: item[0], default=shortfall(standard, {}, None))
+                if shortage[0]:
+                    raise CapacityError(*shortage)
                 atomic_file(target, data)
             else:
                 try:
@@ -393,9 +403,9 @@ class Store:
     def desired(self, app: str | None) -> dict[str, bytes]:
         standard = self.standard_files()
         candidate = self.blobs(self.root / "apps" / app_id(app), missing=True) if app is not None else {}
-        shortage = shortfall(standard, candidate)
-        if shortage:
-            raise CapacityError(shortage)
+        shortage = shortfall(standard, candidate, app)
+        if shortage[0]:
+            raise CapacityError(*shortage)
         return {
             **{f"palmimo/{name}": data for name, data in standard.items()},
             **{f"{app}/{name}": data for name, data in candidate.items()},
