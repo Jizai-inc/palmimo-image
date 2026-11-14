@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import importlib.machinery
+import importlib.util
+import io
 import json
 import struct
 import subprocess
@@ -451,3 +454,89 @@ def test_inspect_handles_maximum_literal_rle_runs(tmp_path: Path, truncated: boo
     source = tmp_path / "literal.bin"
     source.write_bytes(struct.pack("<4sHHII16x", b"PIMG", 2, 1, 32 + len(body), zlib.crc32(body)) + body)
     assert (run_cli("inspect", source)[0] == 0) is not truncated
+
+
+@pytest.mark.parametrize("budget", ["keys", "cumulative_keys", "tracks", "components"])
+def test_lottie_stops_before_building_over_budget_tracks(budget: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without early rejection, hostile properties allocate complete tracks before the limit is checked.
+    loader = importlib.machinery.SourceFileLoader("limited_converter", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    converter = importlib.util.module_from_spec(spec)
+    loader.exec_module(converter)
+    reads: list[int] = []
+
+    class Key(dict[str, Any]):
+        def __getitem__(self, name: str) -> Any:
+            if name == "t":
+                reads.append(1)
+            return super().__getitem__(name)
+
+    doc = composition()
+    transform = doc["layers"][0]["ks"]
+    if budget in ("keys", "cumulative_keys"):
+        monkeypatch.setattr(converter, "MAX_KEYS", 2, raising=False)
+        count = 3 if budget == "keys" else 2
+        transform["p"] = {"a": 1, "k": [Key(t=i, s=[0, 0], e=[0, 0]) for i in range(count)]}
+        expected = 0 if budget == "keys" else 2
+        if budget == "cumulative_keys":
+            transform["a"] = {"a": 1, "k": [Key(t=0, s=[0, 0], e=[0, 0])]}
+    elif budget == "tracks":
+        monkeypatch.setattr(converter, "MAX_TRACKS", 1, raising=False)
+        transform["a"] = {"a": 1, "k": [Key(t=0, s=[0, 0], e=[0, 0])]}
+        expected = 0
+    else:
+        monkeypatch.setattr(converter, "MAX_COMPONENTS", 2, raising=False)
+        transform["p"] = {"a": 1, "k": [Key(t=0, s=[0, 0, 0], e=[0, 0, 0])]}
+        expected = 0
+    with pytest.raises(converter.AssetError) as error:
+        converter.Lottie(doc).convert()
+    assert error.value.errors[0]["code"] == "limit"
+    assert len(reads) == expected
+
+
+@pytest.mark.parametrize("budget", ["bytes", "tokens", "depth"])
+def test_lottie_source_limits_precede_json_decoding(budget: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without bounded loading, a compact JSON source expands into a huge tree before conversion rejects it.
+    loader = importlib.machinery.SourceFileLoader("bounded_converter", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    converter = importlib.util.module_from_spec(spec)
+    loader.exec_module(converter)
+    if budget == "bytes":
+        monkeypatch.setattr(converter, "MAX_SOURCE_BYTES", 8, raising=False)
+        raw = b'"123456789"'
+    elif budget == "tokens":
+        monkeypatch.setattr(converter, "MAX_JSON_TOKENS", 3, raising=False)
+        raw = b"[0,0,0,0]"
+    else:
+        monkeypatch.setattr(converter, "MAX_JSON_DEPTH", 2, raising=False)
+        raw = b"[[[0]]]"
+
+    def decode(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("over-budget source reached JSON decoding")
+
+    monkeypatch.setattr(converter.json, "loads", decode)
+    with pytest.raises(converter.AssetError) as error:
+        converter.load_lottie(io.BytesIO(raw))
+    assert error.value.errors[0]["code"] == "limit"
+
+
+def test_lottie_source_limits_accept_strings_across_read_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without this, escaped quotes or brackets inside strings can reject a valid bounded source.
+    loader = importlib.machinery.SourceFileLoader("string_converter", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    converter = importlib.util.module_from_spec(spec)
+    loader.exec_module(converter)
+    doc = {"label": '"\\ ][ { escaped', "values": [0, True, None]}
+    raw = json.dumps(doc).encode()
+
+    class Chunked(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            return super().read(min(size, 3))
+
+    monkeypatch.setattr(converter, "MAX_SOURCE_BYTES", len(raw))
+    monkeypatch.setattr(converter, "MAX_JSON_TOKENS", 8)
+    monkeypatch.setattr(converter, "MAX_JSON_DEPTH", 2)
+    assert converter.load_lottie(Chunked(raw)) == doc

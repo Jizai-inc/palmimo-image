@@ -40,7 +40,7 @@ palmimo-display-assets inspect <.bin> [--json]
 
 - 入力の種類は拡張子と中身で決める: Lottie（`.json`）→ SPAF、GIF → PIMG（複数フレーム）、PNG・JPEG → PIMG（1 フレーム）。
 - 失敗は終了 2 と、`--json` なら `{"ok": false, "errors": [{"code", "path", "message"}]}`。Lottie の非対応機能は、レイヤー名・機能・JSON のパスを
-  **すべて**並べる（最初の 1 つで止めない）。
+  **すべて**並べる（最初の 1 つで止めない）。ただし資源の上限超過は即時停止する。JSON は読み込み中に 16 MiB・100 万トークン（コンテナ・文字列・スカラー）・深さ 64 を検査し、デコード前に拒否する。キー数（累計 2048）・Track 数（256）・成分数（144）は組み立て中に検査する。
 - 成功は `{"ok": true, "kind": "vector|image|gif", "bytes": <int>, "crc32": "<8 桁の小文字 16 進>", "params": {"<sid>": {"dim": <int>}}, "warnings": [{"code", "message"}]}`。
   `inspect` は同じ形で既存の `.bin` を検査する（`convert` の結果を root 側で検査し直すのに使う）。
 - 警告: GIF のコマ間隔が約 30fps より遅い（高コントラストの動きがちらついて見える）、画像を標準アセットの差し替えに使う

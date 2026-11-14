@@ -16,12 +16,18 @@ import zlib
 from array import array
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Never
+from typing import Any, BinaryIO, Never
 
 
 SID = re.compile(r"[a-z0-9_]{1,32}", re.ASCII)
 VECTORS = ("s", "e", "ox", "oy", "ix", "iy")
 MAX_FILE = 6_275_072
+MAX_KEYS = 2048
+MAX_TRACKS = 256
+MAX_COMPONENTS = 144
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_JSON_TOKENS = 1_000_000
+MAX_JSON_DEPTH = 64
 
 
 class AssetError(ValueError):
@@ -332,6 +338,43 @@ def convert_image(source: Path) -> bytes:
     return struct.pack("<4sHHII16x", b"PIMG", 2, 1, 32 + len(body), zlib.crc32(body)) + body
 
 
+def load_lottie(stream: BinaryIO) -> Any:
+    """Bound source bytes and JSON structure before allocating the decoded tree."""
+    raw = bytearray()
+    tokens = depth = 0
+    quoted = escaped = scalar = False
+    while chunk := stream.read(min(65536, MAX_SOURCE_BYTES + 1 - len(raw))):
+        raw.extend(chunk)
+        require(len(raw) <= MAX_SOURCE_BYTES, "limit", "$", "Lottie source exceeds byte limit")
+        for byte in chunk:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif byte == 92:
+                    escaped = True
+                elif byte == 34:
+                    quoted = False
+                continue
+            if byte in b" \t\r\n,:]}":
+                scalar = False
+                if byte in b"]}":
+                    depth -= 1
+                continue
+            if byte == 34:
+                quoted = True
+            elif byte in b"[{":
+                depth += 1
+                scalar = False
+                require(depth <= MAX_JSON_DEPTH, "limit", "$", "Lottie source exceeds nesting limit")
+            elif scalar:
+                continue
+            else:
+                scalar = True
+            tokens += 1
+            require(tokens <= MAX_JSON_TOKENS, "limit", "$", "Lottie source exceeds token limit")
+    return json.loads(raw)
+
+
 class Lottie:
     def __init__(self, doc: dict[str, Any]) -> None:
         self.doc = doc
@@ -341,6 +384,7 @@ class Lottie:
         self.errors: list[dict[str, str]] = []
         self.notices: list[dict[str, str]] = []
         self.slot_dims: dict[str, int] = {}
+        self.key_count = 0
 
     def error(self, layer: str, feature: str, path: str, code: str = "unsupported") -> None:
         self.errors.append({"code": code, "path": path, "message": f"{layer}: {feature}"})
@@ -363,6 +407,8 @@ class Lottie:
             return
         if not isinstance(obj, dict):
             return
+        if obj.get("a") and isinstance(obj.get("k"), list):
+            require(len(obj["k"]) <= MAX_KEYS, "limit", path, "Too many property keys")
         ty = obj.get("ty")
         if isinstance(ty, str) and ty not in {"gr", "el", "rc", "sh", "fl", "st", "tr"}:
             self.error(
@@ -444,10 +490,14 @@ class Lottie:
         high: float,
         topology: tuple[int, bool] | None = None,
     ) -> int:
+        require(len(self.tracks) < MAX_TRACKS, "limit", path, "Too many tracks")
         p = self.resolve(prop if prop is not None else {"k": default})
         sid = prop.get("sid", "") if prop is not None else ""
         raw_keys = p["k"] if p.get("a") else [{"t": 0, "s": p["k"]}]
         require(isinstance(raw_keys, list) and len(raw_keys) > 0, "input", path, "Expected nonempty key list")
+
+        require(self.key_count + len(raw_keys) <= MAX_KEYS, "limit", path, "Too many keys")
+        self.key_count += len(raw_keys)
 
         def flatten(value: Any) -> list[Any]:
             if topology is not None:
@@ -476,6 +526,7 @@ class Lottie:
             start = flatten(value)
             end = flatten(key.get("e", raw_keys[i + 1].get("s", value))) if i + 1 < len(raw_keys) else start
             dim = len(start)
+            require(max(dim, len(end)) <= MAX_COMPONENTS, "limit", path, "Too many property components")
             if dim not in dims or len(end) != dim or any(not bounded(x, low, high) for x in [*start, *end]):
                 self.error(layer, f"property requires dimension {dims} and values {low}..{high}", path, "numeric")
             t = key["t"]
@@ -488,6 +539,7 @@ class Lottie:
             for which, axis, fallback in (("o", "x", 0), ("o", "y", 0), ("i", "x", 1), ("i", "y", 1)):
                 handle = key.get(which, {}).get(axis, fallback)
                 handle = handle if isinstance(handle, list) else [handle]
+                require(len(handle) <= MAX_COMPONENTS, "limit", path, "Too many easing components")
                 handle = handle * dim if len(handle) == 1 else handle
                 if len(handle) != dim or any(not bounded(v, 0, 1) for v in handle):
                     self.error(layer, "easing controls require dimension-matched values in 0..1", path, "numeric")
@@ -609,6 +661,8 @@ class Lottie:
                             -1,
                         ]
                     except AssetError as exc:
+                        if any(error["code"] == "limit" for error in exc.errors):
+                            raise
                         for error in exc.errors:
                             self.error(name, error["message"], error["path"], error["code"])
                         continue
@@ -680,6 +734,8 @@ class Lottie:
             try:
                 self.compile_layer(layer, path, i)
             except AssetError as exc:
+                if any(error["code"] == "limit" for error in exc.errors):
+                    raise
                 for error in exc.errors:
                     self.error(str(layer.get("nm", i)), error["message"], error["path"], error["code"])
             except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
@@ -687,8 +743,6 @@ class Lottie:
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),
             ("draws", len(self.draws), 8),
-            ("tracks", len(self.tracks), 256),
-            ("keys", sum(len(t["keys"]) for t in self.tracks), 2048),
             ("slots", len(self.slot_dims), 32),
         ):
             if count > limit:
@@ -817,9 +871,8 @@ def main() -> int:
                 blob = stream.read(MAX_FILE + 1)
         elif args.input.suffix.lower() == ".json":
             with args.input.open("rb") as stream:
-                raw = stream.read(16 * 1024 * 1024 + 1)
-            require(len(raw) <= 16 * 1024 * 1024, "limit", str(args.input), "Lottie source exceeds 16 MiB")
-            compiler = Lottie(json.loads(raw))
+                doc = load_lottie(stream)
+            compiler = Lottie(doc)
             blob = compiler.convert()
             notices = compiler.notices
         else:
