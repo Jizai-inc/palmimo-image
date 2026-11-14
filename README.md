@@ -433,8 +433,8 @@ and synchronize them with protocol 2 firmware. Convert a source with
 `/usr/local/libexec/palmimo/palmimo-display-assets convert source.json -o asset.bin --json`, then install it
 with `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets install zip.my-app welcome asset.bin`.
 `assets uninstall zip.my-app` removes the local app assets; flash copies remain
-until space is needed. `assets override happy asset.bin` replaces a catalogued
-standard asset, and `assets override --reset happy` restores its bundled default.
+until space is needed. `assets override happy asset.bin` replaces a
+standard asset (catalogued or `system.*`), and `assets override --reset happy` restores its bundled default.
 
 Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets sync --app zip.my-app --json` before
 starting that app, or omit `--app` to synchronize only the standard assets.
