@@ -201,13 +201,20 @@ def test_gif_delays_are_panel_refresh_counts(tmp_path: Path, delays: list[int], 
     assert run_cli("inspect", output) == (0, result)
 
 
-def test_single_frame_gif_without_delay_remains_animation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("duration", [None, 0, 100])
+def test_single_frame_gif_converts_to_static_image(tmp_path: Path, duration: int | None) -> None:
     source, output = tmp_path / "input.gif", tmp_path / "asset.bin"
-    Image.new("RGB", (2, 2), "red").save(source)
+    image = Image.new("RGB", (2, 2), "red")
+    if duration is None:
+        image.save(source)
+    else:
+        image.save(source, duration=duration)
     code, result = run_cli("convert", source, "-o", output)
     assert code == 0, result
-    assert struct.unpack_from("<I", output.read_bytes(), 72)[0] == 1
-    assert result["kind"] == "gif"
+    assert struct.unpack_from("<H", output.read_bytes(), 52)[0] == 1
+    assert struct.unpack_from("<I", output.read_bytes(), 72)[0] == 0
+    assert result["kind"] == "image"
+    assert "slow_gif" not in {warning["code"] for warning in result["warnings"]}
     assert run_cli("inspect", output) == (0, result)
 
 
@@ -407,10 +414,12 @@ def test_inspect_rejects_excess_table_counts(tmp_path: Path, field: int, value: 
     assert run_cli("inspect", output)[0] == 2
 
 
-@pytest.mark.parametrize("field,value", [(54, 1), (60, 1), (64, 65), (68, 0), (72, 0)])
-def test_inspect_rejects_invalid_pimg_fields(tmp_path: Path, field: int, value: int) -> None:
+@pytest.mark.parametrize(
+    "frame_count,field,value", [(2, 54, 1), (2, 60, 1), (2, 64, 65), (2, 68, 0), (2, 72, 0), (1, 72, 1)]
+)
+def test_inspect_rejects_invalid_pimg_fields(tmp_path: Path, frame_count: int, field: int, value: int) -> None:
     source, output = tmp_path / "input.gif", tmp_path / "asset.bin"
-    frames = [Image.new("RGB", (1, 1), color) for color in ("red", "green")]
+    frames = [Image.new("RGB", (1, 1), color) for color in ("red", "green")[:frame_count]]
     frames[0].save(source, save_all=True, append_images=frames[1:], duration=20)
     assert run_cli("convert", source, "-o", output)[0] == 0
     blob = bytearray(output.read_bytes())

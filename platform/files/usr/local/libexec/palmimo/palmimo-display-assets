@@ -232,12 +232,12 @@ def inspect_pimg(blob: bytes) -> tuple[str, list[dict[str, str]]]:
             require(cursor <= end and pixels <= 480 * 480, "rle", "$", "RLE exceeds its stream or framebuffer")
         require(pixels == 480 * 480, "rle", "$", "RLE does not fill the framebuffer")
     require(
-        all(n >= 1 for n in scans) or (frames == 1 and scans == [0]),
+        scans == [0] if frames == 1 else all(n >= 1 for n in scans),
         "duration",
         "$",
-        "Animation frames need positive refresh counts",
+        "Static images need zero refresh counts; animation frames need positive refresh counts",
     )
-    kind = "image" if scans == [0] else "gif"
+    kind = "image" if frames == 1 else "gif"
     return kind, image_warnings(kind, scans)
 
 
@@ -310,7 +310,7 @@ def convert_image(source: Path) -> bytes:
                 for i in range(frames):
                     image.seek(i)
                     duration = image.info.get("duration", 0) or 10
-                    durations.append(max(1, round(duration / 16.24)) if gif else 0)
+                    durations.append(max(1, round(duration / 16.24)) if frames > 1 else 0)
                     frame = ImageOps.exif_transpose(image).convert("RGBA")
                     frame = ImageOps.contain(frame, (480, 480), Image.Resampling.LANCZOS)
                     canvas = Image.new("RGBA", (480, 480), (0, 0, 0, 255))
