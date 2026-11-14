@@ -573,6 +573,8 @@ def synchronize(store: Store, hardware: Any, app: str | None) -> tuple[dict[str,
                         present[name] = f"{zlib.crc32(desired[name]):08x}"
                         result["put"].append(name)
 
+                    for old in sorted(n for n in present if n.startswith("palmimo/") and n not in desired):
+                        delete(old)
                     others = sorted(
                         {
                             name.split("/")[0]
@@ -581,7 +583,20 @@ def synchronize(store: Store, hardware: Any, app: str | None) -> tuple[dict[str,
                         },
                         key=lambda owner: (launches.get(owner, 0), owner),
                     )
-                    repacked = False
+
+                    def repack(include_standard: bool) -> None:
+                        print(
+                            "Repacking all display assets" if include_standard else "Repacking app display assets",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        for old in sorted(n for n in present if include_standard or not n.startswith("palmimo/")):
+                            delete(old)
+                        # Descending sizes reduce the free runs consumed by small app assets.
+                        for pending in sorted(desired, key=lambda n: (-len(desired[n]), n)):
+                            if present.get(pending) != f"{zlib.crc32(desired[pending]):08x}":
+                                put(pending)
+
                     for name, data in desired.items():
                         if present.get(name) == f"{zlib.crc32(data):08x}":
                             continue
@@ -594,17 +609,15 @@ def synchronize(store: Store, hardware: Any, app: str | None) -> tuple[dict[str,
                                     owner = others.pop(0)
                                     for old in sorted(n for n in present if n.startswith(owner + "/")):
                                         delete(old)
-                                elif not repacked:
-                                    repacked = True
-                                    for old in sorted(n for n in present if not n.startswith("palmimo/")):
-                                        delete(old)
-                                    # Descending sizes reduce the free runs consumed by small app assets.
-                                    for pending in sorted(desired, key=lambda n: (-len(desired[n]), n)):
-                                        if present.get(pending) != f"{zlib.crc32(desired[pending]):08x}":
-                                            put(pending)
-                                    break
-                                else:
-                                    raise StoreError("Insufficient contiguous flash space after repacking") from None
+                                    continue
+                                try:
+                                    repack(include_standard=False)
+                                except NoSpaceError:
+                                    try:
+                                        repack(include_standard=True)
+                                    except NoSpaceError:
+                                        raise StoreError("insufficient_contiguous_space_after_repacking") from None
+                                break
                     result["result"] = "synced"
             finally:
                 connection.dtr = False

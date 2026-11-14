@@ -603,7 +603,7 @@ def test_sync_rejects_malformed_flash_listing(
     assert not flash.puts and not flash.deleted
 
 
-def test_sync_reports_failure_if_standard_fragmentation_prevents_repacking(
+def test_sync_recovers_standard_fragmentation_by_repacking(
     rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     paths, flash = rig
@@ -613,9 +613,34 @@ def test_sync_reports_failure_if_standard_fragmentation_prevents_repacking(
     installed(paths, "zip.demo", "a", asset(4))
     flash.assets = {"palmimo/left": (3, asset()), "palmimo/right": (7, asset())}
     code, result = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
-    assert code != 0 and result["result"] == "failed"
-    assert not flash.deleted
-    assert set(flash.assets) == {"palmimo/left", "palmimo/right"}
+    # Without recovery, a capacity-valid collection can remain permanently unsynchronizable.
+    assert code == 0 and result["result"] == "synced"
+    assert set(flash.assets) == {"palmimo/left", "palmimo/right", "zip.demo/a"}
+    assert all(data == (asset(4) if name == "zip.demo/a" else asset()) for name, (_, data) in flash.assets.items())
+
+
+def test_sync_removes_obsolete_standard_assets(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Without this, bundle renames leave flash occupancy outside the capacity calculation.
+    paths, flash = rig
+    standard(paths, "new", asset())
+    flash.assets = {"palmimo/old": (0, asset())}
+    code, result = invoke(monkeypatch, capsys, "sync", "--json")
+    assert code == 0 and result["result"] == "synced"
+    assert set(flash.assets) == {"palmimo/new"}
+
+
+def test_sync_reports_exhausted_repack(
+    rig: tuple[Any, Flash], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Without this, a NOSPACE response after recovery loses its machine-readable failure stage.
+    paths, flash = rig
+    flash.pages = 0
+    installed(paths, "zip.demo", "a", asset())
+    code, result = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
+    assert code == 1 and result["result"] == "failed"
+    assert result["reason"] == "insufficient_contiguous_space_after_repacking"
 
 
 @pytest.mark.parametrize("link_type", ["directory", "entry"])

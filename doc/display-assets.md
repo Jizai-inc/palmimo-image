@@ -110,7 +110,7 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
 
 - `display.lock` を**待たずに**取る。取れなければ `{"result": "busy"}`。FW が v2 でなければ `{"result": "skipped"}`。
 - Flash に置くべき集合 = 上記の標準集合全体（目録に無い system.* も含み、差し替えがあればその中身）＋ `--app` のアプリのアセット。`ASSET LIST` の CRC と比べて、違う・無いものを `ASSET PUT`。
-- 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。
+- 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。望む集合に無い `palmimo/*` は削除する。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。まだ入らなければ、最後の手段として標準を含む全アセットを消して入れ直す（その間は内蔵画面へ戻る）。再配置の開始と各 DEL・PUT の経過を標準エラーへ出す。全件の再配置後も NOSPACE なら `reason` は `insufficient_contiguous_space_after_repacking`。
 - 結果は `{"result": "synced" | "busy" | "skipped" | "failed", "put": [...], "deleted": [...], "reason"}`。経過は標準エラーに 1 行ずつ。
 - 容量の条件は Portal が先に検査し、`replace`・`override` も保存時に検査する。同期でも守られていなければ `failed`。保存時の不足は `{"ok": false, "reason": "...", "short_by": <不足バイト>}`・終了 1。
   - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
