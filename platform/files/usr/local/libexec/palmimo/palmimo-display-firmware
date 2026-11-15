@@ -5,6 +5,7 @@
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import gzip
 import hashlib
@@ -202,16 +203,16 @@ class Hardware:
             try:
                 vendor = (device / "idVendor").read_text().strip().lower()
                 product = (device / "idProduct").read_text().strip().lower()
-            except FileNotFoundError:
-                continue
-            if vendor != "2e8a" or product != product_id:
-                continue
-            serial, name = "", ""
-            with contextlib.suppress(FileNotFoundError):
+                if vendor != "2e8a" or product != product_id:
+                    continue
                 serial = (device / "serial").read_text().strip()
-            with contextlib.suppress(FileNotFoundError):
                 name = (device / "product").read_text().strip()
-            devices.append((device.resolve(), serial, name))
+                devices.append((device.resolve(), serial, name))
+            except OSError as error:
+                # sysfs entries can outlive the USB device while it re-enumerates.
+                if error.errno not in (errno.ENODEV, errno.ENOENT):
+                    raise
+                continue
         return devices
 
     def cdc(self) -> list[tuple[str, str]]:
@@ -377,11 +378,18 @@ class Updater:
 
     def version(self, port: str) -> str:
         reason = "Face display does not respond to VERSION; cannot identify it, so firmware will not be written"
-        for _ in range(2):
+        end = self.hw.monotonic() + self.budget(3)
+        responses = 0
+        while responses < 2:
             try:
                 line = self.hw.exchange(port, "VERSION", self.budget(3))
             except OSError as error:
+                remaining = end - self.hw.monotonic()
+                if error.errno in (errno.ENODEV, errno.ENOENT) and remaining > 0:
+                    self.hw.sleep(min(0.25, remaining, self.budget()))
+                    continue
                 raise FirmwareError(f"{reason} ({error})") from error
+            responses += 1
             if line == "ERR VERSION (try LIST)":
                 return "legacy"
             if line.startswith("VERSION ") and line[8:].strip():

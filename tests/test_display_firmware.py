@@ -1,3 +1,4 @@
+import errno
 import gzip
 import hashlib
 import importlib.machinery
@@ -578,6 +579,90 @@ class SysfsFake(Fake):
         return output
 
 
+@pytest.mark.parametrize("mode", ["bootsel", "app"])
+@pytest.mark.parametrize("field", ["idVendor", "idProduct", "serial", "product"])
+@pytest.mark.parametrize("error_number", [errno.ENODEV, errno.ENOENT, errno.EACCES])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_update_waits_for_disappearing_sysfs_attributes(
+    rig: tuple[Any, Fake],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    field: str,
+    error_number: int,
+    persistent: bool,
+) -> None:
+    updater, _ = rig
+    hw = SysfsFake(tmp_path / "sysfs")
+    updater.hw = hw
+    original_read = Path.read_text
+    disappeared = False
+
+    def read(path: Path, *args: Any, **kwargs: Any) -> str:
+        nonlocal disappeared
+        rebooted = any(command[:2] == ["reboot", "-u" if mode == "bootsel" else "-a"] for command in hw.commands)
+        if path == hw.device / field and rebooted and (persistent or not disappeared):
+            disappeared = True
+            raise OSError(error_number, "Device is re-enumerating")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    result, code = updater.ensure()
+    assert disappeared
+    if persistent or error_number == errno.EACCES:
+        assert result["result"] == "failed" and code == 1
+        assert len(hw.payloads) == (0 if mode == "bootsel" else 3)
+        if error_number == errno.EACCES:
+            assert hw.now == 0
+        else:
+            assert 0 < hw.now <= 30
+            assert "requested USB mode" in result["reason"]
+    else:
+        assert (result["result"], result["before"], result["after"], code) == ("updated", "old", "new", 0)
+        assert len(hw.payloads) == 3
+
+
+@pytest.mark.parametrize("error_number", [errno.ENODEV, errno.ENOENT, errno.EACCES])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_version_waits_only_for_transient_tty_open_errors(
+    rig: tuple[Any, Fake],
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    persistent: bool,
+) -> None:
+    import sys
+    import types
+
+    updater, hw = rig
+    original_exchange = hw.exchange
+    attempts = 0
+
+    def serial_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise OSError(error_number, "Cannot open tty")
+
+    def exchange(port: str, command: str, timeout: float) -> str:
+        if command == "VERSION" and hw.version == "new" and (persistent or not attempts):
+            return fw.Hardware.exchange(hw, port, command, timeout)
+        return original_exchange(port, command, timeout)
+
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=serial_open))
+    monkeypatch.setattr(hw, "exchange", exchange)
+    result, code = updater.ensure()
+    if persistent or error_number == errno.EACCES:
+        assert result["result"] == "failed" and code == 1
+        assert hw.now <= 3
+        if error_number == errno.EACCES:
+            assert attempts == 1
+        else:
+            assert attempts > 1
+    else:
+        assert (result["result"], result["after"], code) == ("updated", "new", 0)
+        assert hw.now >= 0.25
+    assert len(hw.payloads) == 3
+
+
 @pytest.mark.parametrize(
     "case", ["app", "bootsel", "wrong-chip", "wrong-product", "wrong-vid", "wrong-pid", "missing-serial"]
 )
@@ -601,7 +686,7 @@ def test_sysfs_identity_does_not_query_picotool_info(rig: tuple[Any, Fake], tmp_
         assert (result["result"], result["after"], code) == ("updated", "new", 0)
         assert json.loads(updater.paths.state.read_text())["chip_id"] == hw.chip
     else:
-        assert result["result"] == ("absent" if case in {"wrong-vid", "wrong-pid"} else "failed")
+        assert result["result"] == ("absent" if case in {"wrong-vid", "wrong-pid", "missing-serial"} else "failed")
         assert not hw.payloads
     assert all(args[0] in {"reboot", "load"} for args in hw.commands)
 
