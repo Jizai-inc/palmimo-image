@@ -81,13 +81,122 @@ def test_lottie_slots_survive_conversion(tmp_path: Path) -> None:
     assert run_cli("inspect", output) == (0, result)
 
 
+def square(x: int, y: int, size: int, reverse: bool = False) -> dict[str, Any]:
+    points = [[x, y], [x + size, y], [x + size, y + size], [x, y + size]]
+    return {
+        "ty": "sh",
+        "ks": {"k": {"v": points[::-1] if reverse else points, "i": [[0, 0]] * 4, "o": [[0, 0]] * 4, "c": True}},
+    }
+
+
+def filled_at(blob: bytes, x: float, y: float) -> bool:
+    draw_offset, draw_count = struct.unpack_from("<2I", blob, 40)
+    track_offset = struct.unpack_from("<I", blob, 48)[0]
+    key_offset = struct.unpack_from("<I", blob, 56)[0]
+    for index in range(draw_count):
+        _, kind, vertices, _, fill, track = struct.unpack_from("<5Ii", blob, draw_offset + index * 48)
+        assert kind == 2 and fill
+        dim, _, first, _ = struct.unpack_from("<3Ii", blob, track_offset + track * 16)
+        values_offset = struct.unpack_from("<I", blob, key_offset + first * 32 + 8)[0]
+        values = struct.unpack_from(f"<{dim}f", blob, values_offset)
+        assert not any(values[vertices * 2 :])
+        points = list(zip(values[: vertices * 2 : 2], values[1 : vertices * 2 : 2], strict=True))
+        inside = False
+        for (ax, ay), (bx, by) in zip(points, points[1:] + points[:1], strict=True):
+            if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+                inside = not inside
+        if inside:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("reverse,rule,hole", [(True, 1, True), (False, 1, False), (False, 2, True)])
+def test_shared_fill_nested_contours_preserve_fill_rule(tmp_path: Path, reverse: bool, rule: int, hole: bool) -> None:
+    doc = composition()
+    paint = doc["layers"][0]["shapes"][1]
+    paint["r"] = rule
+    doc["layers"][0]["shapes"] = [square(20, 20, 100), square(40, 40, 40, reverse), paint]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    assert filled_at(output.read_bytes(), 30, 50)
+    assert filled_at(output.read_bytes(), 55, 55) is not hole
+    assert not filled_at(output.read_bytes(), 150, 50)
+
+
+def test_shared_fill_intersecting_contours_are_rejected(tmp_path: Path) -> None:
+    doc = composition()
+    paint = doc["layers"][0]["shapes"][1]
+    doc["layers"][0]["shapes"] = [square(20, 20, 100), square(80, 80, 100), paint]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 2
+    assert not output.exists()
+    assert any(e["path"] == "$.layers[0].shapes[0]" for e in result["errors"])
+
+
+def test_shared_fill_disjoint_contours_keep_separate_draws(tmp_path: Path) -> None:
+    doc = composition()
+    paint = doc["layers"][0]["shapes"][1]
+    doc["layers"][0]["shapes"] = [square(20, 20, 40), square(100, 20, 40), paint]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    assert struct.unpack_from("<I", output.read_bytes(), 44)[0] == 2
+    assert filled_at(output.read_bytes(), 30, 30)
+    assert filled_at(output.read_bytes(), 110, 30)
+    assert not filled_at(output.read_bytes(), 80, 30)
+
+
+@pytest.mark.parametrize("crossing", [False, True])
+def test_shared_fill_animation_requires_disjoint_motion_bounds(tmp_path: Path, crossing: bool) -> None:
+    doc = composition()
+    left = doc["layers"][0]["shapes"][0]
+    left["p"] = {"a": 1, "k": [{"t": 0, "s": [50, 100]}, {"t": 30, "s": [100, 100]}]}
+    left["s"] = {"k": [20, 20]}
+    right = copy.deepcopy(left)
+    right["p"] = {"a": 1, "k": [{"t": 0, "s": [200, 100]}, {"t": 30, "s": [50 if crossing else 250, 100]}]}
+    paint = doc["layers"][0]["shapes"][1]
+    doc["layers"][0]["shapes"] = [left, right, paint]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == (2 if crossing else 0), result
+    assert output.exists() is not crossing
+
+
+@pytest.mark.parametrize("damage", ["curved", "open", "slot", "animated", "self-crossing", "budget", "stroke"])
+def test_shared_fill_unproven_merges_are_rejected(tmp_path: Path, damage: str) -> None:
+    doc = composition()
+    outer, inner = square(20, 20, 100), square(40, 40, 40, True)
+    shape = outer["ks"]["k"]
+    if damage == "curved":
+        shape["o"][0] = [0, 20]
+    elif damage == "open":
+        shape["c"] = False
+    elif damage == "slot":
+        outer["ks"]["sid"] = "outline"
+    elif damage == "animated":
+        outer["ks"] = {"a": 1, "k": [{"t": 0, "s": [shape]}, {"t": 30, "s": [copy.deepcopy(shape)]}]}
+    elif damage == "self-crossing":
+        shape["v"][1], shape["v"][2] = shape["v"][2], shape["v"][1]
+    elif damage == "budget":
+        # Eight nested boundaries need 46 vertices after paired bridges.
+        paint = doc["layers"][0]["shapes"][1]
+        paint["r"] = 2
+        doc["layers"][0]["shapes"] = [square(20 + i * 5, 20 + i * 5, 100 - i * 10) for i in range(8)] + [paint]
+    if damage != "budget":
+        doc["layers"][0]["shapes"] = [outer, inner, doc["layers"][0]["shapes"][1]]
+    if damage == "stroke":
+        doc["layers"][0]["shapes"].append({"ty": "st", "lc": 2, "lj": 2, "w": {"k": 4}})
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 2
+    assert not output.exists()
+    assert all(e["path"].startswith("$.layers[0].shapes[") and e["message"] for e in result["errors"])
+
+
 def test_lottie_reports_all_unsupported_features(tmp_path: Path) -> None:
     doc = composition()
     layer = doc["layers"][0]
     layer.update(parent=0, masksProperties=[{}], ef=[{}])
     layer["ks"]["p"] = {"k": [0, 0], "x": "value"}
     layer["shapes"].extend([{"ty": "tm"}, {"ty": "gf"}, {"ty": "el"}])
-    layer["shapes"][1]["r"] = 2
+    layer["shapes"][1]["r"] = 3
     doc["layers"].append({"ty": 5, "nm": "caption", "ks": {}})
     code, result, output = convert_json(tmp_path, doc)
     assert code == 2
@@ -145,6 +254,9 @@ def test_lottie_enforces_draw_capacity(tmp_path: Path, draws: int, accepted: boo
     doc = composition()
     shapes = doc["layers"][0]["shapes"]
     shapes[:] = [copy.deepcopy(shapes[0]) for _ in range(draws)] + [shapes[1]]
+    for i, shape in enumerate(shapes[:-1]):
+        shape["p"]["k"] = [20 + i * 40, 240]
+        shape["s"]["k"] = [20, 20]
     assert (convert_json(tmp_path, doc)[0] == 0) is accepted
 
 

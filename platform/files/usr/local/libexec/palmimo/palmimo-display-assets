@@ -381,6 +381,7 @@ class Lottie:
         self.tracks: list[dict[str, Any]] = []
         self.nodes: list[dict[str, Any]] = []
         self.draws: list[dict[str, Any]] = []
+        self.fills: dict[str, list[tuple[dict[str, Any], str, int]]] = {}
         self.errors: list[dict[str, str]] = []
         self.notices: list[dict[str, str]] = []
         self.slot_dims: dict[str, int] = {}
@@ -446,8 +447,8 @@ class Lottie:
                 self.error(layer, "skew", path + "." + key)
         if "sid" in obj and (not isinstance(obj["sid"], str) or SID.fullmatch(obj["sid"]) is None):
             self.error(layer, "slot id must match [a-z0-9_]{1,32}", path + ".sid", "slot")
-        if ty == "fl" and obj.get("r", 1) != 1:
-            self.error(layer, "only nonzero fill is supported", path + ".r")
+        if ty == "fl" and (type(obj.get("r", 1)) is not int or obj.get("r", 1) not in (1, 2)):
+            self.error(layer, "fill rule must be nonzero or evenodd", path + ".r")
         if ty == "st":
             for key in ("lc", "lj"):
                 if obj.get(key, 1) != 2:
@@ -694,6 +695,165 @@ class Lottie:
                             "glow": 0 if fill else glow,
                         }
                     )
+                    if fill:
+                        self.fills.setdefault(paint_path, []).append((self.draws[-1], item_path, paint.get("r", 1)))
+
+    def shared_fills(self) -> None:
+        def vectors(track: int, path: str) -> list[list[float]]:
+            prop = self.tracks[track]
+            require(not prop["slot"], "unsupported", path, "Shared fill geometry cannot use slots")
+            return [
+                list(struct.unpack(f"<{prop['dim']}f", struct.pack(f"<{prop['dim']}f", *key[which])))
+                for key in prop["keys"]
+                for which in ("s", "e")
+            ]
+
+        def bounds(draw: dict[str, Any], path: str) -> tuple[float, float, float, float]:
+            if draw["kind"] == 2:
+                values = vectors(draw["geo"][0], path)
+                count = draw["vertices"]
+                # A Bezier lies within its control hull. Component easing stays in 0..1,
+                # so independent endpoint ranges also bound every interpolated control.
+                ranges = [(min(v[i] for v in values), max(v[i] for v in values)) for i in range(count * 6)]
+                axes = []
+                for axis in (0, 1):
+                    lows, highs = [], []
+                    for i in range(axis, count * 2, 2):
+                        low, high = ranges[i]
+                        lows.append(low)
+                        highs.append(high)
+                        for offset in (count * 2, count * 4):
+                            lows.append(low + ranges[i + offset][0])
+                            highs.append(high + ranges[i + offset][1])
+                    axes.append((min(lows), max(highs)))
+                return axes[0][0], axes[1][0], axes[0][1], axes[1][1]
+            positions, sizes = vectors(draw["geo"][0], path), vectors(draw["geo"][1], path)
+            return (
+                min(v[0] for v in positions) - max(v[0] for v in sizes) / 2,
+                min(v[1] for v in positions) - max(v[1] for v in sizes) / 2,
+                max(v[0] for v in positions) + max(v[0] for v in sizes) / 2,
+                max(v[1] for v in positions) + max(v[1] for v in sizes) / 2,
+            )
+
+        def polygon(draw: dict[str, Any], path: str) -> list[tuple[float, float]]:
+            tracks = [self.tracks[t] for t in draw["geo"] if t >= 0]
+            require(
+                all(len(t["keys"]) == 1 and not t["slot"] for t in tracks),
+                "unsupported",
+                path,
+                "Overlapping shared fills require static geometry",
+            )
+            values = [vectors(t, path)[0] for t in draw["geo"] if t >= 0]
+            if draw["kind"] == 1 and values[2] == [0]:
+                (x, y), (w, h) = values[:2]
+                return [(x - w / 2, y - h / 2), (x + w / 2, y - h / 2), (x + w / 2, y + h / 2), (x - w / 2, y + h / 2)]
+            count = draw["vertices"]
+            require(
+                draw["kind"] == 2 and draw["closed"] and count >= 3 and not any(values[0][count * 2 :]),
+                "unsupported",
+                path,
+                "Overlapping shared fills require closed straight contours",
+            )
+            return list(zip(values[0][: count * 2 : 2], values[0][1 : count * 2 : 2], strict=True))
+
+        def cross(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+            return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+        def intersects(a: Any, b: Any, c: Any, d: Any) -> bool:
+            return (
+                max(min(a[0], b[0]), min(c[0], d[0])) <= min(max(a[0], b[0]), max(c[0], d[0]))
+                and max(min(a[1], b[1]), min(c[1], d[1])) <= min(max(a[1], b[1]), max(c[1], d[1]))
+                and cross(a, b, c) * cross(a, b, d) <= 0
+                and cross(c, d, a) * cross(c, d, b) <= 0
+            )
+
+        def contains(points: list[tuple[float, float]], point: tuple[float, float]) -> bool:
+            x, y = point
+            return (
+                sum(
+                    (a[1] > y) != (b[1] > y) and x < a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+                    for a, b in zip(points, points[1:] + points[:1], strict=True)
+                )
+                % 2
+                == 1
+            )
+
+        for entries in self.fills.values():
+            if len(entries) < 2:
+                continue
+            current_path = entries[0][1]
+            require(
+                len({draw["node"] for draw, _, _ in entries}) == 1,
+                "unsupported",
+                current_path,
+                "Shared fills across different group transforms cannot be proven disjoint",
+            )
+            boxes = [bounds(draw, path) for draw, path, _ in entries]
+            if all(
+                a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1]
+                for i, a in enumerate(boxes)
+                for b in boxes[i + 1 :]
+            ):
+                continue
+            members = {id(draw) for draw, _, _ in entries}
+            positions = [i for i, draw in enumerate(self.draws) if id(draw) in members]
+            require(
+                positions[-1] - positions[0] + 1 == len(entries),
+                "unsupported",
+                current_path,
+                "Overlapping shared fills cannot be merged across other paints",
+            )
+            polygons = []
+            for draw, current_path, _ in entries:
+                polygons.append(polygon(draw, current_path))
+            edges = [list(zip(p, p[1:] + p[:1], strict=True)) for p in polygons]
+            signs = []
+            for i, edge in enumerate(edges):
+                current_path = entries[i][1]
+                area = sum(a[0] * b[1] - a[1] * b[0] for a, b in edge)
+                simple = area != 0 and all(a != b for a, b in edge)
+                for j, (a, b) in enumerate(edge):
+                    c = edge[(j + 1) % len(edge)][1]
+                    if cross(a, b, c) == 0 and (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]) < 0:
+                        simple = False
+                    for k in range(j + 1, len(edge)):
+                        if k != j + 1 and (j, k) != (0, len(edge) - 1):
+                            simple &= not intersects(a, b, *edge[k])
+                require(simple, "unsupported", current_path, "Shared fill contour must be simple and nondegenerate")
+                for other in edges[:i]:
+                    require(
+                        not any(intersects(a, b, c, d) for a, b in edge for c, d in other),
+                        "unsupported",
+                        current_path,
+                        "Shared fill contours intersect or touch",
+                    )
+                signs.append(1 if area > 0 else -1)
+            kept = []
+            for i, points in enumerate(polygons):
+                winding = sum(signs[j] for j, p in enumerate(polygons) if j != i and contains(p, points[0]))
+                if entries[i][2] == 2 or (winding == 0) != (winding + signs[i] == 0):
+                    kept.append(points)
+            anchor = kept[0][0]
+            merged = [anchor]
+            for points in kept[1:]:
+                merged.extend([*points, points[0], anchor])
+            merged.extend(kept[0][1:])
+            # Straight segments consume no recursive curve subdivisions; 24 vertices
+            # also keep the closed contour below the firmware's 128-segment budget.
+            require(len(merged) <= 24, "limit", current_path, "Shared fill exceeds the 24-vertex path budget")
+            shape = {
+                "v": [list(p) for p in merged],
+                "i": [[0, 0]] * len(merged),
+                "o": [[0, 0]] * len(merged),
+                "c": True,
+            }
+            track = self.prop(
+                {"k": shape}, None, current_path, "shared fill", (len(merged) * 6,), -1024, 1024, (len(merged), True)
+            )
+            first = entries[0][0]
+            first.update(kind=2, vertices=len(merged), closed=True, geo=[track, -1, -1])
+            discarded = {id(draw) for draw, _, _ in entries[1:]}
+            self.draws = [draw for draw in self.draws if id(draw) not in discarded]
 
     def convert(self) -> bytes:
         doc = self.doc
@@ -740,6 +900,8 @@ class Lottie:
                     self.error(str(layer.get("nm", i)), error["message"], error["path"], error["code"])
             except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
                 self.error(str(layer.get("nm", i)), str(exc), path, "input")
+        self.check_errors()
+        self.shared_fills()
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),
             ("draws", len(self.draws), 8),

@@ -190,6 +190,7 @@ class Store:
                         if remaining <= 0:
                             raise BusyError("Asset store is busy") from error
                         time.sleep(min(0.1, remaining))
+                self.cleanup()
                 yield
             finally:
                 os.close(fd)
@@ -296,7 +297,6 @@ class Store:
     def uninstall(self, app: str) -> None:
         app_id(app)
         with self.transaction(wait_s=120):
-            self.cleanup()
             remove_collection(self.root / "apps" / app)
 
     def replace(self, app: str, source: Path) -> None:
@@ -306,7 +306,6 @@ class Store:
         if shortage[0]:
             raise CapacityError(*shortage)
         with self.transaction(wait_s=120):
-            self.cleanup()
             # A waiting writer must not rely on the override snapshot from before the lock.
             shortage = shortfall(self.standard_files(), candidate, app)
             if shortage[0]:
@@ -346,15 +345,18 @@ class Store:
             self.inspect(data)
         with self.transaction(wait_s=120):
             target = self.root / "overrides" / f"{name}.bin"
-            if data is not None:
+            if data is not None or name in self.standards():
                 standard = self.standard_files()
                 if name not in standard:
                     raise StoreError("Unknown standard asset")
-                standard[name] = data
+                candidate = data if data is not None else read_file(self.catalog / f"{name}.bin")
+                self.inspect(candidate)
+                standard[name] = candidate
                 shortages = [shortfall(standard, self.blobs(self.root / "apps" / app), app) for app in self.app_names()]
                 shortage = max(shortages, key=lambda item: item[0], default=shortfall(standard, {}, None))
                 if shortage[0]:
                     raise CapacityError(*shortage)
+            if data is not None:
                 atomic_file(target, data)
             else:
                 try:
@@ -367,7 +369,6 @@ class Store:
 
     def status(self) -> dict[str, Any]:
         with self.transaction(wait_s=120):
-            self.cleanup()
             standard = []
             names = self.standards()
             for name in names:
