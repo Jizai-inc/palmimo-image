@@ -1,6 +1,6 @@
 Jizai Inc. face display firmware v2
-Version: 2.0.0+83bccbc
-Source commit: 83bccbc2904388bd361c24e42da8ec7ec10f4c0a
+Version: 2.0.0+7ea60df
+Source commit: 7ea60df472b80f14f50f8083706e30982c11527b
 
 The Jizai Inc. portions are licensed under Apache-2.0; see NOTICE for the
 shared licensing statement. Third-party source notices for v2 follow below.
@@ -54,8 +54,8 @@ over here (checked 2026-08-08).
 All 35 files under vendor/, plus boards/waveshare_rp2350_touch_lcd_2.8c.h and
 pico_sdk_import.cmake, were compared against upstream file by file (37 in
 total — upstream's own LICENSE is not among them, and is not vendored: see the
-paragraph above): 28 are byte-identical to it after line-ending normalization,
-and the modified ones are exactly the nine listed below. Each carries a notice
+paragraph above): 27 are byte-identical to it after line-ending normalization,
+and the modified ones are exactly the ten listed below. Each carries a notice
 at the top of the file, per §4(b):
 
   - vendor/bsp/bsp_gt911.c
@@ -82,6 +82,9 @@ at the top of the file, per §4(b):
         observations; counts completed DMA bands that overlap framebuffer writes.
       * two manual pixel-copy loops replaced with memcpy (the DMA-complete ISR
         copy and the framebuffer blit). Both run every frame.
+  - vendor/bsp/pio_rgb.pio
+      * RGB data waits for PCLK High before OUT and Low afterwards, moving
+        transitions away from the ST7701S rising sampling edge at 16 MHz.
   - vendor/bsp/CMakeLists.txt
       * dropped the no-OS-FatFS-SD link; comments trimmed.
   - vendor/CMakeLists.txt
