@@ -274,6 +274,108 @@
         "owner": "root",
         "group": "root",
         "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/angry.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/batsu.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/curious.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/excited.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/groove.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/happy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/love.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/maru.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sad.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/shy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sleeping.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sleepy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/surprise.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.idle.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.sleep.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.wake.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/thinking.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
       }
     ],
     "managed_directories": [

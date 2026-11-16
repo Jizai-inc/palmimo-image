@@ -15,6 +15,7 @@ FW とホストの通信は palmimo-devkit の `doc/reference/display-protocol.m
 | `/var/lib/palmimo/display-firmware/state.json` | 既存の書き込みの記録。連続失敗は**望む FW ごと**に数える | root |
 | `/usr/local/share/palmimo/display-assets/catalog.json` | SDK・エージェント向けの語彙の目録。標準集合の部分集合（形はアプリの `/run/palmimo/apps/<id>/assets.json` と同じ。id・説明・タグ・パラメータの説明・翻訳。種類と次元は書かない＝実機の `ASSET INFO` が正本） | root、読み取り専用。アプリから読める |
 | `/usr/local/share/palmimo/display-assets/<name>.bin` | 標準集合の既定の中身（変換済み。system.* を含む） | 同上 |
+| `/usr/local/share/palmimo/display-assets/source/<name>.json` | プレビュー用の元の Lottie。標準の `.bin` と名前が 1 対 1。変換や同期には使わない | root、bundle の `owns.files`。誰でも読める |
 | `/var/lib/palmimo/display-assets/overrides/<name>.bin` | 利用者が Portal で差し替えた中身（変換済み） | root。書くのは `assets override` だけ。アプリには見せない |
 | `/var/lib/palmimo/display-assets/apps/<app ID>/<name>.bin` | アプリのアセット（インストール時に変換） | root。Portal が書くのは `assets replace`。手動の `assets install` も可 |
 | `/var/lib/palmimo/display-assets/launch.json` | アプリの起動の通し番号（古い順に外すため。時計は使わない） | root。`assets sync --app` が増やす |
