@@ -974,6 +974,44 @@ def test_directory_capacity_checks_full_ids_before_mutation(
             }
 
 
+def test_install_recovers_interrupted_collection_before_adding_asset(
+    rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths, _ = rig
+    installed(paths, "zip.demo", "first", asset())
+    installed(paths, "zip.demo", "second", asset(value=1))
+    (paths.assets / "apps/zip.demo").rename(paths.assets / "apps/.old-zip.demo")
+    source = tmp_path / "new.bin"
+    source.write_bytes(asset(value=2))
+    assert invoke(monkeypatch, capsys, "install", "zip.demo", "new", str(source))[0] == 0
+    assert invoke(monkeypatch, capsys, "status", "--json")[0] == 0
+    for name, value in (("first", 0), ("second", 1), ("new", 2)):
+        assert (paths.assets / "apps/zip.demo" / f"{name}.bin").read_bytes() == asset(value=value)
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_override_counts_interrupted_collections_before_capacity_check(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reset: bool,
+) -> None:
+    paths, _ = rig
+    standard(paths, "happy", asset(256) if reset else asset())
+    for i in range(4):
+        installed(paths, "zip.demo", f"part{i}", asset(256))
+    (paths.assets / "apps/zip.demo").rename(paths.assets / "apps/.old-zip.demo")
+    target = paths.assets / "overrides/happy.bin"
+    target.parent.mkdir()
+    target.write_bytes(asset(value=1))
+    source = tmp_path / "new.bin"
+    source.write_bytes(asset(256))
+    args = ("override", "--reset", "happy") if reset else ("override", "happy", str(source))
+    assert invoke(monkeypatch, capsys, *args)[0] == 1
+    assert target.read_bytes() == asset(value=1)
+
+
 def test_interrupted_replace_restores_previous_collection_and_can_be_retried(
     rig: tuple[Any, Flash], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -190,6 +190,7 @@ class Store:
                         if remaining <= 0:
                             raise BusyError("Asset store is busy") from error
                         time.sleep(min(0.1, remaining))
+                self.cleanup()
                 yield
             finally:
                 os.close(fd)
@@ -296,7 +297,6 @@ class Store:
     def uninstall(self, app: str) -> None:
         app_id(app)
         with self.transaction(wait_s=120):
-            self.cleanup()
             remove_collection(self.root / "apps" / app)
 
     def replace(self, app: str, source: Path) -> None:
@@ -306,7 +306,6 @@ class Store:
         if shortage[0]:
             raise CapacityError(*shortage)
         with self.transaction(wait_s=120):
-            self.cleanup()
             # A waiting writer must not rely on the override snapshot from before the lock.
             shortage = shortfall(self.standard_files(), candidate, app)
             if shortage[0]:
@@ -370,7 +369,6 @@ class Store:
 
     def status(self) -> dict[str, Any]:
         with self.transaction(wait_s=120):
-            self.cleanup()
             standard = []
             names = self.standards()
             for name in names:
