@@ -79,7 +79,8 @@ locked + 鍵認証のみの構成に正規の道がない upstream 公認ギャ�
 - `03-portal/` — uv 導入・`palmimo-portal` のタグ clone・
   `uv sync --frozen --no-dev`・`fetch_static`（Updater と同一コードパス）。
 - `04-oss-compliance/` — `03-portal` の後、`lib/collect_oss_compliance.py`
-  を chroot にコピーして実行・削除。対応ソース（GPLv2 §3(a) / GPLv3
+  と `oss-static-licenses/`（静的リンク分のライセンス本文と対応表）を
+  chroot にコピーして実行・削除。対応ソース（GPLv2 §3(a) / GPLv3
   §6(a)）と apt/Portal のライセンスを集める。詳細は `../doc/design.md`。
 
 `EXPORT_IMAGE` がこのステージを最終 `.img` の export 対象として指す。
