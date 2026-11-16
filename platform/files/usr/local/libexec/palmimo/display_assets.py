@@ -346,15 +346,18 @@ class Store:
             self.inspect(data)
         with self.transaction(wait_s=120):
             target = self.root / "overrides" / f"{name}.bin"
-            if data is not None:
+            if data is not None or name in self.standards():
                 standard = self.standard_files()
                 if name not in standard:
                     raise StoreError("Unknown standard asset")
-                standard[name] = data
+                candidate = data if data is not None else read_file(self.catalog / f"{name}.bin")
+                self.inspect(candidate)
+                standard[name] = candidate
                 shortages = [shortfall(standard, self.blobs(self.root / "apps" / app), app) for app in self.app_names()]
                 shortage = max(shortages, key=lambda item: item[0], default=shortfall(standard, {}, None))
                 if shortage[0]:
                     raise CapacityError(*shortage)
+            if data is not None:
                 atomic_file(target, data)
             else:
                 try:

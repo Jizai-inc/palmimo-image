@@ -130,7 +130,7 @@ store の `.lock` は `status`・`replace`・`uninstall`・`override`・`install
   2 回の rename の間で中断された場合、次の replace・uninstall・status の冒頭で `.old-<app ID>` を元へ戻し、旧集合に戻る。公開済みの集合があれば `.old-*` は削除し、`.replace-*` は常に捨てる。作業用の名前は status のアプリ一覧には出さない。sync は指定された `apps/<app ID>/` だけを読む。
 - `assets install <app ID> <name> <変換済みの .bin>`（手動互換用。Portal は replace を使う）: `inspect` で検査し直してから `apps/<app ID>/<name>.bin` に置く。
 - `assets uninstall <app ID>`: そのアプリの分を消す（Flash の分は次に場所が要るときに外れる）。
-- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。差し替えは候補を反映した標準集合＋インストール済みの各アプリについて容量を検査し、最大の不足量を short_by で返す。reset は容量を検査せず、標準集合から消えた孤児の名前も削除できる。
+- `assets override <name> <変換済みの .bin>` / `assets override --reset <name>`: 標準集合の既定 `.bin` がある名前を差し替え／標準に戻す。目録への掲載は条件にせず、system.* も受け付ける。差し替え・reset とも、候補（reset は既定の中身）を反映した標準集合＋インストール済みの各アプリについて、本体と FW 目録の容量をロック内で検査する。アプリが無ければ標準集合だけを検査する。不足時は `ok:false` と最大の不足量を `short_by` で返し、現在の差し替えを残す。標準集合から消えた孤児の名前の reset は容量検査なしで削除できる。
 - 上の保存操作の出力は `{"ok": <bool>, "reason"}`。Portal は変換器を user で動かし、結果の `.bin` をこれらに渡す。
 
 ### 保存内容の照会（root）
