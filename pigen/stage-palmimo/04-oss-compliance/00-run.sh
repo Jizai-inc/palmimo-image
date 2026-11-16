@@ -11,10 +11,12 @@ SOURCES_FILE="${ROOTFS_DIR}/etc/apt/sources.list.d/palmimo-src.sources"
 COLLECTOR_TMP="${ROOTFS_DIR}/tmp/collect_oss_compliance.py"
 EXCLUDE_TMP="${ROOTFS_DIR}/tmp/oss-source-exclude.txt"
 COPYRIGHT_ALLOW_TMP="${ROOTFS_DIR}/tmp/oss-copyright-missing-allow.txt"
+STATIC_LICENSES_TMP="${ROOTFS_DIR}/tmp/oss-static-licenses"
 
 # trap fires on every exit path, skip flag included; always cleaned up here.
 cleanup() {
 	rm -f "${SOURCES_FILE}" "${COLLECTOR_TMP}" "${EXCLUDE_TMP}" "${COPYRIGHT_ALLOW_TMP}"
+	rm -rf "${STATIC_LICENSES_TMP}"
 }
 trap cleanup EXIT
 cleanup
@@ -34,6 +36,7 @@ fi
 install -m 0644 "${PALMIMO_IMAGE_DIR}/lib/collect_oss_compliance.py" "${COLLECTOR_TMP}"
 install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-source-exclude.txt" "${EXCLUDE_TMP}"
 install -m 0644 "${PALMIMO_IMAGE_DIR}/oss-copyright-missing-allow.txt" "${COPYRIGHT_ALLOW_TMP}"
+cp -r "${PALMIMO_IMAGE_DIR}/oss-static-licenses" "${STATIC_LICENSES_TMP}"
 
 IMG_DATE="$(date +%Y-%m-%d)"
 on_chroot <<- EOF
@@ -42,6 +45,7 @@ on_chroot <<- EOF
 		--root / \
 		--exclude-file /tmp/oss-source-exclude.txt \
 		--copyright-allow-file /tmp/oss-copyright-missing-allow.txt \
+		--static-licenses-dir /tmp/oss-static-licenses \
 		--img-date "${IMG_DATE}"
 EOF
 
