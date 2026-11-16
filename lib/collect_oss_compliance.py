@@ -19,6 +19,7 @@ MANIFEST.txt, copied to <root>/boot/firmware/licenses/) and
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import datetime
 import glob
@@ -470,11 +471,8 @@ def _has_shared_object(dist_info: Path) -> bool:
     record = dist_info / "RECORD"
     if not record.is_file():
         return True
-    for line in record.read_text(encoding="utf-8", errors="replace").splitlines():
-        path = line.split(",", 1)[0]
-        if _SHARED_OBJECT.search(path):
-            return True
-    return False
+    rows = csv.reader(record.read_text(encoding="utf-8", errors="replace").splitlines())
+    return any(row and _SHARED_OBJECT.search(row[0]) for row in rows)
 
 
 def _extract_license_metadata(metadata_text: str) -> tuple[list[str], list[str]]:

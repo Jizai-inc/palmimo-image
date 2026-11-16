@@ -834,7 +834,8 @@ def test_main_marks_manifest_incomplete_for_a_native_dist_missing_from_the_stati
     (portal_root / "palmimo_portal" / "static" / "THIRD_PARTY_LICENSES.txt").write_text("npm\n", encoding="utf-8")
     # Mapped under another version: an upgrade needs a fresh review.
     _add_dist(site_packages, "Fast_Thing", "2.0", ["fast_thing/_ext.cpython-312-aarch64-linux-gnu.so"])
-    _add_dist(site_packages, "bundler", "1.0", ["bundler.libs/libzstd-1a2b3c.so.1.5.6", "bundler/__init__.py"])
+    # RECORD is CSV: a path containing a comma is quoted.
+    _add_dist(site_packages, "bundler", "1.0", ['"bundler.libs/libz,std-1a2b3c.so.1.5.6"', "bundler/__init__.py"])
     _make_static_licenses_dir(tmp_path, "fast-thing 1.0\n")
     _patch_subprocess_run(
         monkeypatch, _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n")
