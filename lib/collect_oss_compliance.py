@@ -19,11 +19,13 @@ MANIFEST.txt, copied to <root>/boot/firmware/licenses/) and
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import datetime
 import glob
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +41,11 @@ _INSTALLED_STATUS = "installed"
 # METADATA header fields worth keeping; everything else is body text.
 _METADATA_HEADER_PREFIXES = ("License-Expression:", "License:", "Classifier: License ::")
 _LICENSE_FILE_PREFIX = "License-File:"
+
+STATIC_LINK_MAP_NAME = "map.txt"
+# A RECORD entry for a shared object: an extension module or a library
+# auditwheel bundled under <pkg>.libs/ (libfoo.so.1.2).
+_SHARED_OBJECT = re.compile(r"\.so(\.\d+)*$")
 
 RunFunc = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
@@ -237,12 +244,14 @@ def write_manifest(
     portal_dists_without_license_text: Iterable[str],
     portal_third_party_licenses_present: bool,
     portal_python_runtime_dirs: Iterable[str],
+    portal_unreviewed_native_dists: Iterable[str],
 ) -> None:
     """Write MANIFEST.txt deterministically (sorted rows) and atomically
     (tmp file + os.replace). STATUS is OK unless a listed condition holds,
     in which case it is INCOMPLETE with every applicable reason listed."""
     dists_without_license_text = sorted(set(portal_dists_without_license_text))
     python_runtime_dirs = sorted(set(portal_python_runtime_dirs))
+    unreviewed_native_dists = sorted(set(portal_unreviewed_native_dists))
 
     status_reasons: list[str] = []
     if skip_corresponding_source:
@@ -257,6 +266,11 @@ def write_manifest(
         status_reasons.append(
             "uv-managed Python runtime(s) found under .local/share/uv/python (needs a licensing decision): "
             + ", ".join(python_runtime_dirs)
+        )
+    if unreviewed_native_dists:
+        status_reasons.append(
+            "Python dists with native code not reviewed for statically linked third-party code "
+            "(needs an oss-static-licenses/map.txt line): " + ", ".join(unreviewed_native_dists)
         )
 
     lines: list[str] = []
@@ -341,7 +355,11 @@ def write_manifest(
         lines.append("  uv-managed Python runtime(s) under ~/.local/share/uv/python/:")
         for name in python_runtime_dirs:
             lines.append(f"    {name}")
-    else:
+    if unreviewed_native_dists:
+        lines.append("  Python dists with native code missing from oss-static-licenses/map.txt:")
+        for name in unreviewed_native_dists:
+            lines.append(f"    {name}")
+    if not python_runtime_dirs and not unreviewed_native_dists:
         lines.append("  (none)")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +412,67 @@ class PortalLicenseReport:
     missing_license_files: list[tuple[str, str]]
     third_party_notices_present: bool
     third_party_licenses_present: bool
+    # Dists carrying a shared object with no static-link map entry for their
+    # exact (name, version).
+    unreviewed_native_dists: list[str] = dataclasses.field(default_factory=list)
+    # Map keys that matched no installed dist (stale after an upgrade).
+    unused_static_link_entries: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+
+
+StaticLinkMap = Mapping[tuple[str, str], tuple[Path, ...]]
+
+
+def normalize_dist_name(name: str) -> str:
+    """PEP 503 normalization: lowercase, runs of -_. collapsed to -."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def load_static_link_map(static_licenses_dir: Path) -> dict[tuple[str, str], tuple[Path, ...]]:
+    """Parse <static_licenses_dir>/map.txt into {(name, version): license
+    dirs}. Raises ValueError on a malformed or duplicate line, or on a
+    directory that is missing or outside static_licenses_dir."""
+    root = static_licenses_dir.resolve()
+    entries: dict[tuple[str, str], tuple[Path, ...]] = {}
+    text = (static_licenses_dir / STATIC_LINK_MAP_NAME).read_text(encoding="utf-8")
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        fields = raw.split("#", 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) < 2:
+            raise ValueError(f"{STATIC_LINK_MAP_NAME}:{lineno}: expected '<dist> <version> [<dir> ...]'")
+        key = (normalize_dist_name(fields[0]), fields[1])
+        if key in entries:
+            raise ValueError(f"{STATIC_LINK_MAP_NAME}:{lineno}: duplicate entry for {key[0]} {key[1]}")
+        dirs: list[Path] = []
+        for relative in fields[2:]:
+            resolved = (root / relative).resolve()
+            if not resolved.is_relative_to(root) or not resolved.is_dir():
+                raise ValueError(f"{STATIC_LINK_MAP_NAME}:{lineno}: {relative!r} is not a directory under {root}")
+            dirs.append(resolved)
+        entries[key] = tuple(dirs)
+    return entries
+
+
+def _metadata_name_version(metadata_text: str) -> tuple[str, str]:
+    name = version = ""
+    for line in metadata_text.splitlines():
+        if line == "":
+            break
+        if line.startswith("Name:"):
+            name = line[len("Name:") :].strip()
+        elif line.startswith("Version:"):
+            version = line[len("Version:") :].strip()
+    return normalize_dist_name(name), version
+
+
+def _has_shared_object(dist_info: Path) -> bool:
+    """Whether the dist installed any shared object, per its RECORD. A dist
+    without a RECORD counts as having one: what it installed is unknown."""
+    record = dist_info / "RECORD"
+    if not record.is_file():
+        return True
+    rows = csv.reader(record.read_text(encoding="utf-8", errors="replace").splitlines())
+    return any(row and _SHARED_OBJECT.search(row[0]) for row in rows)
 
 
 def _extract_license_metadata(metadata_text: str) -> tuple[list[str], list[str]]:
@@ -423,31 +502,51 @@ def _resolve_license_file(dist_info: Path, relative: str) -> Path | None:
     return None
 
 
-def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: Path) -> PortalLicenseReport:
+def copy_portal_licenses(
+    venv_site_packages: Path,
+    portal_root: Path,
+    out_dir: Path,
+    static_link_map: StaticLinkMap | None = None,
+) -> PortalLicenseReport:
     """For every *.dist-info/ in venv_site_packages, extract METADATA's
     license header lines into LICENSE-METADATA.txt and copy each
     License-File: target alongside it. A declared License-File that does
     not exist is fatal (see missing_license_files); a dist with neither a
     header nor a License-File is recorded in dists_without_license_text.
+    A dist with a static_link_map entry gets each listed directory copied
+    to <dist>/static-linked/; one carrying a shared object without an entry
+    is recorded in unreviewed_native_dists.
     Also copies THIRD_PARTY_NOTICES.md and, if present,
     THIRD_PARTY_LICENSES.txt from portal_root (absence is only a warning)."""
+    static_link_map = static_link_map or {}
     python_out = out_dir / "python"
     dists: list[str] = []
     dists_without_license_text: list[str] = []
     missing_license_files: list[tuple[str, str]] = []
+    unreviewed_native_dists: list[str] = []
+    used_static_link_entries: set[tuple[str, str]] = set()
 
     if venv_site_packages.is_dir():
         for dist_info in sorted(venv_site_packages.glob("*.dist-info")):
             metadata_path = dist_info / "METADATA"
             if not metadata_path.is_file():
                 continue
-            header_lines, license_files = _extract_license_metadata(
-                metadata_path.read_text(encoding="utf-8", errors="replace")
-            )
+            metadata_text = metadata_path.read_text(encoding="utf-8", errors="replace")
+            header_lines, license_files = _extract_license_metadata(metadata_text)
 
             dist_name = dist_info.name.removesuffix(".dist-info")
             dists.append(dist_name)
             dist_dir = python_out / dist_name
+
+            key = _metadata_name_version(metadata_text)
+            static_dirs = static_link_map.get(key)
+            if static_dirs is None:
+                if _has_shared_object(dist_info):
+                    unreviewed_native_dists.append(dist_name)
+            else:
+                used_static_link_entries.add(key)
+                for static_dir in static_dirs:
+                    shutil.copytree(static_dir, dist_dir / "static-linked" / static_dir.name, dirs_exist_ok=True)
 
             resolved = {relative: _resolve_license_file(dist_info, relative) for relative in license_files}
             dist_missing = [relative for relative, src in resolved.items() if src is None]
@@ -495,6 +594,8 @@ def copy_portal_licenses(venv_site_packages: Path, portal_root: Path, out_dir: P
         missing_license_files=missing_license_files,
         third_party_notices_present=notices_present,
         third_party_licenses_present=licenses_txt_present,
+        unreviewed_native_dists=sorted(unreviewed_native_dists),
+        unused_static_link_entries=sorted(set(static_link_map) - used_static_link_entries),
     )
 
 
@@ -568,6 +669,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to oss-copyright-missing-allow.txt. Required: fails immediately if the path does not exist.",
     )
     parser.add_argument(
+        "--static-licenses-dir",
+        required=True,
+        help="Path to oss-static-licenses/ (map.txt plus the license texts it names). Required: fails "
+        "immediately if the directory or its map.txt is missing or invalid.",
+    )
+    parser.add_argument(
         "--portal-root",
         default="/home/user/palmimo-portal",
         help="Palmimo Portal repository checkout root (its venv is found by globbing "
@@ -588,6 +695,11 @@ def main(argv: list[str] | None = None) -> int:
     copyright_allow_path = Path(args.copyright_allow_file)
     if not copyright_allow_path.is_file():
         print(f"error: --copyright-allow-file does not exist: {copyright_allow_path}", file=sys.stderr)
+        return 1
+    try:
+        static_link_map = load_static_link_map(Path(args.static_licenses_dir))
+    except (OSError, ValueError) as exc:
+        print(f"error: --static-licenses-dir: {exc}", file=sys.stderr)
         return 1
 
     root = Path(args.root)
@@ -653,7 +765,9 @@ def main(argv: list[str] | None = None) -> int:
     for name in pi_report.missing:
         print(f"WARNING: no /usr/share/doc/{name}/copyright found -- recorded as missing (allowed)", file=sys.stderr)
 
-    portal_report = copy_portal_licenses(venv_site_packages, portal_root, licenses_out / "portal")
+    portal_report = copy_portal_licenses(venv_site_packages, portal_root, licenses_out / "portal", static_link_map)
+    for name, version in portal_report.unused_static_link_entries:
+        print(f"WARNING: oss-static-licenses/map.txt lists {name} {version}, which is not installed", file=sys.stderr)
     if portal_report.missing_license_files:
         details = ", ".join(f"{dist}: {path}" for dist, path in portal_report.missing_license_files)
         print(
@@ -682,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         portal_dists_without_license_text=portal_report.dists_without_license_text,
         portal_third_party_licenses_present=portal_report.third_party_licenses_present,
         portal_python_runtime_dirs=[p.name for p in uv_pythons],
+        portal_unreviewed_native_dists=portal_report.unreviewed_native_dists,
     )
     licenses_out.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(sources_manifest, licenses_out / "MANIFEST.txt")
