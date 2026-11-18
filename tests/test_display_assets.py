@@ -94,7 +94,7 @@ def filled_at(blob: bytes, x: float, y: float) -> bool:
     track_offset = struct.unpack_from("<I", blob, 48)[0]
     key_offset = struct.unpack_from("<I", blob, 56)[0]
     for index in range(draw_count):
-        _, kind, vertices, _, fill, track = struct.unpack_from("<5Ii", blob, draw_offset + index * 48)
+        _, kind, vertices, _, fill, track = struct.unpack_from("<5Ii", blob, draw_offset + index * 72)
         assert kind == 2 and fill
         dim, _, first, _ = struct.unpack_from("<3Ii", blob, track_offset + track * 16)
         values_offset = struct.unpack_from("<I", blob, key_offset + first * 32 + 8)[0]
@@ -110,10 +110,15 @@ def filled_at(blob: bytes, x: float, y: float) -> bool:
     return False
 
 
+@pytest.mark.parametrize("paint_kind", ["fl", "gf"])
 @pytest.mark.parametrize("reverse,rule,hole", [(True, 1, True), (False, 1, False), (False, 2, True)])
-def test_shared_fill_nested_contours_preserve_fill_rule(tmp_path: Path, reverse: bool, rule: int, hole: bool) -> None:
+def test_shared_fill_nested_contours_preserve_fill_rule(
+    tmp_path: Path, reverse: bool, rule: int, hole: bool, paint_kind: str
+) -> None:
     doc = composition()
     paint = doc["layers"][0]["shapes"][1]
+    if paint_kind == "gf":
+        paint = gradient()
     paint["r"] = rule
     doc["layers"][0]["shapes"] = [square(20, 20, 100), square(40, 40, 40, reverse), paint]
     code, result, output = convert_json(tmp_path, doc)
@@ -133,9 +138,12 @@ def test_shared_fill_intersecting_contours_are_rejected(tmp_path: Path) -> None:
     assert any(e["path"] == "$.layers[0].shapes[0]" for e in result["errors"])
 
 
-def test_shared_fill_disjoint_contours_keep_separate_draws(tmp_path: Path) -> None:
+@pytest.mark.parametrize("paint_kind", ["fl", "gf"])
+def test_shared_fill_disjoint_contours_keep_separate_draws(tmp_path: Path, paint_kind: str) -> None:
     doc = composition()
     paint = doc["layers"][0]["shapes"][1]
+    if paint_kind == "gf":
+        paint = gradient()
     doc["layers"][0]["shapes"] = [square(20, 20, 40), square(100, 20, 40), paint]
     code, result, output = convert_json(tmp_path, doc)
     assert code == 0, result
@@ -195,7 +203,7 @@ def test_lottie_reports_all_unsupported_features(tmp_path: Path) -> None:
     layer = doc["layers"][0]
     layer.update(parent=0, masksProperties=[{}], ef=[{}])
     layer["ks"]["p"] = {"k": [0, 0], "x": "value"}
-    layer["shapes"].extend([{"ty": "tm"}, {"ty": "gf"}, {"ty": "el"}])
+    layer["shapes"].extend([{"ty": "tm"}, {"ty": "gs"}, {"ty": "el"}])
     layer["shapes"][1]["r"] = 3
     doc["layers"].append({"ty": 5, "nm": "caption", "ks": {}})
     code, result, output = convert_json(tmp_path, doc)
@@ -358,7 +366,7 @@ def test_inspect_rejects_corrupt_assets(tmp_path: Path, kind: str, damage: str) 
     else:
         if kind == "vector":
             positions = {"offset": 72, "reference": 80, "numeric": 20, "version": 4}
-            values = {"offset": 0xFFFFFFFC, "reference": 0, "numeric": 0x7FC00000, "version": 2}
+            values = {"offset": 0xFFFFFFFC, "reference": 0, "numeric": 0x7FC00000, "version": 3}
         else:
             positions = {"offset": 64, "reference": 68, "numeric": 52, "version": 4}
             values = {"offset": 0xFFFFFFFE, "reference": 1, "numeric": 65, "version": 3}
@@ -661,3 +669,207 @@ def test_lottie_source_limits_accept_strings_across_read_boundaries(monkeypatch:
     monkeypatch.setattr(converter, "MAX_JSON_TOKENS", 8)
     monkeypatch.setattr(converter, "MAX_JSON_DEPTH", 2)
     assert converter.load_lottie(Chunked(raw)) == doc
+
+
+def gradient() -> dict[str, Any]:
+    return {
+        "ty": "gf",
+        "t": 1,
+        "g": {"p": 2, "k": {"k": [0, 1, 0, 0, 1, 0, 0, 1]}},
+        "s": {"k": [20, 30]},
+        "e": {"k": [100, 130]},
+        "o": {"k": 75},
+    }
+
+
+def track_values(blob: bytes, index: int) -> list[tuple[float, ...]]:
+    tracks, keys = (struct.unpack_from("<I", blob, p)[0] for p in (48, 56))
+    dim, count, first, _ = struct.unpack_from("<3Ii", blob, tracks + index * 16)
+    return [
+        struct.unpack_from(f"<{dim}f", blob, struct.unpack_from("<I", blob, keys + k * 32 + p)[0])
+        for k in range(first, first + count)
+        for p in (8, 12)
+    ]
+
+
+@pytest.mark.parametrize("n", [1, 2, 16])
+@pytest.mark.parametrize("kind,alpha,animated", [(1, False, False), (2, True, False), (1, True, True)])
+def test_gradient_conversion_can_be_inspected(tmp_path: Path, kind: int, alpha: bool, animated: bool, n: int) -> None:
+    doc = composition()
+    paint = gradient()
+    paint["t"] = kind
+    paint["h"] = {"a": 0, "k": 0}
+    paint["g"]["p"] = n
+    stops = [v for i in range(n) for v in (int(i == n - 1), int(i == 0), 0, int(i != 0))]
+    if alpha:
+        m = 40 if n == 16 else 2
+        stops.extend(v for i in range(m) for v in (int(i == m - 1), int(i == 0)))
+    paint["g"]["k"] = {"k": stops}
+    if animated:
+        changed = [*stops]
+        changed[1:4] = [0, 1, 0]
+        paint["g"]["k"] = {"a": 1, "k": [{"t": 0, "s": stops}, {"t": 30, "s": changed}]}
+        paint["s"] = {"a": 1, "k": [{"t": 0, "s": [20, 30, 0]}, {"t": 30, "s": [25, 35, 0]}]}
+        paint["e"] = {"a": 1, "k": [{"t": 0, "s": [100, 130]}, {"t": 30, "s": [150, 180]}]}
+    doc["layers"][0]["shapes"][1] = paint
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    assert run_cli("inspect", output) == (0, result)
+    blob = output.read_bytes()
+    assert struct.unpack_from("<I", blob, 4)[0] == 2
+    draw = struct.unpack_from("<5I6if2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
+    assert draw[4] == 1 and draw[11] == 0
+    assert draw[12:14] == (kind, n)
+    assert track_values(blob, draw[8]) == [(1, 1, 1, 1)] * 2
+    assert track_values(blob, draw[16])[0] == tuple(stops)
+    assert track_values(blob, draw[14])[0] == (20, 30)
+    assert track_values(blob, draw[15])[0] == (100, 130)
+    if animated:
+        assert track_values(blob, draw[14])[-1] == (25, 35)
+        assert track_values(blob, draw[15])[-1] == (150, 180)
+        assert track_values(blob, draw[16])[-1] == tuple(changed)
+
+
+def test_inherited_gradient_keeps_declaring_coordinate_node(tmp_path: Path) -> None:
+    doc = composition()
+    shape = doc["layers"][0]["shapes"][0]
+    doc["layers"][0]["shapes"] = [{"ty": "gr", "it": [shape, {"ty": "tr", "p": {"k": [50, 60]}}]}, gradient()]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    blob = output.read_bytes()
+    draw = struct.unpack_from("<5I6if2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
+    nodes = struct.unpack_from("<I", blob, 32)[0]
+    assert draw[0] != draw[17]
+    assert struct.unpack_from("<i", blob, nodes + draw[0] * 40)[0] == draw[17]
+    position = struct.unpack_from("<i", blob, nodes + draw[0] * 40 + 4)[0]
+    assert track_values(blob, position)[0] == (50, 60)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "gs",
+        "kind",
+        "highlight",
+        "animated-highlight",
+        "g-slot",
+        "k-slot",
+        "s-slot",
+        "e-slot",
+        "count-zero",
+        "count-large",
+        "count-float",
+        "short",
+        "odd",
+        "value",
+        "descending-color",
+        "descending-alpha",
+        "changing",
+        "key-end",
+        "rule",
+        "ordering",
+    ],
+)
+def test_gradient_rejects_invalid_source(tmp_path: Path, damage: str) -> None:
+    doc = composition()
+    paint = gradient()
+    if damage == "gs":
+        paint["ty"] = "gs"
+    elif damage == "kind":
+        paint["t"] = 3
+    elif damage == "highlight":
+        paint["h"] = {"k": 1}
+    elif damage == "animated-highlight":
+        paint["h"] = {"a": 1, "k": [{"t": 0, "s": [0]}]}
+    elif damage.endswith("slot"):
+        target = {"g-slot": paint["g"], "k-slot": paint["g"]["k"], "s-slot": paint["s"], "e-slot": paint["e"]}[damage]
+        target["sid"] = "gradient"
+    elif damage.startswith("count"):
+        paint["g"]["p"] = {"count-zero": 0, "count-large": 17, "count-float": 2.0}[damage]
+    elif damage == "short":
+        paint["g"]["k"]["k"] = [0, 1, 0, 0]
+    elif damage == "odd":
+        paint["g"]["k"]["k"].append(0)
+    elif damage == "value":
+        paint["g"]["k"]["k"][1] = 1.1
+    elif damage == "descending-color":
+        paint["g"]["k"]["k"][0:5:4] = [1, 0]
+    elif damage == "descending-alpha":
+        paint["g"]["k"]["k"] += [1, 1, 0, 0]
+    elif damage in ("changing", "key-end"):
+        stops = paint["g"]["k"]["k"]
+        other = [*stops, 0, 1] if damage == "changing" else [1, *stops[1:4], 0, *stops[5:]]
+        paint["g"]["k"] = {"a": 1, "k": [{"t": 0, "s": stops, "e": other}, {"t": 30, "s": stops}]}
+    elif damage == "rule":
+        paint["r"] = 3
+    doc["layers"][0]["shapes"][1] = paint
+    if damage == "ordering":
+        doc["layers"][0]["shapes"].append(square(0, 0, 5))
+    doc["layers"].append({"ty": 5, "nm": "unsupported", "ks": {}})
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 2 and not output.exists()
+    assert any(e["path"].startswith("$.layers[0].shapes") for e in result["errors"])
+    assert any(e["path"] == "$.layers[1].ty" for e in result["errors"])
+
+
+def test_inspect_rejects_spaf_v1(tmp_path: Path) -> None:
+    _, _, output = convert_json(tmp_path, composition())
+    blob = bytearray(output.read_bytes())
+    struct.pack_into("<I", blob, 4, 1)
+    refresh_crc(blob)
+    output.write_bytes(blob)
+    code, result = run_cli("inspect", output)
+    assert code == 2 and result["errors"][0]["code"] == "version"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "kind",
+        "count",
+        "fill",
+        "glow",
+        "start-ref",
+        "end-dim",
+        "stops-dim",
+        "node",
+        "slot",
+        "value",
+        "coordinate",
+        "solid",
+    ],
+)
+def test_inspect_rejects_invalid_gradient_records(tmp_path: Path, damage: str) -> None:
+    doc = composition()
+    doc["layers"][0]["shapes"][1] = gradient()
+    if damage == "slot":
+        doc["layers"][0]["shapes"][0]["p"]["sid"] = "origin"
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    blob = bytearray(output.read_bytes())
+    draw, tracks, keys = (struct.unpack_from("<I", blob, p)[0] for p in (40, 48, 56))
+    start, end, stops = struct.unpack_from("<3i", blob, draw + 56)
+    if damage in ("kind", "count", "fill", "node", "start-ref", "solid"):
+        offset, value = {
+            "kind": (48, 3),
+            "count": (52, 17),
+            "fill": (16, 0),
+            "node": (68, 99),
+            "start-ref": (56, -1),
+            "solid": (48, 0),
+        }[damage]
+        struct.pack_into("<i", blob, draw + offset, value)
+    elif damage == "glow":
+        struct.pack_into("<f", blob, draw + 44, 1)
+    elif damage in ("end-dim", "stops-dim"):
+        struct.pack_into("<I", blob, tracks + (end if damage == "end-dim" else stops) * 16, 1)
+    elif damage == "slot":
+        struct.pack_into("<i", blob, tracks + start * 16 + 12, 0)
+    else:
+        index = stops if damage == "value" else start
+        first = struct.unpack_from("<I", blob, tracks + index * 16 + 8)[0]
+        value_offset = struct.unpack_from("<I", blob, keys + first * 32 + 12)[0]
+        struct.pack_into("<f", blob, value_offset, 1.1 if damage == "value" else 1025)
+    refresh_crc(blob)
+    output.write_bytes(blob)
+    assert run_cli("inspect", output)[0] == 2
