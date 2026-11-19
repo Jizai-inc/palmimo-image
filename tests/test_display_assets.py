@@ -57,7 +57,7 @@ def convert_json(tmp_path: Path, doc: Any) -> tuple[int, dict[str, Any], Path]:
     return code, result, output
 
 
-@pytest.mark.parametrize("fixture", ["happy_glowtag", "happy_neon", "heart_pulse", "shapes_move"])
+@pytest.mark.parametrize("fixture", ["happy_strokes", "heart_pulse", "shapes_move"])
 def test_lottie_conversion_can_be_inspected(tmp_path: Path, fixture: str) -> None:
     output = tmp_path / "asset.bin"
     code, converted = run_cli("convert", FIXTURES / f"{fixture}.json", "-o", output)
@@ -94,7 +94,7 @@ def filled_at(blob: bytes, x: float, y: float) -> bool:
     track_offset = struct.unpack_from("<I", blob, 48)[0]
     key_offset = struct.unpack_from("<I", blob, 56)[0]
     for index in range(draw_count):
-        _, kind, vertices, _, fill, track = struct.unpack_from("<5Ii", blob, draw_offset + index * 72)
+        _, kind, vertices, _, fill, track = struct.unpack_from("<5Ii", blob, draw_offset + index * 68)
         assert kind == 2 and fill
         dim, _, first, _ = struct.unpack_from("<3Ii", blob, track_offset + track * 16)
         values_offset = struct.unpack_from("<I", blob, key_offset + first * 32 + 8)[0]
@@ -268,11 +268,39 @@ def test_lottie_enforces_draw_capacity(tmp_path: Path, draws: int, accepted: boo
     assert (convert_json(tmp_path, doc)[0] == 0) is accepted
 
 
-@pytest.mark.parametrize("radius,accepted", [(0, True), (128, True), (-1, False), (129, False), ("bad", False)])
-def test_lottie_glow_range(tmp_path: Path, radius: Any, accepted: bool) -> None:
+@pytest.mark.parametrize("tag", ["#glow", "#glow(r=0)", "#glow(r=14)", "#glow(r=bad)"])
+def test_lottie_rejects_glow_tag(tmp_path: Path, tag: str) -> None:
     doc = composition()
-    doc["layers"][0]["nm"] = f"eye #glow(r={radius})"
-    assert (convert_json(tmp_path, doc)[0] == 0) is accepted
+    doc["layers"][0]["nm"] = f"eye {tag}"
+    code, _, output = convert_json(tmp_path, doc)
+    assert code == 2 and not output.exists()
+
+
+@pytest.mark.parametrize("count", [2, 8, 9])
+@pytest.mark.parametrize("animated", [False, True])
+def test_lottie_preserves_stacked_strokes(tmp_path: Path, count: int, animated: bool) -> None:
+    doc = composition()
+    shapes = doc["layers"][0]["shapes"]
+    strokes = [
+        {"ty": "st", "lc": 2, "lj": 2, "w": {"k": 2 + i}, "o": {"k": 100}, "c": {"k": [1, 0, 0, 1]}}
+        for i in range(count)
+    ]
+    if animated:
+        strokes[0]["w"] = {"a": 1, "k": [{"t": 0, "s": [2]}, {"t": 30, "s": [5]}]}
+        strokes[0]["o"] = {"a": 1, "k": [{"t": 0, "s": [100]}, {"t": 30, "s": [50]}]}
+    shapes[:] = [shapes[0], *strokes]
+    code, result, output = convert_json(tmp_path, doc)
+    if count > 8:
+        assert code == 2 and not output.exists()
+        assert any(error["code"] == "limit" for error in result["errors"])
+    else:
+        assert code == 0, result
+        inspected_code, inspected = run_cli("inspect", output)
+        assert inspected_code == 0
+        assert inspected["draws"] == {"fill": 0, "stroke": count}
+        blob = output.read_bytes()
+        draw_offset, draw_count, track_offset = struct.unpack_from("<3I", blob, 40)
+        assert track_offset - draw_offset == draw_count * 68
 
 
 @pytest.mark.parametrize("format_name", ["PNG", "JPEG"])
@@ -400,13 +428,13 @@ def test_unsupported_features_include_topology_and_stroke_errors(tmp_path: Path)
     doc = composition()
     doc["layers"][0]["shapes"] = [
         {"ty": "sh", "ks": {"k": {"v": [[0, 0]], "i": [[0, 0]], "o": [[0, 0]], "c": True}}},
-        {"ty": "st", "lc": 2, "lj": 2, "w": {"a": 1, "k": [{"t": 0, "s": [2]}]}},
+        {"ty": "st", "lc": 1, "lj": 2, "w": {"a": 1, "k": [{"t": 0, "s": [2]}]}},
         {"ty": "st", "lc": 2, "lj": 2, "w": {"k": 5}},
         {"ty": "tm"},
     ]
     code, result, _ = convert_json(tmp_path, doc)
     assert code == 2
-    assert {"$.layers[0].shapes[3].ty", "$.layers[0].shapes", "$.layers[0].shapes[0].ks"} <= {
+    assert {"$.layers[0].shapes[3].ty", "$.layers[0].shapes[1].lc", "$.layers[0].shapes[0].ks"} <= {
         e["path"] for e in result["errors"]
     }
 
@@ -717,17 +745,17 @@ def test_gradient_conversion_can_be_inspected(tmp_path: Path, kind: int, alpha: 
     assert run_cli("inspect", output) == (0, result)
     blob = output.read_bytes()
     assert struct.unpack_from("<I", blob, 4)[0] == 2
-    draw = struct.unpack_from("<5I6if2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
-    assert draw[4] == 1 and draw[11] == 0
-    assert draw[12:14] == (kind, n)
+    draw = struct.unpack_from("<5I6i2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
+    assert draw[4] == 1
+    assert draw[11:13] == (kind, n)
     assert track_values(blob, draw[8]) == [(1, 1, 1, 1)] * 2
-    assert track_values(blob, draw[16])[0] == tuple(stops)
-    assert track_values(blob, draw[14])[0] == (20, 30)
-    assert track_values(blob, draw[15])[0] == (100, 130)
+    assert track_values(blob, draw[15])[0] == tuple(stops)
+    assert track_values(blob, draw[13])[0] == (20, 30)
+    assert track_values(blob, draw[14])[0] == (100, 130)
     if animated:
-        assert track_values(blob, draw[14])[-1] == (25, 35)
-        assert track_values(blob, draw[15])[-1] == (150, 180)
-        assert track_values(blob, draw[16])[-1] == tuple(changed)
+        assert track_values(blob, draw[13])[-1] == (25, 35)
+        assert track_values(blob, draw[14])[-1] == (150, 180)
+        assert track_values(blob, draw[15])[-1] == tuple(changed)
 
 
 def test_inherited_gradient_keeps_declaring_coordinate_node(tmp_path: Path) -> None:
@@ -737,10 +765,10 @@ def test_inherited_gradient_keeps_declaring_coordinate_node(tmp_path: Path) -> N
     code, result, output = convert_json(tmp_path, doc)
     assert code == 0, result
     blob = output.read_bytes()
-    draw = struct.unpack_from("<5I6if2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
+    draw = struct.unpack_from("<5I6i2I4i", blob, struct.unpack_from("<I", blob, 40)[0])
     nodes = struct.unpack_from("<I", blob, 32)[0]
-    assert draw[0] != draw[17]
-    assert struct.unpack_from("<i", blob, nodes + draw[0] * 40)[0] == draw[17]
+    assert draw[0] != draw[16]
+    assert struct.unpack_from("<i", blob, nodes + draw[0] * 40)[0] == draw[16]
     position = struct.unpack_from("<i", blob, nodes + draw[0] * 40 + 4)[0]
     assert track_values(blob, position)[0] == (50, 60)
 
@@ -828,7 +856,6 @@ def test_inspect_rejects_spaf_v1(tmp_path: Path) -> None:
         "kind",
         "count",
         "fill",
-        "glow",
         "start-ref",
         "end-dim",
         "stops-dim",
@@ -848,19 +875,17 @@ def test_inspect_rejects_invalid_gradient_records(tmp_path: Path, damage: str) -
     assert code == 0, result
     blob = bytearray(output.read_bytes())
     draw, tracks, keys = (struct.unpack_from("<I", blob, p)[0] for p in (40, 48, 56))
-    start, end, stops = struct.unpack_from("<3i", blob, draw + 56)
+    start, end, stops = struct.unpack_from("<3i", blob, draw + 52)
     if damage in ("kind", "count", "fill", "node", "start-ref", "solid"):
         offset, value = {
-            "kind": (48, 3),
-            "count": (52, 17),
+            "kind": (44, 3),
+            "count": (48, 17),
             "fill": (16, 0),
-            "node": (68, 99),
-            "start-ref": (56, -1),
-            "solid": (48, 0),
+            "node": (64, 99),
+            "start-ref": (52, -1),
+            "solid": (44, 0),
         }[damage]
         struct.pack_into("<i", blob, draw + offset, value)
-    elif damage == "glow":
-        struct.pack_into("<f", blob, draw + 44, 1)
     elif damage in ("end-dim", "stops-dim"):
         struct.pack_into("<I", blob, tracks + (end if damage == "end-dim" else stops) * 16, 1)
     elif damage == "slot":
