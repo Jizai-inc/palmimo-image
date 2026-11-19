@@ -768,7 +768,7 @@ def test_status_reports_effective_defaults_apps_and_orphans(
             sys.executable,
             str(SCRIPT.with_name("palmimo-display-assets")),
             "convert",
-            str(Path(__file__).parent / "fixtures/display-assets/happy_neon.json"),
+            str(Path(__file__).parent / "fixtures/display-assets/happy_strokes.json"),
             "-o",
             str(source),
             "--json",

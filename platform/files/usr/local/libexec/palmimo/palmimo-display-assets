@@ -50,7 +50,7 @@ def bounded(value: Any, low: float, high: float) -> bool:
     )
 
 
-def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
+def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     require(len(blob) >= 80, "truncated", "$", "SPAF header requires 80 bytes")
     version, kind, total, crc = struct.unpack_from("<4I", blob, 4)
     require(version == 2 and kind == 1, "version", "$", "Unsupported SPAF version or kind")
@@ -66,7 +66,7 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
     tables: list[list[tuple[Any, ...]]] = []
     cursor = 80
     for i, (fmt, limit) in enumerate(
-        zip(("<6i4f", "<5I6if2I4i", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
+        zip(("<6i4f", "<5I6i2I4i", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
     ):
         offset, count = struct.unpack_from("<2I", blob, 32 + i * 8)
         stride = struct.calcsize(fmt)
@@ -166,7 +166,6 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
         color,
         opacity,
         width,
-        glow,
         paint,
         n,
         start,
@@ -184,7 +183,6 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
             "$",
             "Invalid draw topology",
         )
-        require(bounded(glow, 0, 128), "numeric", "$", "Invalid glow radius")
         role(g0, (vertices * 6 if kind == 2 else 2,), -1024, 1024)
         if kind == 2:
             require(g1 == g2 == -1, "reference", "$", "Path has extraneous geometry references")
@@ -198,7 +196,7 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
         if paint == 0:
             require(n == 0 and start == end == stops == space == -1, "reference", "$", "Solid fill has gradient fields")
         else:
-            require(fill == 1 and glow == 0 and 1 <= n <= 16, "topology", "$", "Invalid gradient fill")
+            require(fill == 1 and 1 <= n <= 16, "topology", "$", "Invalid gradient fill")
             require(0 <= space < len(nodes), "reference", "$", "Invalid gradient coordinate node")
             role(start, (2,), -1024, 1024)
             role(end, (2,), -1024, 1024)
@@ -206,7 +204,8 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
             require(
                 all(tracks[t][3] == -1 for t in (start, end, stops)), "slot", "$", "Gradient tracks cannot use slots"
             )
-    return params
+    fills = sum(draw[4] for draw in draws)
+    return params, {"fill": fills, "stroke": len(draws) - fills}
 
 
 def image_warnings(kind: str, scans: list[int]) -> list[dict[str, str]]:
@@ -274,8 +273,10 @@ def inspect_pimg(blob: bytes) -> tuple[str, list[dict[str, str]]]:
 
 def inspect(blob: bytes) -> dict[str, Any]:
     require(len(blob) <= MAX_FILE, "limit", "$", "Asset exceeds display storage")
+    details: dict[str, Any] = {}
     if blob[:4] == b"SPAF":
-        params = inspect_spaf(blob)
+        params, draws = inspect_spaf(blob)
+        details["draws"] = draws
         kind = "vector"
         notices: list[dict[str, str]] = []
     elif blob[:4] == b"PIMG":
@@ -290,6 +291,7 @@ def inspect(blob: bytes) -> dict[str, Any]:
         "crc32": f"{zlib.crc32(blob):08x}",
         "params": params,
         "warnings": notices,
+        **details,
     }
 
 
@@ -412,9 +414,9 @@ class Lottie:
         self.tracks: list[dict[str, Any]] = []
         self.nodes: list[dict[str, Any]] = []
         self.draws: list[dict[str, Any]] = []
+        self.paint_draws: dict[str, list[dict[str, Any]]] = {}
         self.fills: dict[str, list[tuple[dict[str, Any], str, int]]] = {}
         self.errors: list[dict[str, str]] = []
-        self.notices: list[dict[str, str]] = []
         self.slot_dims: dict[str, int] = {}
         self.key_count = 0
 
@@ -675,7 +677,6 @@ class Lottie:
         items: list[dict[str, Any]],
         parent: int,
         name: str,
-        glow: float,
         path: str,
         inherited: tuple[tuple[dict[str, Any], str, int], ...] = (),
         depth: int = 2,
@@ -687,35 +688,10 @@ class Lottie:
         tr, tr_path = transforms[0] if transforms else ({}, path)
         at = self.node(tr, parent, -1e9, 1e9, 0, 1, tr_path, name)
         paints = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] in ("fl", "gf", "st") and not x.get("hd")]
-        strokes = [(x, p) for x, p in paints if x["ty"] == "st"]
-        if len(strokes) > 1:
-            resolved = [(self.resolve(x["w"]), self.resolve(x.get("o", {"k": 100})), x, p) for x, p in strokes]
-            if any(w.get("a") or o.get("a") for w, o, _, _ in resolved):
-                self.error(name, "animated stacked stroke width/opacity", path)
-            else:
-                ordered = sorted(resolved, key=lambda t: t[0]["k"])
-                if any(a[0]["k"] >= b[0]["k"] or a[1]["k"] <= b[1]["k"] for a, b in pairwise(ordered)):
-                    self.error(name, "stacked strokes require thin opaque core and wider faint halos", path)
-                else:
-                    # DIST retains the core and approximates all halos with one radius.
-                    glow = max(glow, (ordered[-1][0]["k"] - ordered[0][0]["k"]) / 2)
-                    paints = [(x, p) for x, p in paints if x["ty"] != "st" or x is ordered[0][2]]
-                    self.notices.append(
-                        {
-                            "code": "stacked_strokes",
-                            "message": f"{name}: halo colors and opacity approximated by DIST glow",
-                        }
-                    )
-            # Discarded halos still must obey the source property limits.
-            for stroke, stroke_path in strokes:
-                for key, default, dims, low, high in (
-                    ("w", 0, (1,), 0, 128),
-                    ("o", 100, (1,), 0, 100),
-                    ("c", [1, 1, 1, 1], (4,), 0, 1),
-                ):
-                    before = len(self.tracks)
-                    self.prop(stroke.get(key), default, stroke_path + "." + key, name, dims, low, high)
-                    del self.tracks[before:]
+        # lottie-web registers styles during reverse depth-first traversal, then
+        # draws every shape belonging to one style before advancing to the next.
+        for _, paint_path in reversed(paints):
+            self.paint_draws[paint_path] = []
         effective = (*inherited, *((paint, p, at) for paint, p in reversed(paints)))
         for i in reversed(range(len(items))):
             item, item_path = items[i], f"{path}[{i}]"
@@ -724,7 +700,7 @@ class Lottie:
                 continue
             if ty == "gr":
                 self.group(
-                    item["it"], at, name + "/" + item.get("nm", "group"), glow, item_path + ".it", effective, depth + 1
+                    item["it"], at, name + "/" + item.get("nm", "group"), item_path + ".it", effective, depth + 1
                 )
             elif ty in ("el", "rc", "sh"):
                 closed, vertices = True, 0
@@ -785,7 +761,8 @@ class Lottie:
                     )
                     opacity = self.prop(paint.get("o"), 100, paint_path + ".o", name, (1,), 0, 100)
                     width = self.prop(paint.get("w"), 0, paint_path + ".w", name, (1,), 0, 128)
-                    self.draws.append(
+                    draws = self.paint_draws[paint_path]
+                    draws.append(
                         {
                             "node": at,
                             "kind": {"el": 0, "rc": 1, "sh": 2}[ty],
@@ -796,12 +773,11 @@ class Lottie:
                             "color": color,
                             "opacity": opacity,
                             "width": width,
-                            "glow": 0 if fill else glow,
                             "gradient": gradient,
                         }
                     )
                     if fill:
-                        self.fills.setdefault(paint_path, []).append((self.draws[-1], item_path, paint.get("r", 1)))
+                        self.fills.setdefault(paint_path, []).append((draws[-1], item_path, paint.get("r", 1)))
 
     def shared_fills(self) -> None:
         def vectors(track: int, path: str) -> list[list[float]]:
@@ -1006,6 +982,7 @@ class Lottie:
             except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
                 self.error(str(layer.get("nm", i)), str(exc), path, "input")
         self.check_errors()
+        self.draws = [draw for draws in self.paint_draws.values() for draw in draws]
         self.shared_fills()
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),
@@ -1021,17 +998,8 @@ class Lottie:
         if layer.get("ty") != 4:
             return
         name = layer.get("nm", str(index))
-        glow = 0.0
-        tags = re.findall(r"#glow\([^)]*\)", name)
         if "#glow" in name:
-            if len(tags) != 1:
-                self.error(name, "expected one #glow(r=<px>) tag", path + ".nm", "numeric")
-            else:
-                match = re.fullmatch(r"#glow\(r=([+-]?(?:\d+(?:\.\d*)?|\.\d+))\)", tags[0])
-                if not match or not bounded(float(match[1]), 0, 128):
-                    self.error(name, "glow requires radius 0..128", path + ".nm", "numeric")
-                else:
-                    glow = float(match[1])
+            self.error(name, "#glow is unsupported; use Lottie gradient fills (gf) for light", path + ".nm")
         at = self.node(
             layer.get("ks", {}),
             -1,
@@ -1042,14 +1010,14 @@ class Lottie:
             path + ".ks",
             name,
         )
-        self.group(layer["shapes"], at, name, glow, path + ".shapes")
+        self.group(layer["shapes"], at, name, path + ".shapes")
 
     def serialize(self) -> bytes:
         keys = [k for t in self.tracks for k in t["keys"]]
         slots = list(dict.fromkeys((t["slot"], t["dim"]) for t in self.tracks if t["slot"]))
         offsets = [80]
         counts = (len(self.nodes), len(self.draws), len(self.tracks), len(keys), len(slots))
-        for count, stride in zip(counts, (40, 72, 16, 32, 12), strict=True):
+        for count, stride in zip(counts, (40, 68, 16, 32, 12), strict=True):
             offsets.append(offsets[-1] + count * stride)
         payload, shared = bytearray(), {}
 
@@ -1073,7 +1041,7 @@ class Lottie:
         for d in self.draws:
             body.extend(
                 struct.pack(
-                    "<5I6if2I4i",
+                    "<5I6i2I4i",
                     d["node"],
                     d["kind"],
                     d["vertices"],
@@ -1083,7 +1051,6 @@ class Lottie:
                     d["color"],
                     d["opacity"],
                     d["width"],
-                    d["glow"],
                     *d["gradient"],
                 )
             )
@@ -1131,7 +1098,6 @@ def main() -> int:
     check.add_argument("input", type=Path)
     check.add_argument("--json", action="store_true")
     json_output = "--json" in sys.argv[1:]
-    notices = []
     try:
         args = parser.parse_args()
         if args.command == "inspect":
@@ -1142,7 +1108,6 @@ def main() -> int:
                 doc = load_lottie(stream)
             compiler = Lottie(doc)
             blob = compiler.convert()
-            notices = compiler.notices
         else:
             require(
                 args.input.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif"),
@@ -1152,7 +1117,6 @@ def main() -> int:
             )
             blob = convert_image(args.input)
         result = inspect(blob)
-        result["warnings"].extend(notices)
         if args.command == "convert":
             # Validation precedes replacement so rejected input cannot destroy a previous asset.
             temp: str | None = None
