@@ -1209,3 +1209,56 @@ def test_known_absence_preserves_boot_write_failure_count(rig: tuple[Any, Fake])
     assert state["consecutive_failures"] == 3
     assert state["last_result"] == "absent" and state["last_reason"] == result["reason"]
     assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("operation", ["validate", "ensure"])
+@pytest.mark.parametrize("protocol,limit", [(1, 10 * 1024 * 1024), (2, 2 * 1024 * 1024)])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_firmware_region_limit(
+    rig: tuple[Any, Fake],
+    operation: str,
+    protocol: int,
+    limit: int,
+    delta: int,
+) -> None:
+    updater, hw = rig
+    image = b"new\0" + b"A" * (limit + delta - 4)
+    filename = f"face_serial_v{protocol}.bin.gz"
+    (updater.paths.firmware / filename).write_bytes(gzip.compress(image))
+    (updater.paths.firmware / "firmware.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "firmware": {
+                    str(protocol): {
+                        "version": "new",
+                        "sha256": hashlib.sha256(image).hexdigest(),
+                        "file": filename,
+                    }
+                },
+            }
+        )
+    )
+    (updater.paths.state.parent / "desired.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "protocol": protocol,
+                "by": "initial",
+            }
+        )
+    )
+    if operation == "validate":
+        if delta < 0:
+            fw.validate_artifact(updater.paths.firmware, [])
+        else:
+            with pytest.raises(fw.FirmwareError):
+                fw.validate_artifact(updater.paths.firmware, [])
+    elif delta < 0:
+        result, code = updater.ensure()
+        assert code == 0 and result["result"] == "updated"
+        assert hw.payloads and hw.flash[: len(image)] == image
+    else:
+        result, code = updater.ensure()
+        assert code != 0 and result["result"] == "failed"
+        assert not hw.payloads

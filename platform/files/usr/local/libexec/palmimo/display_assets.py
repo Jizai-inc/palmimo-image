@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 
-CAPACITY = 6_275_072
+CAPACITY = (16 - 2) * 1024 * 1024 - 2 * 4096
 # The v2 directory sector reserves 16 bytes for its header and 4 for its CRC.
 DIRECTORY_CAPACITY = 4092 - 16
 DIRECTORY_ENTRIES = 254

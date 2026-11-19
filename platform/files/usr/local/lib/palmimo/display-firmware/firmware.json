@@ -8,9 +8,9 @@
       "file": "face_serial_v1.bin.gz"
     },
     "2": {
-      "version": "2.0.0+8a5375f6",
-      "sha256": "ee7882953aa14b6bde615f0306f9a5c67bb5162a66489a153aa13aa23f047e70",
-      "source_commit": "8a5375f6fe7bd302195eec77df74c546079a331c",
+      "version": "2.0.0+e69492d6",
+      "sha256": "669b067ca90f089de5abf87131fc5a7535fd110ec962c1952ab0c718b3d45c22",
+      "source_commit": "e69492d644d24730e03bea41e107ba0732e55d73",
       "file": "face_serial_v2.bin.gz"
     }
   }

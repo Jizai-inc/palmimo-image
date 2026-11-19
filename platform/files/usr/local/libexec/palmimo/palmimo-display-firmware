@@ -121,11 +121,13 @@ def unpack(source: Path, target: Path, limit: int) -> bytes:
 
 def validate_artifact(directory: Path, forbidden: list[str]) -> None:
     """Validate release integrity and check any privately supplied forbidden terms."""
-    for declared in declaration(directory / "firmware.json").values():
+    for protocol, declared in declaration(directory / "firmware.json").items():
         with tempfile.TemporaryDirectory() as temporary:
-            data = unpack(directory / declared["file"], Path(temporary) / "firmware.bin", 10 * 1024 * 1024)
-        if len(data) >= 10 * 1024 * 1024:
-            raise FirmwareError("Release firmware must be smaller than 10 MiB")
+            data = unpack(
+                directory / declared["file"],
+                Path(temporary) / "firmware.bin",
+                (2 if protocol == "2" else 10) * 1024 * 1024 - 1,
+            )
         if hashlib.sha256(data).hexdigest() != declared["sha256"]:
             raise FirmwareError("Firmware checksum mismatch")
         version = declared["version"].encode()
@@ -498,7 +500,11 @@ class Updater:
         if boot and state["consecutive_failures"] >= 3:
             print("WARNING: automatic display writes suspended after repeated failures", file=sys.stderr)
             return "skipped"
-        data = unpack(self.paths.firmware / declared["file"], self.paths.work / "firmware.bin", 12 * 1024 * 1024)
+        data = unpack(
+            self.paths.firmware / declared["file"],
+            self.paths.work / "firmware.bin",
+            (2 if state["desired_protocol"] == 2 else 10) * 1024 * 1024 - 1,
+        )
         if len(data) <= 4096:
             raise FirmwareError("Firmware must contain a header and body")
         if hashlib.sha256(data).hexdigest() != declared["sha256"]:
