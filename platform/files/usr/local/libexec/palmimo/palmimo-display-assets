@@ -53,7 +53,7 @@ def bounded(value: Any, low: float, high: float) -> bool:
 def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
     require(len(blob) >= 80, "truncated", "$", "SPAF header requires 80 bytes")
     version, kind, total, crc = struct.unpack_from("<4I", blob, 4)
-    require(version == 1 and kind == 1, "version", "$", "Unsupported SPAF version or kind")
+    require(version == 2 and kind == 1, "version", "$", "Unsupported SPAF version or kind")
     require(total == len(blob) and total <= 1_048_576 and total % 4 == 0, "length", "$", "Invalid SPAF length")
     require(zlib.crc32(blob[:16] + b"\0" * 4 + blob[20:]) == crc, "crc", "$", "SPAF CRC mismatch")
     fps, ip, op = struct.unpack_from("<3f", blob, 20)
@@ -66,7 +66,7 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
     tables: list[list[tuple[Any, ...]]] = []
     cursor = 80
     for i, (fmt, limit) in enumerate(
-        zip(("<6i4f", "<5I6if", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
+        zip(("<6i4f", "<5I6if2I4i", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
     ):
         offset, count = struct.unpack_from("<2I", blob, 32 + i * 8)
         stride = struct.calcsize(fmt)
@@ -154,7 +154,26 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
         role(s, (2, 3), -200, 200)
         role(r, (1,), -1024, 1024)
         role(o, (1,), 0, 100)
-    for node, kind, vertices, closed, fill, g0, g1, g2, color, opacity, width, glow in draws:
+    for (
+        node,
+        kind,
+        vertices,
+        closed,
+        fill,
+        g0,
+        g1,
+        g2,
+        color,
+        opacity,
+        width,
+        glow,
+        paint,
+        n,
+        start,
+        end,
+        stops,
+        space,
+    ) in draws:
         require(node < len(nodes), "reference", "$", "Invalid draw node")
         require(
             kind in (0, 1, 2)
@@ -175,6 +194,18 @@ def inspect_spaf(blob: bytes) -> dict[str, dict[str, int]]:
         role(color, (4,), 0, 1)
         role(opacity, (1,), 0, 100)
         role(width, (1,), 0, 128)
+        require(paint in (0, 1, 2), "topology", "$", "Invalid fill kind")
+        if paint == 0:
+            require(n == 0 and start == end == stops == space == -1, "reference", "$", "Solid fill has gradient fields")
+        else:
+            require(fill == 1 and glow == 0 and 1 <= n <= 16, "topology", "$", "Invalid gradient fill")
+            require(0 <= space < len(nodes), "reference", "$", "Invalid gradient coordinate node")
+            role(start, (2,), -1024, 1024)
+            role(end, (2,), -1024, 1024)
+            role(stops, tuple(range(4 * n, 145, 2)), 0, 1)
+            require(
+                all(tracks[t][3] == -1 for t in (start, end, stops)), "slot", "$", "Gradient tracks cannot use slots"
+            )
     return params
 
 
@@ -411,7 +442,7 @@ class Lottie:
         if obj.get("a") and isinstance(obj.get("k"), list):
             require(len(obj["k"]) <= MAX_KEYS, "limit", path, "Too many property keys")
         ty = obj.get("ty")
-        if isinstance(ty, str) and ty not in {"gr", "el", "rc", "sh", "fl", "st", "tr"}:
+        if isinstance(ty, str) and ty not in {"gr", "el", "rc", "sh", "fl", "gf", "st", "tr"}:
             self.error(
                 layer,
                 {"tm": "trim path", "gf": "gradient fill", "gs": "gradient stroke", "rp": "repeater", "sr": "star"}.get(
@@ -447,8 +478,10 @@ class Lottie:
                 self.error(layer, "skew", path + "." + key)
         if "sid" in obj and (not isinstance(obj["sid"], str) or SID.fullmatch(obj["sid"]) is None):
             self.error(layer, "slot id must match [a-z0-9_]{1,32}", path + ".sid", "slot")
-        if ty == "fl" and (type(obj.get("r", 1)) is not int or obj.get("r", 1) not in (1, 2)):
+        if ty in ("fl", "gf") and (type(obj.get("r", 1)) is not int or obj.get("r", 1) not in (1, 2)):
             self.error(layer, "fill rule must be nonzero or evenodd", path + ".r")
+        if ty == "gf":
+            self.scan_gradient(obj, path, layer)
         if ty == "st":
             for key in ("lc", "lj"):
                 if obj.get(key, 1) != 2:
@@ -469,7 +502,7 @@ class Lottie:
                 for i, item in enumerate(items):
                     item_path = f"{path}.{key}[{i}]"
                     item_ty = item.get("ty")
-                    if item_ty in ("fl", "st"):
+                    if item_ty in ("fl", "gf", "st"):
                         seen_paint = True
                     elif item_ty in ("gr", "el", "rc", "sh") and seen_paint:
                         self.error(layer, "interleaved geometry/style ordering", item_path)
@@ -479,6 +512,64 @@ class Lottie:
                     self.error(layer, "multiple group transforms", path + "." + key)
         for key, value in obj.items():
             self.scan(value, path + "." + key, layer)
+
+    def scan_gradient(self, paint: dict[str, Any], path: str, layer: str) -> None:
+        if type(paint.get("t")) is not int or paint["t"] not in (1, 2):
+            self.error(layer, "gradient type must be linear or radial", path + ".t")
+        if "h" in paint:
+            h = paint["h"]
+            if not isinstance(h, dict) or h.get("a", 0) != 0 or not bounded(h.get("k"), 0, 0) or "sid" in h:
+                self.error(layer, "gradient highlight must be static zero", path + ".h")
+        for key in ("g", "s", "e"):
+            prop = paint.get(key)
+            if not isinstance(prop, dict):
+                self.error(layer, "gradient property required", path + "." + key, "input")
+            elif "sid" in prop:
+                self.error(layer, "gradient slots are unsupported", path + "." + key + ".sid", "slot")
+        g = paint.get("g")
+        if not isinstance(g, dict):
+            return
+        n, prop = g.get("p"), g.get("k")
+        if isinstance(prop, dict) and "sid" in prop:
+            self.error(layer, "gradient slots are unsupported", path + ".g.k.sid", "slot")
+        if type(n) is not int or not 1 <= n <= 16:
+            self.error(layer, "gradient requires 1..16 color stops", path + ".g.p", "numeric")
+            return
+        if not isinstance(prop, dict):
+            self.error(layer, "gradient stop property required", path + ".g.k", "input")
+            return
+        raw = prop.get("k")
+        vectors = []
+        if prop.get("a"):
+            if isinstance(raw, list):
+                vectors = [key[field] for key in raw if isinstance(key, dict) for field in ("s", "e") if field in key]
+        else:
+            vectors = [raw]
+        dim = len(vectors[0]) if vectors and isinstance(vectors[0], list) else 0
+        if not vectors or dim < 4 * n or (dim - 4 * n) % 2:
+            self.error(layer, "invalid gradient stop dimension", path + ".g.k", "dimension")
+        for vector in vectors:
+            if not isinstance(vector, list) or len(vector) != dim or any(not bounded(v, 0, 1) for v in vector):
+                self.error(
+                    layer, "gradient stops require equal dimensions and values in 0..1", path + ".g.k", "numeric"
+                )
+                continue
+            if any(a > b for positions in (vector[: 4 * n : 4], vector[4 * n :: 2]) for a, b in pairwise(positions)):
+                self.error(layer, "gradient stop positions must be nondecreasing", path + ".g.k", "numeric")
+
+    def gradient_tracks(self, paint: dict[str, Any], path: str, layer: str, node: int) -> list[int]:
+        coordinates = []
+        for field in ("s", "e"):
+            index = self.prop(paint[field], None, path + "." + field, layer, (2, 3), -1024, 1024)
+            track = self.tracks[index]
+            track["dim"] = 2
+            for key in track["keys"]:
+                for vector in VECTORS:
+                    key[vector] = key[vector][:2]
+            coordinates.append(index)
+        n = paint["g"]["p"]
+        stops = self.prop(paint["g"]["k"], None, path + ".g.k", layer, tuple(range(4 * n, 145, 2)), 0, 1)
+        return [paint["t"], n, *coordinates, stops, node]
 
     def prop(
         self,
@@ -586,7 +677,7 @@ class Lottie:
         name: str,
         glow: float,
         path: str,
-        inherited: tuple[tuple[dict[str, Any], str], ...] = (),
+        inherited: tuple[tuple[dict[str, Any], str, int], ...] = (),
         depth: int = 2,
     ) -> None:
         if depth > 8:
@@ -595,7 +686,7 @@ class Lottie:
         transforms = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] == "tr"]
         tr, tr_path = transforms[0] if transforms else ({}, path)
         at = self.node(tr, parent, -1e9, 1e9, 0, 1, tr_path, name)
-        paints = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] in ("fl", "st") and not x.get("hd")]
+        paints = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] in ("fl", "gf", "st") and not x.get("hd")]
         strokes = [(x, p) for x, p in paints if x["ty"] == "st"]
         if len(strokes) > 1:
             resolved = [(self.resolve(x["w"]), self.resolve(x.get("o", {"k": 100})), x, p) for x, p in strokes]
@@ -625,7 +716,7 @@ class Lottie:
                     before = len(self.tracks)
                     self.prop(stroke.get(key), default, stroke_path + "." + key, name, dims, low, high)
                     del self.tracks[before:]
-        effective = (*inherited, *reversed(paints))
+        effective = (*inherited, *((paint, p, at) for paint, p in reversed(paints)))
         for i in reversed(range(len(items))):
             item, item_path = items[i], f"{path}[{i}]"
             ty = item["ty"]
@@ -676,9 +767,22 @@ class Lottie:
                             ("r", 0, (1,), 0),
                         )
                     ]
-                for paint, paint_path in effective:
-                    fill = paint["ty"] == "fl"
-                    color = self.prop(paint.get("c"), [1, 1, 1, 1], paint_path + ".c", name, (4,), 0, 1)
+                for paint, paint_path, paint_node in effective:
+                    fill = paint["ty"] in ("fl", "gf")
+                    gradient = (
+                        self.gradient_tracks(paint, paint_path, name, paint_node)
+                        if paint["ty"] == "gf"
+                        else [0, 0, -1, -1, -1, -1]
+                    )
+                    color = self.prop(
+                        paint.get("c") if paint["ty"] != "gf" else None,
+                        [1, 1, 1, 1],
+                        paint_path + ".c",
+                        name,
+                        (4,),
+                        0,
+                        1,
+                    )
                     opacity = self.prop(paint.get("o"), 100, paint_path + ".o", name, (1,), 0, 100)
                     width = self.prop(paint.get("w"), 0, paint_path + ".w", name, (1,), 0, 128)
                     self.draws.append(
@@ -693,6 +797,7 @@ class Lottie:
                             "opacity": opacity,
                             "width": width,
                             "glow": 0 if fill else glow,
+                            "gradient": gradient,
                         }
                     )
                     if fill:
@@ -944,7 +1049,7 @@ class Lottie:
         slots = list(dict.fromkeys((t["slot"], t["dim"]) for t in self.tracks if t["slot"]))
         offsets = [80]
         counts = (len(self.nodes), len(self.draws), len(self.tracks), len(keys), len(slots))
-        for count, stride in zip(counts, (40, 48, 16, 32, 12), strict=True):
+        for count, stride in zip(counts, (40, 72, 16, 32, 12), strict=True):
             offsets.append(offsets[-1] + count * stride)
         payload, shared = bytearray(), {}
 
@@ -968,7 +1073,7 @@ class Lottie:
         for d in self.draws:
             body.extend(
                 struct.pack(
-                    "<5I6if",
+                    "<5I6if2I4i",
                     d["node"],
                     d["kind"],
                     d["vertices"],
@@ -979,6 +1084,7 @@ class Lottie:
                     d["opacity"],
                     d["width"],
                     d["glow"],
+                    *d["gradient"],
                 )
             )
         first = 0
@@ -993,7 +1099,7 @@ class Lottie:
         header = struct.pack(
             "<4s4I3f12I",
             b"SPAF",
-            1,
+            2,
             1,
             80 + len(body),
             0,
