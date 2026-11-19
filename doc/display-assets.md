@@ -130,6 +130,21 @@ FWと `inspect` は要求しない（成分別のイージングで補間中に�
 前者の reason は null、後者には USB 接続や復旧を案内する reason を付ける。before/after は null。
 顔が無いことを起動の失敗とせず、起動時の書き込み失敗回数も増やさない。
 
+## Flash の領域
+
+| 範囲 | v2 の用途 |
+|---|---|
+| 0〜2MiB（`0x000000`〜`0x200000` 未満） | FW。バイナリは 2MiB 未満 |
+| 2MiB〜16MiB−8KiB（`0x200000`〜`0xffe000` 未満） | アセット本体。末尾から先頭へ詰める連続領域 |
+| 16MiB−8KiB〜16MiB（`0xffe000`〜`0x1000000` 未満） | 目録 2 面、各 4KiB |
+
+v1 の FW バイナリの上限は 10MiB 未満。v2 の領域内には旧 FW 用目録の穴を設けない。
+アセット本体の合計占有量が 6MiB−8KiB 以下なら 10MiB より後ろに収まり、v1 への切り替えでも残る。
+それを超えて手前に置いた分は v1 の書き込みで失われることがあり、v2 の起動時 CRC 検査で除外し、SD から同期し直す。
+v1 が旧目録の位置へ画像を書いた場合も同様に検査・再同期する。
+既存データの移行は行わない。本体の相対位置の基準が変わるため、起動時の検査で除外して同期し直す。
+変換器の 1 アセットの上限（`MAX_FILE`）は 6,275,072 バイトのまま。
+
 ## アセットの同期
 
 `palmimo-display-firmware assets sync [--app <app ID>] --json`（root）。
@@ -139,9 +154,9 @@ FWと `inspect` は要求しない（成分別のイージングで補間中に�
 - 場所が足りなければ、他のアプリのアセットを `launch.json` の古い順に `ASSET DEL`。望む集合に無い `palmimo/*` は削除する。それでも連続した空きが足りなければ、標準アセット以外を全部消して入れ直す。まだ入らなければ、最後の手段として標準を含む全アセットを消して入れ直す（その間は内蔵画面へ戻る）。再配置の開始と各 DEL・PUT の経過を標準エラーへ出す。全件の再配置後も NOSPACE なら `reason` は `insufficient_contiguous_space_after_repacking`。
 - 結果は `{"result": "synced" | "busy" | "skipped" | "failed", "put": [...], "deleted": [...], "reason"}`。経過は標準エラーに 1 行ずつ。
 - 容量の条件は Portal が先に検査し、`replace`・`override` も保存時に検査する。同期でも守られていなければ `failed`。保存時の不足は `{"ok": false, "reason": "...", "short_by": <不足バイト>}`・終了 1。
-  - 使える量: 6,291,456（10MiB〜16MiB）− 8,192（先頭の旧 FW の目録）− 8,192（末尾の新 FW の目録 2 面）＝ **6,275,072 バイト**。
+  - 使える量: 14,680,064（2MiB〜16MiB）− 8,192（末尾の FW の目録 2 面）＝ **14,671,872 バイト**。
   - 1 アセットの占める量: `ceil(bytes / 4096) × 4096`。
-  - 条件: 標準集合全体（system.* と差し替えを反映し、目録の件数で絞らない）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 6,275,072。
+  - 条件: 標準集合全体（system.* と差し替えを反映し、目録の件数で絞らない）の占める量の和 ＋ アプリ 1 つのアセットの占める量の和 ＋ その中で一番大きいアセット 1 個の占める量 ≤ 14,671,872。
   - FW の目録にも同じ集合が収まること。`palmimo/<name>`・`<app ID>/<name>` の完全な ASCII ID ごとに `align4(13 + ID のバイト長)` を加算し、合計 ≤ 4,076 バイト（4,092 − ヘッダ16）、件数 ≤ 254。目録は同じ ID の更新で項目を置き換えるため、本体のような最大1個分の余裕は不要。
   - `replace`・`override`・同期の望む集合で本体と FW 目録の両条件を検査する。`override` は各インストール済みアプリとの組み合わせを検査する。目録不足の reason は `Assets exceed display directory capacity`、保存時の `short_by` は不足バイト（件数超過は超過1件につき最小項目長16バイト）を返す。同期では DEL・PUT の前に `failed` にする。
 
@@ -164,7 +179,7 @@ store の `.lock` は `status`・`replace`・`uninstall`・`override`・`install
 `assets status [--json]` は store ロックを待ち、以下の 1 行 JSON を返す（成功は終了 0、検査や読み取り失敗は ok:false・終了 1、ロック期限は終了 75）。USB には触れない。
 
 ```json
-{"capacity":6275072,"standard":[{"name":"happy","bytes":12345,"kind":"vector","params":["eye_color"],"overridden":false,"default_bytes":12345,"default_kind":"vector","default_params":["eye_color"]}],"apps":{"zip.example":{"bytes":20480,"largest":16384,"names":["bye","welcome"]}},"orphan_overrides":["removed"]}
+{"capacity":14671872,"standard":[{"name":"happy","bytes":12345,"kind":"vector","params":["eye_color"],"overridden":false,"default_bytes":12345,"default_kind":"vector","default_params":["eye_color"]}],"apps":{"zip.example":{"bytes":20480,"largest":16384,"names":["bye","welcome"]}},"orphan_overrides":["removed"]}
 ```
 
 standard は標準集合の名前順。bytes/kind/params は有効な差し替えを反映し、default_* は既定の .bin。params は inspect で得る sid の一覧。

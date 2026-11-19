@@ -32,7 +32,7 @@ def asset(pages: int = 1, value: int = 0) -> bytes:
 
 
 class Flash:
-    def __init__(self, pages: int = 1532) -> None:
+    def __init__(self, pages: int = 3582) -> None:
         self.pages = pages
         self.assets: dict[str, tuple[int, bytes]] = {}
         self.commands: list[str] = []
@@ -568,7 +568,7 @@ def test_sync_rejects_invalid_local_plan_before_flash_changes(
     elif state == "catalog":
         (paths.catalog / "catalog.json").write_text('{"schema":1,"assets":[{"id":"zip.other/a"}]}')
     else:
-        for i in range(6):
+        for i in range(14):
             installed(paths, "zip.demo", f"large{i}", asset(256))
     code, result = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
     assert code != 0 and result["result"] == "failed"
@@ -706,7 +706,7 @@ def test_capacity_includes_system_assets_absent_from_vocabulary(
 ) -> None:
     paths, flash = rig
     (paths.catalog / "system.idle.bin").write_bytes(asset(256))
-    for i in range(4):
+    for i in range(12):
         installed(paths, "zip.demo", f"part{i}", asset(256))
     code, result = invoke(monkeypatch, capsys, "sync", "--app", "zip.demo", "--json")
     assert code != 0 and result["result"] == "failed"
@@ -790,7 +790,7 @@ def test_status_reports_effective_defaults_apps_and_orphans(
     (overrides / "removed.bin").write_bytes(asset())
     code, result = invoke(monkeypatch, capsys, "status", "--json")
     assert code == 0, result
-    assert result["capacity"] == 6275072
+    assert result["capacity"] == 14671872
     assert result["standard"][0] == {
         "name": "happy",
         "bytes": len(image),
@@ -896,10 +896,10 @@ def test_replace_capacity_failure_reports_shortfall_without_mutation(
     installed(paths, "zip.demo", "old", asset())
     source = tmp_path / "staging"
     source.mkdir()
-    for i in range(4):
+    for i in range(12):
         (source / f"part{i}.bin").write_bytes(asset(256))
     code, result = invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))
-    assert code == 1 and result["ok"] is False and result["short_by"] == 16384
+    assert code == 1 and result["ok"] is False and result["short_by"] == 8192
     assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
 
 
@@ -999,7 +999,7 @@ def test_override_counts_interrupted_collections_before_capacity_check(
 ) -> None:
     paths, _ = rig
     standard(paths, "happy", asset(256) if reset else asset())
-    for i in range(4):
+    for i in range(12):
         installed(paths, "zip.demo", f"part{i}", asset(256))
     (paths.assets / "apps/zip.demo").rename(paths.assets / "apps/.old-zip.demo")
     target = paths.assets / "overrides/happy.bin"
@@ -1092,7 +1092,7 @@ def test_override_checks_all_apps_and_reports_maximum_shortfall(
     paths, _ = rig
     standard(paths, "happy", asset(256) if reset else asset())
     for app in ("zip.first", "zip.second"):
-        for i in range(4):
+        for i in range(12):
             installed(paths, app, f"part{i}", asset(256))
     installed(paths, "zip.second", "half", asset(128))
     (paths.assets / "overrides").mkdir()
@@ -1102,7 +1102,7 @@ def test_override_checks_all_apps_and_reports_maximum_shortfall(
     source.write_bytes(asset(256))
     args = ("override", "--reset", "happy") if reset else ("override", "happy", str(source))
     code, result = invoke(monkeypatch, capsys, *args)
-    assert code == 1 and result["ok"] is False and result["short_by"] == 540672
+    assert code == 1 and result["ok"] is False and result["short_by"] == 532480
     assert target.read_bytes() == asset(value=1)
 
 
@@ -1120,16 +1120,16 @@ def test_override_reset_checks_restored_default_before_removal(
     paths, _ = rig
     standard(paths, "happy", asset(default_pages))
     if not with_app:
-        for i in range(5):
-            standard(paths, f"part{i}", asset(255))
+        for i in range(13):
+            standard(paths, f"part{i}", asset(256 if i < 9 else 255))
     source = tmp_path / "small.bin"
     source.write_bytes(asset())
     assert invoke(monkeypatch, capsys, "override", "happy", str(source))[0] == 0
     if with_app:
         staging = tmp_path / "staging"
         staging.mkdir()
-        for i in range(5):
-            (staging / f"part{i}.bin").write_bytes(asset(255))
+        for i in range(13):
+            (staging / f"part{i}.bin").write_bytes(asset(256 if i < 9 else 255))
         assert invoke(monkeypatch, capsys, "replace", "zip.demo", str(staging))[0] == 0
     before = {p.relative_to(paths.assets): p.read_bytes() for p in paths.assets.rglob("*.bin")}
     code, result = invoke(monkeypatch, capsys, "override", "--reset", "happy")
@@ -1258,3 +1258,27 @@ def test_store_lock_timeout_and_sync_nonblocking_return_75(
     assert (result["result"] == "busy") if action == "sync" else (result["ok"] is False)
     assert (paths.assets / "apps/zip.demo/old.bin").read_bytes() == asset()
     assert not flash.puts and not flash.deleted
+
+
+@pytest.mark.parametrize("count,accepted", [(7, True), (12, True), (13, False)])
+def test_replace_accepts_expanded_region_with_replacement_reserve(
+    rig: tuple[Any, Flash],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    count: int,
+    accepted: bool,
+) -> None:
+    paths, _ = rig
+    standard(paths, "happy", asset())
+    source = tmp_path / "staging"
+    source.mkdir()
+    for i in range(count):
+        (source / f"part{i}.bin").write_bytes(asset(256))
+    code, result = invoke(monkeypatch, capsys, "replace", "zip.demo", str(source))
+    assert (code == 0) is accepted
+    assert result["ok"] is accepted
+    if accepted:
+        assert len(list((paths.assets / "apps/zip.demo").glob("*.bin"))) == count
+    else:
+        assert not (paths.assets / "apps/zip.demo").exists()
