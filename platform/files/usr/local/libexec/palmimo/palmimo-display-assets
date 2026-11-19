@@ -414,6 +414,7 @@ class Lottie:
         self.tracks: list[dict[str, Any]] = []
         self.nodes: list[dict[str, Any]] = []
         self.draws: list[dict[str, Any]] = []
+        self.paint_draws: dict[str, list[dict[str, Any]]] = {}
         self.fills: dict[str, list[tuple[dict[str, Any], str, int]]] = {}
         self.errors: list[dict[str, str]] = []
         self.slot_dims: dict[str, int] = {}
@@ -687,6 +688,10 @@ class Lottie:
         tr, tr_path = transforms[0] if transforms else ({}, path)
         at = self.node(tr, parent, -1e9, 1e9, 0, 1, tr_path, name)
         paints = [(x, f"{path}[{i}]") for i, x in enumerate(items) if x["ty"] in ("fl", "gf", "st") and not x.get("hd")]
+        # lottie-web registers styles during reverse depth-first traversal, then
+        # draws every shape belonging to one style before advancing to the next.
+        for _, paint_path in reversed(paints):
+            self.paint_draws[paint_path] = []
         effective = (*inherited, *((paint, p, at) for paint, p in reversed(paints)))
         for i in reversed(range(len(items))):
             item, item_path = items[i], f"{path}[{i}]"
@@ -756,7 +761,8 @@ class Lottie:
                     )
                     opacity = self.prop(paint.get("o"), 100, paint_path + ".o", name, (1,), 0, 100)
                     width = self.prop(paint.get("w"), 0, paint_path + ".w", name, (1,), 0, 128)
-                    self.draws.append(
+                    draws = self.paint_draws[paint_path]
+                    draws.append(
                         {
                             "node": at,
                             "kind": {"el": 0, "rc": 1, "sh": 2}[ty],
@@ -771,7 +777,7 @@ class Lottie:
                         }
                     )
                     if fill:
-                        self.fills.setdefault(paint_path, []).append((self.draws[-1], item_path, paint.get("r", 1)))
+                        self.fills.setdefault(paint_path, []).append((draws[-1], item_path, paint.get("r", 1)))
 
     def shared_fills(self) -> None:
         def vectors(track: int, path: str) -> list[list[float]]:
@@ -976,6 +982,7 @@ class Lottie:
             except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
                 self.error(str(layer.get("nm", i)), str(exc), path, "input")
         self.check_errors()
+        self.draws = [draw for draws in self.paint_draws.values() for draw in draws]
         self.shared_fills()
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),

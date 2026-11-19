@@ -168,7 +168,7 @@ def test_shared_fill_animation_requires_disjoint_motion_bounds(tmp_path: Path, c
     assert output.exists() is not crossing
 
 
-@pytest.mark.parametrize("damage", ["curved", "open", "slot", "animated", "self-crossing", "budget", "stroke"])
+@pytest.mark.parametrize("damage", ["curved", "open", "slot", "animated", "self-crossing", "budget"])
 def test_shared_fill_unproven_merges_are_rejected(tmp_path: Path, damage: str) -> None:
     doc = composition()
     outer, inner = square(20, 20, 100), square(40, 40, 40, True)
@@ -190,8 +190,6 @@ def test_shared_fill_unproven_merges_are_rejected(tmp_path: Path, damage: str) -
         doc["layers"][0]["shapes"] = [square(20 + i * 5, 20 + i * 5, 100 - i * 10) for i in range(8)] + [paint]
     if damage != "budget":
         doc["layers"][0]["shapes"] = [outer, inner, doc["layers"][0]["shapes"][1]]
-    if damage == "stroke":
-        doc["layers"][0]["shapes"].append({"ty": "st", "lc": 2, "lj": 2, "w": {"k": 4}})
     code, result, output = convert_json(tmp_path, doc)
     assert code == 2
     assert not output.exists()
@@ -301,6 +299,76 @@ def test_lottie_preserves_stacked_strokes(tmp_path: Path, count: int, animated: 
         blob = output.read_bytes()
         draw_offset, draw_count, track_offset = struct.unpack_from("<3I", blob, 40)
         assert track_offset - draw_offset == draw_count * 68
+
+
+@pytest.mark.parametrize("layout", ["crossing", "mixed", "nested", "limit"])
+def test_shared_paints_preserve_lottie_draw_order(tmp_path: Path, layout: str) -> None:
+    doc = composition()
+    red = {"ty": "st", "lc": 2, "lj": 2, "w": {"k": 4}, "c": {"k": [1, 0, 0, 1]}}
+    blue = {**red, "w": {"k": 20}, "c": {"k": [0, 0, 1, 1]}}
+    horizontal: dict[str, Any] = {
+        "ty": "sh",
+        "ks": {"k": {"v": [[20, 100], [180, 100]], "i": [[0, 0]] * 2, "o": [[0, 0]] * 2, "c": False}},
+    }
+    vertical = copy.deepcopy(horizontal)
+    vertical["ks"]["k"]["v"] = [[100, 20], [100, 180]]
+    expected = [(0, 0, 20, (100, 20)), (0, 0, 20, (20, 100)), (0, 0, 4, (100, 20)), (0, 0, 4, (20, 100))]
+    shapes = [horizontal, vertical, red, blue]
+    if layout in ("mixed", "limit"):
+        shapes = [square(20, 20, 40), square(100, 20, 40), red, gradient(), {"ty": "fl"}, blue]
+        expected = [
+            (fill, gradient_kind, width, point)
+            for fill, gradient_kind, width in [(0, 0, 20), (1, 0, 0), (1, 1, 0), (0, 0, 4)]
+            for point in [(100, 20), (20, 20)]
+        ]
+        if layout == "limit":
+            shapes.insert(2, square(180, 20, 40))
+    elif layout == "nested":
+        green = {**red, "w": {"k": 8}, "c": {"k": [0, 1, 0, 1]}}
+        shapes = [
+            {"ty": "gr", "it": [horizontal, red]},
+            {"ty": "gr", "it": [{"ty": "gr", "it": [vertical, green]}, {"ty": "tr", "p": {"k": [10, 0]}}]},
+            blue,
+        ]
+        expected = [(0, 0, 20, (100, 20)), (0, 0, 20, (20, 100)), (0, 0, 8, (100, 20)), (0, 0, 4, (20, 100))]
+    doc["layers"][0]["shapes"] = shapes
+    code, result, output = convert_json(tmp_path, doc)
+    if layout == "limit":
+        assert code == 2 and not output.exists()
+        assert any(e["code"] == "limit" for e in result["errors"])
+        return
+    assert code == 0, result
+    assert run_cli("inspect", output)[0] == 0
+    blob = output.read_bytes()
+    offset, count = struct.unpack_from("<2I", blob, 40)
+    actual = []
+    colors = []
+    nodes = []
+    for i in range(count):
+        draw = struct.unpack_from("<5I6i2I4i", blob, offset + i * 68)
+        actual.append((draw[4], draw[11], track_values(blob, draw[10])[0][0], track_values(blob, draw[5])[0][:2]))
+        colors.append(track_values(blob, draw[8])[0])
+        nodes.append(draw[0])
+    assert actual == expected
+    if layout == "crossing":
+        assert colors == [(0, 0, 1, 1)] * 2 + [(1, 0, 0, 1)] * 2
+    if layout == "nested":
+        assert nodes[0] == nodes[2] and nodes[1] == nodes[3] and nodes[0] != nodes[1]
+
+
+@pytest.mark.parametrize("paint_kind", ["fl", "gf"])
+def test_shared_fill_merge_preserves_surrounding_strokes(tmp_path: Path, paint_kind: str) -> None:
+    doc = composition()
+    paint: dict[str, Any] = gradient() if paint_kind == "gf" else {"ty": "fl"}
+    paint["r"] = 2
+    stroke = {"ty": "st", "lc": 2, "lj": 2, "w": {"k": 4}}
+    doc["layers"][0]["shapes"] = [square(20, 20, 100), square(40, 40, 40, True), stroke, paint, stroke.copy()]
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    assert run_cli("inspect", output)[1]["draws"] == {"fill": 1, "stroke": 4}
+    blob = output.read_bytes()
+    offset, count = struct.unpack_from("<2I", blob, 40)
+    assert [struct.unpack_from("<I", blob, offset + i * 68 + 16)[0] for i in range(count)] == [0, 0, 1, 0, 0]
 
 
 @pytest.mark.parametrize("format_name", ["PNG", "JPEG"])
