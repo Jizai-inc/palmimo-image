@@ -1299,3 +1299,97 @@ def test_blur_filter_bounds_follow_layer_local_time(tmp_path: Path) -> None:
     }
     status, result, _ = convert_json(tmp_path, doc)
     assert status == 0, result
+
+
+@pytest.mark.parametrize("peak,expected_status,eased", [(400, 2, False), (220, 0, False), (220, 0, True)])
+def test_blur_sigma_samples_between_opposing_keys(tmp_path: Path, peak: int, expected_status: int, eased: bool) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    layer["shapes"][0]["s"]["k"] = [480, 480]
+    layer["ef"][0]["ef"][0]["v"] = {
+        "a": 1,
+        "k": [{"t": 0, "s": [100]}, {"t": 60, "s": [peak]}],
+    }
+    layer["ks"]["s"] = {"a": 1, "k": [{"t": 0, "s": [200, 200]}, {"t": 60, "s": [50, 50]}]}
+    if eased:
+        layer["ef"][0]["ef"][0]["v"]["k"][0].update(o={"x": 1 / 3, "y": 0}, i={"x": 2 / 3, "y": 0})
+    status, result, output = convert_json(tmp_path, doc)
+    assert status == expected_status, result
+    if expected_status == 2:
+        assert any(e["code"] == "blur_sigma" for e in result["errors"])
+    else:
+        # The linear curve peaks between keys; easing moves its maximum back to a key.
+        assert result["blur"]["sigma_px"][1] == pytest.approx(60 if eased else 63.375)
+        assert run_cli("inspect", output) == (0, result)
+
+
+def test_blur_filter_bounds_include_stroke_width(tmp_path: Path) -> None:
+    doc = blurred_composition()
+    shapes = doc["layers"][0]["shapes"]
+    shapes[0]["s"]["k"] = [40, 40]
+    shapes[1].update(ty="st", w={"k": 128}, lc=2, lj=2)
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 2, result
+    assert any(e["code"] == "blur_bounds" and e["path"] == "$.layers[0].shapes" for e in result["errors"])
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_blur_stroke_bounds_follow_group_transform(tmp_path: Path, axis: int) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    shapes = layer["shapes"]
+    shapes[0]["s"]["k"] = [40, 200] if axis == 0 else [200, 40]
+    shapes[1].update(ty="st", w={"k": 64}, lc=2, lj=2)
+    shapes.append({"ty": "tr", "s": {"k": [200, 50] if axis == 0 else [50, 200]}})
+    layer["shapes"] = [{"ty": "gr", "it": shapes}]
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 2, result
+    assert any(e["code"] == "blur_bounds" for e in result["errors"])
+
+
+def test_blur_long_animation_keeps_subframe_bounds_keys(tmp_path: Path) -> None:
+    doc = blurred_composition()
+    doc["op"] = doc["layers"][0]["op"] = 20_000
+    doc["layers"][0]["shapes"][0]["s"] = {
+        "a": 1,
+        "k": [
+            {"t": 0, "s": [240, 200], "h": 1},
+            {"t": 123.25, "s": [10, 10], "h": 1},
+            {"t": 123.5, "s": [240, 200]},
+        ],
+    }
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 2, result
+    assert any(e["code"] == "blur_bounds" for e in result["errors"])
+
+
+@pytest.mark.parametrize("short_layer", [False, True])
+def test_blur_bounds_sampling_caps_long_compositions(monkeypatch: pytest.MonkeyPatch, short_layer: bool) -> None:
+    module = converter_module()
+    doc = blurred_composition()
+    doc.update(ip=-1_000_000_000, op=1_000_000_000)
+    layer = doc["layers"][0]
+    layer.update(ip=100 if short_layer else doc["ip"], op=103 if short_layer else doc["op"])
+    visited = []
+    original = module.Lottie.geometry_bounds
+
+    def geometry_bounds(self: Any, draw: Any, time: float, *args: Any) -> Any:
+        visited.append(time)
+        assert len(visited) <= 1025
+        return original(self, draw, time, *args)
+
+    def capped_range(*args: int) -> range:
+        result = range(*args)
+        assert len(result) <= 1024, "blur validation iterates the entire composition"
+        return result
+
+    monkeypatch.setattr(module, "range", capped_range, raising=False)
+    monkeypatch.setattr(module.Lottie, "geometry_bounds", geometry_bounds)
+    blob = module.Lottie(doc).convert()
+    assert module.inspect_spaf(blob)[2]["sigma_px"] == [12, 12]
+    if short_layer:
+        assert visited == [100, 101, 102]
+    else:
+        assert len(visited) == 1025
+        assert visited[0] == doc["ip"]
+        assert visited[-1] == doc["op"] - 1
