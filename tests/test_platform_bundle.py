@@ -1773,6 +1773,31 @@ def test_install_ships_protocol_named_firmware_and_retires_legacy_file(installed
     assert not legacy.exists()
 
 
+def test_standard_asset_preview_sources_match_binaries_and_are_owned() -> None:
+    # Without this contract, a standard asset can ship without a readable Portal preview.
+    assets = PLATFORM_DIR / "files/usr/local/share/palmimo/display-assets"
+    binaries = {path.stem for path in assets.glob("*.bin")}
+    sources = list((assets / "source").iterdir())
+    assert binaries
+    assert {path.name for path in sources} == {f"{name}.json" for name in binaries}
+    owned = {entry["path"]: entry for entry in json.loads(MANIFEST_PATH.read_text())["owns"]["files"]}
+    for source in sources:
+        entry = owned[source.relative_to(PLATFORM_DIR / "files").as_posix()]
+        assert (entry["owner"], entry["group"], entry["mode"]) == ("root", "root", "0644")
+        assert isinstance(json.loads(source.read_bytes())["layers"], list)
+
+
+def test_install_ships_standard_asset_preview_sources(installed_root: tuple[Path, Path, Path]) -> None:
+    # Without this, installation can omit or alter previews even when the source tree is complete.
+    root, _accounts, _uv = installed_root
+    relative = Path("usr/local/share/palmimo/display-assets/source")
+    expected = {path.name: path.read_bytes() for path in (PLATFORM_DIR / "files" / relative).iterdir()}
+    installed = list((root / relative).iterdir())
+    assert expected
+    assert {path.name: path.read_bytes() for path in installed} == expected
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o644 for path in installed)
+
+
 def test_install_ships_asset_store_and_standard_assets(installed_root: tuple[Path, Path, Path]) -> None:
     root, _accounts, _uv = installed_root
     catalog = root / "usr/local/share/palmimo/display-assets/catalog.json"
