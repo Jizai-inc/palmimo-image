@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -461,7 +462,7 @@ def test_inspect_rejects_corrupt_assets(tmp_path: Path, kind: str, damage: str) 
         blob[-1] ^= 1
     else:
         if kind == "vector":
-            positions = {"offset": 72, "reference": 80, "numeric": 20, "version": 4}
+            positions = {"offset": 72, "reference": 88, "numeric": 20, "version": 4}
             values = {"offset": 0xFFFFFFFC, "reference": 0, "numeric": 0x7FC00000, "version": 3}
         else:
             positions = {"offset": 64, "reference": 68, "numeric": 52, "version": 4}
@@ -966,3 +967,335 @@ def test_inspect_rejects_invalid_gradient_records(tmp_path: Path, damage: str) -
     refresh_crc(blob)
     output.write_bytes(blob)
     assert run_cli("inspect", output)[0] == 2
+
+
+def blurred_composition() -> dict[str, Any]:
+    return json.loads((FIXTURES / "blur_bottom.json").read_text())
+
+
+@pytest.mark.parametrize("animated,scale_slot", [(False, False), (True, False), (False, True)])
+def test_bottom_blur_header_and_inspection(tmp_path: Path, animated: bool, scale_slot: bool) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    if scale_slot:
+        layer["ks"]["s"] = {"k": [100, 100], "sid": "glow_scale"}
+    if animated:
+        layer["ef"][0]["ef"][0]["v"] = {"a": 1, "k": [{"t": 0, "s": [40]}, {"t": 60, "s": [80]}]}
+        layer["ks"]["s"] = {"a": 1, "k": [{"t": 0, "s": [100, 100]}, {"t": 30, "s": [150, 150]}]}
+    doc["layers"].insert(0, composition()["layers"][0])
+    code, result, output = convert_json(tmp_path, doc)
+    assert code == 0, result
+    assert run_cli("inspect", output) == (0, result)
+    blob = output.read_bytes()
+    track, draws, node = struct.unpack_from("<iHH", blob, 80)
+    assert struct.unpack_from("<I", blob, 32)[0] == 88
+    assert result["blur"] == {"draws": 1, "node": node, "sigma_px": [12.0, 36.0] if animated else [12.0, 12.0]}
+    assert track_values(blob, track)[0] == (40,)
+    offset = struct.unpack_from("<I", blob, 40)[0]
+    draw_node = struct.unpack_from("<I", blob, offset)[0]
+    nodes = struct.unpack_from("<I", blob, 32)[0]
+    assert draws == 1 and struct.unpack_from("<i", blob, nodes + draw_node * 40)[0] == node
+    assert struct.unpack_from("<I", blob, offset + 68)[0] > draw_node
+
+
+@pytest.mark.parametrize(
+    "damage,code,path",
+    [
+        ("effect", "blur_effect", ".ef"),
+        ("multiple-effects", "blur_effect", ".ef"),
+        ("disabled", "blur_disabled", ".ef[0].en"),
+        ("direction", "blur_dimensions", ".ef[0].ef[1].v"),
+        ("repeat", "blur_repeat", ".ef[0].ef[2].v"),
+        ("slot", "blur_slot", ".ef[0].ef[0].v.sid"),
+        ("two-layers", "blur_layers", ".ef"),
+        ("not-bottom", "blur_order", ".ef"),
+        ("gradient", "blur_color", ".shapes[1]"),
+        ("colors", "blur_color", ".shapes[2].c"),
+        ("unused-color", "blur_color", ".shapes[2].c"),
+        ("opacity", "blur_opacity", ".shapes[2].o"),
+        ("animated-opacity", "blur_opacity", ".shapes[2].o"),
+        ("scale", "blur_scale", ".ks.s"),
+        ("scale-easing", "blur_scale", ".ks.s"),
+        ("skew", "unsupported", ".ks.sk"),
+        ("sigma-low", "blur_sigma", ".ef[0].ef[0].v"),
+        ("sigma-high", "blur_sigma", ".ef[0].ef[0].v"),
+        ("scale-key", "blur_sigma", ".ef[0].ef[0].v"),
+        ("blur-key", "blur_sigma", ".ef[0].ef[0].v"),
+        ("bounds", "blur_bounds", ".shapes"),
+        ("animated-bounds", "blur_bounds", ".shapes"),
+        ("stroke-bounds", "blur_bounds", ".shapes"),
+    ],
+)
+def test_blur_rejects_unsupported_source(tmp_path: Path, damage: str, code: str, path: str) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    effect = layer["ef"][0]
+    value = effect["ef"][0]["v"]
+    if damage == "effect":
+        effect["ty"] = 20
+    elif damage == "multiple-effects":
+        layer["ef"].append(copy.deepcopy(effect))
+    elif damage == "disabled":
+        effect["en"] = 0
+    elif damage in ("direction", "repeat"):
+        effect["ef"][1 if damage == "direction" else 2]["v"]["k"] = 2 if damage == "direction" else 1
+    elif damage == "slot":
+        value["sid"] = "blur"
+    elif damage == "two-layers":
+        doc["layers"].append(copy.deepcopy(layer))
+    elif damage == "not-bottom":
+        doc["layers"].append(composition()["layers"][0])
+    elif damage == "gradient":
+        layer["shapes"][1] = gradient()
+    elif damage == "unused-color":
+        layer["shapes"].insert(0, {"ty": "gr", "it": [{"ty": "fl", "c": {"k": [0, 1, 0, 1]}}]})
+    elif damage == "colors":
+        layer["shapes"].append({"ty": "st", "lc": 2, "lj": 2, "c": {"k": [0, 1, 0, 1]}})
+    elif damage in ("opacity", "animated-opacity"):
+        opacity = {"k": 50} if damage == "opacity" else {"a": 1, "k": [{"t": 0, "s": [100]}]}
+        layer["shapes"].append({"ty": "tr", "o": opacity})
+    elif damage == "scale":
+        layer["ks"]["s"] = {"k": [100, 90]}
+    elif damage == "scale-easing":
+        layer["ks"]["s"] = {
+            "a": 1,
+            "k": [
+                {"t": 0, "s": [100, 100], "o": {"x": [0, 0], "y": [0, 1]}},
+                {"t": 60, "s": [150, 150]},
+            ],
+        }
+    elif damage == "skew":
+        layer["ks"]["sk"] = {"k": 10}
+    elif damage.startswith("sigma"):
+        value["k"] = 0 if damage == "sigma-low" else 300
+    elif damage in ("scale-key", "blur-key"):
+        value.update(a=1, k=[{"t": 0, "s": [40]}, {"t": 60, "s": [40]}])
+        layer["ks"]["s"] = {
+            "a": 1,
+            "k": [{"t": 0, "s": [100, 100]}, {"t": 30, "s": [10, 10]}, {"t": 60, "s": [100, 100]}],
+        }
+        if damage == "blur-key":
+            value["k"] = [{"t": 0, "s": [40]}, {"t": 15, "s": [1]}, {"t": 60, "s": [40]}]
+            layer["ks"]["s"]["k"] = [{"t": 0, "s": [100, 100]}, {"t": 60, "s": [100, 100]}]
+    elif damage == "bounds":
+        layer["shapes"][0]["s"]["k"] = [240, 10]
+    elif damage == "animated-bounds":
+        layer["shapes"][0]["s"] = {
+            "a": 1,
+            "k": [{"t": 0, "s": [240, 200]}, {"t": 45, "s": [240, 0]}, {"t": 89, "s": [240, 200]}],
+        }
+    elif damage == "stroke-bounds":
+        layer["shapes"][0] = {
+            "ty": "sh",
+            "ks": {"k": {"v": [[0, 0], [200, 0]], "i": [[0, 0]] * 2, "o": [[0, 0]] * 2, "c": False}},
+        }
+        layer["shapes"][1] = {"ty": "st", "lc": 2, "lj": 2, "w": {"k": 128}, "c": {"k": [1, 0, 0, 1]}}
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 2, result
+    assert any(e["code"] == code and e["path"] == "$.layers[0]" + path for e in result["errors"]), result
+
+
+def test_no_blur_preserves_legacy_fixture_bytes(tmp_path: Path) -> None:
+    expected = {
+        "heart_pulse": "c1484cc1c320157402f23d90e064aad312062e7efe646a3f1e4c5b7b3a173dca",
+        "shapes_move": "463b6aa52dd0b6664cfb5bd0443bdcbb7bfb6309e1a3795429eae0830f645dce",
+        "happy_strokes": "75623838566f1a7124309408767246065d3eea3748934ecc74a8e6a3b5a73922",
+    }
+    for name, digest in expected.items():
+        output = tmp_path / "asset.bin"
+        status, result = run_cli("convert", FIXTURES / f"{name}.json", "-o", output)
+        assert status == 0, result
+        new = output.read_bytes()
+        assert struct.unpack_from("<iHH", new, 80) == (-1, 0, 0)
+        assert "blur" not in result
+        old = bytearray(new[:80] + new[88:])
+        for position in (32, 40, 48, 56, 64, 72):
+            struct.pack_into("<I", old, position, struct.unpack_from("<I", new, position)[0] - 8)
+        keys, count = struct.unpack_from("<2I", old, 56)
+        slots, slot_count = struct.unpack_from("<2I", old, 64)
+        for position in [
+            *(keys + i * 32 + p for i in range(count) for p in range(8, 32, 4)),
+            *(slots + i * 12 for i in range(slot_count)),
+        ]:
+            struct.pack_into("<I", old, position, struct.unpack_from("<I", old, position)[0] - 8)
+        struct.pack_into("<I", old, 12, len(old))
+        refresh_crc(old)
+        assert hashlib.sha256(old).hexdigest() == digest
+
+
+def converter_module() -> Any:
+    loader = importlib.machinery.SourceFileLoader("blur_converter", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("animated", [False, True])
+def test_blur_shared_colors_have_identical_binary_reference(tmp_path: Path, animated: bool) -> None:
+    doc = blurred_composition()
+    shapes = doc["layers"][0]["shapes"]
+    color = (
+        {"a": 1, "k": [{"t": 0, "s": [1, 0, 0, 1]}, {"t": 60, "s": [0, 1, 0, 1]}]} if animated else {"k": [1, 0, 0, 1]}
+    )
+    shapes[1]["c"] = color
+    shapes.append({"ty": "st", "lc": 2, "lj": 2, "c": {"a": int(animated), **copy.deepcopy(color)}})
+    status, result, output = convert_json(tmp_path, doc)
+    assert status == 0, result
+    blob = output.read_bytes()
+    draw = struct.unpack_from("<I", blob, 40)[0]
+    assert result["blur"]["draws"] == 2
+    assert struct.unpack_from("<i", blob, draw + 32) == struct.unpack_from("<i", blob, draw + 68 + 32)
+
+
+def test_blur_rejects_interleaved_final_paint_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    converter = converter_module()
+    doc = blurred_composition()
+    shapes = doc["layers"][0]["shapes"]
+    shapes.append({"ty": "st", "lc": 2, "lj": 2, "c": copy.deepcopy(shapes[1]["c"])})
+    doc["layers"].insert(0, composition()["layers"][0])
+    original = converter.Lottie.shared_fills
+
+    def interleave(self: Any) -> None:
+        original(self)
+        self.draws[1], self.draws[2] = self.draws[2], self.draws[1]
+
+    monkeypatch.setattr(converter.Lottie, "shared_fills", interleave)
+    with pytest.raises(converter.AssetError) as error:
+        converter.Lottie(doc).convert()
+    assert any(e["code"] == "blur_order" and e["path"] == "$.layers[1].ef" for e in error.value.errors)
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_hidden_layers_do_not_change_bottom_blur(tmp_path: Path, hidden: bool) -> None:
+    doc = blurred_composition()
+    extra = copy.deepcopy(doc["layers"][0]) if hidden else composition()["layers"][0]
+    extra["hd"] = True
+    doc["layers"].append(extra)
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 0, result
+    assert result["blur"]["draws"] == 1
+
+
+@pytest.mark.parametrize("geometry", ["curve", "group-scale", "group-rotation", "rounded-rect"])
+def test_blur_filter_bounds_use_evaluated_geometry(tmp_path: Path, geometry: str) -> None:
+    doc = blurred_composition()
+    shapes = doc["layers"][0]["shapes"]
+    if geometry == "curve":
+        # The control hull is tall enough, but the actual cubic is only 30px tall.
+        shapes[0] = {
+            "ty": "sh",
+            "ks": {"k": {"v": [[0, 0], [200, 0]], "i": [[0, 0], [0, 40]], "o": [[0, 40], [0, 0]], "c": False}},
+        }
+    elif geometry == "group-scale":
+        shapes.append(
+            {
+                "ty": "tr",
+                "s": {"a": 1, "k": [{"t": 0, "s": [100, 100]}, {"t": 45, "s": [100, 1]}, {"t": 89, "s": [100, 100]}]},
+            }
+        )
+    else:
+        shapes[0] = {
+            "ty": "rc" if geometry == "rounded-rect" else "el",
+            "p": {"k": [0, 0]},
+            "s": {"k": [240, 10]},
+            "r": {"k": 5},
+        }
+        shapes.append({"ty": "tr", "r": {"k": 45}})
+    status, result, _ = convert_json(tmp_path, doc)
+    if geometry in ("group-rotation", "rounded-rect"):
+        assert status == 0, result  # local layer bbox grows under group rotation
+    else:
+        assert status == 2, result
+        assert any(e["code"] == "blur_bounds" and e["path"] == "$.layers[0].shapes" for e in result["errors"])
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "track",
+        "negative-track",
+        "draws",
+        "node",
+        "no-blur-draws",
+        "no-blur-node",
+        "dimension",
+        "slot",
+        "value",
+        "color",
+        "gradient",
+        "ancestor",
+        "later-descendant",
+    ],
+)
+def test_inspect_rejects_invalid_blur_header_and_draws(tmp_path: Path, damage: str) -> None:
+    doc = blurred_composition()
+    shapes = doc["layers"][0]["shapes"]
+    shapes.append({"ty": "st", "lc": 2, "lj": 2, "c": copy.deepcopy(shapes[1]["c"])})
+    doc["layers"].insert(0, composition()["layers"][0])
+    if damage == "slot":
+        doc["layers"][0]["ks"]["r"] = {"k": 0, "sid": "rotation"}
+    _, _, output = convert_json(tmp_path, doc)
+    blob = bytearray(output.read_bytes())
+    track, _, node = struct.unpack_from("<iHH", blob, 80)
+    draws, tracks, keys = (struct.unpack_from("<I", blob, p)[0] for p in (40, 48, 56))
+    if damage in ("track", "negative-track", "draws", "node"):
+        fmt, offset, value = {
+            "track": ("<i", 80, 999),
+            "negative-track": ("<i", 80, -2),
+            "draws": ("<H", 84, 0),
+            "node": ("<H", 86, 999),
+        }[damage]
+        struct.pack_into(fmt, blob, offset, value)
+    elif damage.startswith("no-blur"):
+        struct.pack_into("<iHH", blob, 80, -1, int(damage == "no-blur-draws"), int(damage == "no-blur-node"))
+    elif damage == "dimension":
+        struct.pack_into("<i", blob, 80, track + 1)  # group's 2D position
+    elif damage == "slot":
+        struct.pack_into("<i", blob, tracks + track * 16 + 12, 0)  # foreground rotation slot has matching dimension 1
+    elif damage == "value":
+        first = struct.unpack_from("<I", blob, tracks + track * 16 + 8)[0]
+        offset = struct.unpack_from("<I", blob, keys + first * 32 + 8)[0]
+        struct.pack_into("<f", blob, offset, -1)
+    elif damage == "color":
+        color = struct.unpack_from("<i", blob, draws + 2 * 68 + 32)[0]
+        struct.pack_into("<i", blob, draws + 68 + 32, color)
+    elif damage == "gradient":
+        struct.pack_into("<I", blob, draws + 44, 1)
+    elif damage == "ancestor":
+        other = struct.unpack_from("<I", blob, draws + 2 * 68)[0]
+        struct.pack_into("<I", blob, draws, other)
+    else:
+        struct.pack_into("<I", blob, draws + 2 * 68, node)
+    refresh_crc(blob)
+    output.write_bytes(blob)
+    status, result = run_cli("inspect", output)
+    assert status == 2, result
+    assert result["errors"][0]["path"] == "$"
+
+
+@pytest.mark.parametrize("property_name", ["blur", "scale"])
+def test_blur_checks_discontinuous_segment_end_values(tmp_path: Path, property_name: str) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    if property_name == "blur":
+        layer["ef"][0]["ef"][0]["v"] = {"a": 1, "k": [{"t": 0, "s": [40], "e": [300]}, {"t": 60, "s": [40]}]}
+    else:
+        layer["ks"]["s"] = {"a": 1, "k": [{"t": 0, "s": [100, 100], "e": [1, 1]}, {"t": 60, "s": [100, 100]}]}
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 2, result
+    assert any(e["code"] == "blur_sigma" and e["path"] == "$.layers[0].ef[0].ef[0].v" for e in result["errors"])
+
+
+def test_blur_filter_bounds_follow_layer_local_time(tmp_path: Path) -> None:
+    doc = blurred_composition()
+    layer = doc["layers"][0]
+    layer.update(st=100, sr=2)
+    # All composition frames precede the shrink in layer-local time.
+    layer["shapes"][0]["s"] = {
+        "a": 1,
+        "k": [{"t": -100, "s": [240, 200]}, {"t": 0, "s": [240, 200], "h": 1}, {"t": 20, "s": [240, 0]}],
+    }
+    status, result, _ = convert_json(tmp_path, doc)
+    assert status == 0, result

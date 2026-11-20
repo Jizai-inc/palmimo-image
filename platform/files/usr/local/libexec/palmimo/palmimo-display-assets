@@ -50,8 +50,48 @@ def bounded(value: Any, low: float, high: float) -> bool:
     )
 
 
-def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    require(len(blob) >= 80, "truncated", "$", "SPAF header requires 80 bytes")
+def evaluate_track(track: dict[str, Any], time: float, left: bool = False) -> list[float]:
+    keys = track["keys"]
+    key = keys[0]
+    for candidate in keys:
+        if candidate["t"] > time or (left and candidate["t"] == time):
+            break
+        key = candidate
+    index = keys.index(key)
+    if time <= key["t"] or index + 1 == len(keys) or key["hold"]:
+        return list(key["s"])
+    if time >= keys[index + 1]["t"]:
+        return list(key["e"])
+    fraction = (time - key["t"]) / (keys[index + 1]["t"] - key["t"])
+    result = []
+    for i, (start, end) in enumerate(zip(key["s"], key["e"], strict=True)):
+        low, high = 0.0, 1.0
+        for _ in range(32):
+            u = (low + high) / 2
+            x = 3 * (1 - u) ** 2 * u * key["ox"][i] + 3 * (1 - u) * u * u * key["ix"][i] + u**3
+            if x < fraction:
+                low = u
+            else:
+                high = u
+        u = (low + high) / 2
+        eased = 3 * (1 - u) ** 2 * u * key["oy"][i] + 3 * (1 - u) * u * u * key["iy"][i] + u**3
+        result.append(start + (end - start) * eased)
+    return result
+
+
+def sigma_range(tracks: list[dict[str, Any]], blur_track: int, scale_track: int) -> list[float]:
+    blur, scale = tracks[blur_track], tracks[scale_track]
+    times = {k["t"] for track in (blur, scale) for k in track["keys"]}
+    values = [
+        0.3 * evaluate_track(blur, t, left)[0] * abs(evaluate_track(scale, t, left)[0]) / 100
+        for t in times
+        for left in (False, True)
+    ]
+    return [min(values), max(values)]
+
+
+def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int], dict[str, Any] | None]:
+    require(len(blob) >= 88, "truncated", "$", "SPAF header requires 88 bytes")
     version, kind, total, crc = struct.unpack_from("<4I", blob, 4)
     require(version == 2 and kind == 1, "version", "$", "Unsupported SPAF version or kind")
     require(total == len(blob) and total <= 1_048_576 and total % 4 == 0, "length", "$", "Invalid SPAF length")
@@ -64,7 +104,7 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
         "Invalid composition time",
     )
     tables: list[list[tuple[Any, ...]]] = []
-    cursor = 80
+    cursor = 88
     for i, (fmt, limit) in enumerate(
         zip(("<6i4f", "<5I6i2I4i", "<3Ii", "<fI6I", "<3I"), (32, 8, 256, 2048, 32), strict=True)
     ):
@@ -95,6 +135,7 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
         name = name_bytes[:-1].decode("ascii", errors="replace")
         require(SID.fullmatch(name) is not None and name not in params, "slot", "$", "Invalid or duplicate slot id")
         params[name] = {"dim": dim}
+    evaluated_tracks: list[dict[str, Any]] = []
     values: list[list[tuple[float, ...]]] = []
     key_cursor = 0
     for dim, count, first, slot in tracks:
@@ -106,6 +147,7 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
         key_cursor += count
         previous = -math.inf
         endpoints = []
+        evaluated_keys = []
         for frame, hold, *offsets in keys[first : first + count]:
             require(
                 bounded(frame, -1e9, 1e9) and frame > previous and hold in (0, 1),
@@ -114,12 +156,16 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
                 "Invalid key time or hold",
             )
             previous = frame
+            record: dict[str, Any] = {"t": frame, "hold": hold}
             for i, offset in enumerate(offsets):
                 vector = struct.unpack(f"<{dim}f", payload(offset, dim * 4))
+                record[VECTORS[i]] = vector
                 low, high = (-1024, 1024) if i < 2 else (0, 1)
                 require(all(bounded(x, low, high) for x in vector), "numeric", "$", "Invalid key vector")
                 if i < 2:
                     endpoints.append(vector)
+            evaluated_keys.append(record)
+        evaluated_tracks.append({"keys": evaluated_keys})
         values.append(endpoints)
     require(key_cursor == len(keys), "reference", "$", "Unowned key records")
 
@@ -205,7 +251,32 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
                 all(tracks[t][3] == -1 for t in (start, end, stops)), "slot", "$", "Gradient tracks cannot use slots"
             )
     fills = sum(draw[4] for draw in draws)
-    return params, {"fill": fills, "stroke": len(draws) - fills}
+    blur_track, blur_draws, blur_node = struct.unpack_from("<iHH", blob, 80)
+    blur = None
+    if blur_track == -1:
+        require(blur_draws == blur_node == 0, "blur", "$", "No-blur header fields disagree")
+    else:
+        role(blur_track, (1,), 0, 1024)
+        require(tracks[blur_track][3] == -1, "blur", "$", "Blurriness cannot use a slot")
+        require(
+            1 <= blur_draws <= len(draws) and blur_node < len(nodes), "blur", "$", "Invalid blur draw count or node"
+        )
+        color = draws[0][8]
+        for i, draw in enumerate(draws):
+            node = draw[0]
+            while node >= 0 and node != blur_node:
+                node = nodes[node][0]
+            require(
+                (node == blur_node) == (i < blur_draws), "blur", "$", "Blur draws must form the complete first layer"
+            )
+            if i < blur_draws:
+                require(draw[11] == 0 and draw[8] == color, "blur", "$", "Blur draws require one identical solid color")
+        blur = {
+            "draws": blur_draws,
+            "node": blur_node,
+            "sigma_px": sigma_range(evaluated_tracks, blur_track, nodes[blur_node][3]),
+        }
+    return params, {"fill": fills, "stroke": len(draws) - fills}, blur
 
 
 def image_warnings(kind: str, scans: list[int]) -> list[dict[str, str]]:
@@ -275,7 +346,9 @@ def inspect(blob: bytes) -> dict[str, Any]:
     require(len(blob) <= MAX_FILE, "limit", "$", "Asset exceeds display storage")
     details: dict[str, Any] = {}
     if blob[:4] == b"SPAF":
-        params, draws = inspect_spaf(blob)
+        params, draws, blur = inspect_spaf(blob)
+        if blur is not None:
+            details["blur"] = blur
         details["draws"] = draws
         kind = "vector"
         notices: list[dict[str, str]] = []
@@ -419,6 +492,9 @@ class Lottie:
         self.errors: list[dict[str, str]] = []
         self.slot_dims: dict[str, int] = {}
         self.key_count = 0
+        self.blur_layer: dict[str, Any] | None = None
+        self.blur_track = -1
+        self.blur_draws = 0
 
     def error(self, layer: str, feature: str, path: str, code: str = "unsupported") -> None:
         self.errors.append({"code": code, "path": path, "message": f"{layer}: {feature}"})
@@ -454,7 +530,7 @@ class Lottie:
             )
         if isinstance(obj.get("x"), str):
             self.error(layer, "expression", path + ".x")
-        for key in ("masksProperties", "ef", "tt", "td", "tm"):
+        for key in ("masksProperties", "tt", "td", "tm"):
             if obj.get(key):
                 self.error(layer, key, path + "." + key)
         if "parent" in obj:
@@ -513,7 +589,11 @@ class Lottie:
                 if transforms > 1:
                     self.error(layer, "multiple group transforms", path + "." + key)
         for key, value in obj.items():
-            self.scan(value, path + "." + key, layer)
+            if key == "ef":
+                if value and re.fullmatch(r"\$\.layers\[\d+\]", path) is None:
+                    self.error(layer, "Put Gaussian Blur on a layer; remove nested effects", path + ".ef")
+            else:
+                self.scan(value, path + "." + key, layer)
 
     def scan_gradient(self, paint: dict[str, Any], path: str, layer: str) -> None:
         if type(paint.get("t")) is not int or paint["t"] not in (1, 2):
@@ -771,6 +851,7 @@ class Lottie:
                             "closed": closed,
                             "fill": fill,
                             "color": color,
+                            "color_path": paint_path + ".c",
                             "opacity": opacity,
                             "width": width,
                             "gradient": gradient,
@@ -936,6 +1017,262 @@ class Lottie:
             discarded = {id(draw) for draw, _, _ in entries[1:]}
             self.draws = [draw for draw in self.draws if id(draw) not in discarded]
 
+    def scan_blur(self, layer: dict[str, Any], path: str, index: int, layers: list[dict[str, Any]]) -> None:
+        effects = layer.get("ef")
+        if not effects or layer.get("hd"):
+            return
+        name = layer.get("nm", str(index))
+
+        def reject(code: str, suffix: str, message: str) -> None:
+            self.error(name, message, path + suffix, code)
+
+        if (
+            not isinstance(effects, list)
+            or len(effects) != 1
+            or not isinstance(effects[0], dict)
+            or effects[0].get("ty") != 29
+        ):
+            reject("blur_effect", ".ef", "Use exactly one Gaussian Blur effect (ty 29); delete other effects")
+            return
+        if self.blur_layer is not None:
+            reject("blur_layers", ".ef", "Keep Gaussian Blur on only one layer")
+            # Point at both layers, making the conflict actionable from either one.
+            previous = self.blur_layer
+            self.error(
+                previous["name"], "Keep Gaussian Blur on only one layer", previous["path"] + ".ef", "blur_layers"
+            )
+        else:
+            self.blur_layer = {"index": index, "path": path, "name": name}
+        if any(not other.get("hd") for other in layers[index + 1 :]):
+            reject("blur_order", ".ef", "Move the blurred layer below every visible layer")
+        effect = effects[0]
+        if effect.get("en") != 1:
+            reject(
+                "blur_disabled", ".ef[0].en", "lottie-web still previews disabled blur: delete the effect or enable it"
+            )
+        controls = effect.get("ef")
+        if (
+            not isinstance(controls, list)
+            or len(controls) != 3
+            or any(not isinstance(c, dict) or not isinstance(c.get("v"), dict) for c in controls)
+        ):
+            reject(
+                "blur_effect", ".ef", "Export Gaussian Blur with Blurriness, Dimensions and Repeat Edge Pixels controls"
+            )
+            return
+        for i, value, code, message in (
+            (1, 1, "blur_dimensions", "Set Dimensions to Both (1)"),
+            (2, 0, "blur_repeat", "Turn Repeat Edge Pixels off (0)"),
+        ):
+            prop = controls[i]["v"]
+            if prop.get("a", 0) != 0 or "sid" in prop or prop.get("k") not in (value, [value]):
+                reject(code, f".ef[0].ef[{i}].v", message)
+        if "sid" in controls[0]["v"]:
+            reject("blur_slot", ".ef[0].ef[0].v.sid", "Remove the slot from Blurriness; animate its keys instead")
+        for i, control in enumerate(controls):
+            self.scan(control["v"], f"{path}.ef[0].ef[{i}].v", name)
+
+        colors: list[dict[str, Any]] = []
+
+        def shapes(items: list[dict[str, Any]], shape_path: str) -> None:
+            for i, item in enumerate(items):
+                at = f"{shape_path}[{i}]"
+                if item.get("hd"):
+                    continue
+                ty = item.get("ty")
+                if ty == "gr":
+                    shapes(item.get("it", []), at + ".it")
+                elif ty in ("gf", "gs"):
+                    self.error(
+                        name,
+                        "Use one solid color for all blurred fills and strokes; remove gradients",
+                        at,
+                        "blur_color",
+                    )
+                elif ty in ("fl", "st"):
+                    prop = self.resolve(item.get("c", {"k": [1, 1, 1, 1]}))
+                    color = {"k": prop.get("k"), "a": bool(prop.get("a")), "sid": prop.get("sid", "")}
+                    if colors and color != colors[0]:
+                        self.error(
+                            name,
+                            "Use the same color property or constant for every blurred paint, including unused paints",
+                            at + ".c",
+                            "blur_color",
+                        )
+                    colors.append(color)
+                elif ty == "tr":
+                    opacity = self.resolve(item.get("o", {"k": 100}))
+                    if opacity.get("a", 0) != 0 or opacity.get("k") not in (100, [100]) or "sid" in opacity:
+                        self.error(
+                            name,
+                            "Set group opacity to constant 100; animate opacity on the layer",
+                            at + ".o",
+                            "blur_opacity",
+                        )
+
+        shapes(layer.get("shapes", []), path + ".shapes")
+
+    def validate_blur(self) -> None:
+        blur = self.blur_layer
+        if blur is None:
+            return
+        node, track = blur["node"], self.blur_track
+        name, path = blur["name"], blur["path"]
+        scale_id = self.nodes[node]["tracks"][2]
+        scale = self.tracks[scale_id]
+        uniform = all(k[v][0] == k[v][1] for k in scale["keys"] for v in VECTORS)
+        if not uniform:
+            self.error(
+                name,
+                "Use uniform x/y layer scale with identical easing",
+                path + ".ks.s",
+                "blur_scale",
+            )
+            self.check_errors()
+        selected = [d for d in self.draws if self.descendant(d["node"], node)]
+        self.blur_draws = len(selected)
+        if not selected or self.draws[: len(selected)] != selected:
+            self.error(
+                name,
+                "Keep all blurred draws first; separate shared paints from other layers",
+                path + ".ef",
+                "blur_order",
+            )
+        # The binary color field is a track id. Intern only the blurred colors so
+        # equal properties satisfy the boundary without changing no-blur output.
+        if selected:
+            color = min(selected, key=lambda d: d["color_path"])["color"]
+            for draw in selected:
+                if draw["gradient"][0] or self.tracks[draw["color"]] != self.tracks[color]:
+                    self.error(
+                        name,
+                        "Use one identical solid color property for the blurred layer",
+                        draw["color_path"],
+                        "blur_color",
+                    )
+                draw["color"] = color
+        sigma = sigma_range(self.tracks, track, scale_id)
+        if not all(bounded(s, 8, 64) for s in sigma):
+            self.error(
+                name,
+                "Keep screen sigma in 8..64 px (0.3 × Blurriness × scale/100); fade with layer opacity",
+                path + ".ef[0].ef[0].v",
+                "blur_sigma",
+            )
+        self.check_errors()
+        n = self.nodes[node]
+        for frame in range(math.ceil(self.doc["ip"]), math.ceil(self.doc["op"])):
+            if not n["ip"] <= frame < n["op"]:
+                continue
+            time = (frame - n["start"]) / n["stretch"]
+            s = abs(evaluate_track(scale, time)[0]) / 100
+            sigma_px = 0.3 * evaluate_track(self.tracks[track], time)[0] * s
+            boxes = [self.geometry_bounds(d, time, node) for d in selected]
+            width = max(b[2] for b in boxes) - min(b[0] for b in boxes)
+            height = max(b[3] for b in boxes) - min(b[1] for b in boxes)
+            if 3 * sigma_px > min(width, height) * s + 1e-6:
+                self.error(
+                    name,
+                    "Enlarge the geometry: lottie-web's SVG preview clips the glow where 3 sigma exceeds the geometry bbox's smaller side (stroke width excluded)",
+                    path + ".shapes",
+                    "blur_bounds",
+                )
+                break
+
+    def descendant(self, node: int, ancestor: int) -> bool:
+        while node >= 0:
+            if node == ancestor:
+                return True
+            node = self.nodes[node]["parent"]
+        return False
+
+    def geometry_bounds(self, draw: dict[str, Any], time: float, layer: int) -> tuple[float, float, float, float]:
+        # Evaluate group transforms in the layer's local coordinates: SVG's
+        # objectBoundingBox filter precedes the layer's rotation and scale.
+        chain = []
+        node = draw["node"]
+        while node != layer:
+            chain.append(node)
+            node = self.nodes[node]["parent"]
+
+        transforms = []
+        for at in chain:
+            p, a, s, r = [evaluate_track(self.tracks[t], time) for t in self.nodes[at]["tracks"][:4]]
+            angle = math.radians(r[0])
+            transforms.append((p, a, s, math.cos(angle), math.sin(angle)))
+
+        def point(x: float, y: float) -> tuple[float, float]:
+            for p, a, s, c, sn in transforms:
+                x, y = (x - a[0]) * s[0] / 100, (y - a[1]) * s[1] / 100
+                x, y = c * x - sn * y + p[0], sn * x + c * y + p[1]
+            return x, y
+
+        values = [evaluate_track(self.tracks[t], time) for t in draw["geo"] if t >= 0]
+        points: list[tuple[float, float]] = []
+        if draw["kind"] == 2:
+            path_values = values[0]
+            count = draw["vertices"]
+            vertices = [point(*path_values[i : i + 2]) for i in range(0, count * 2, 2)]
+            points.extend(vertices)
+            for i in range(count if draw["closed"] else count - 1):
+                j = (i + 1) % count
+                p0, p3 = vertices[i], vertices[j]
+                p1 = point(
+                    path_values[i * 2] + path_values[count * 4 + i * 2],
+                    path_values[i * 2 + 1] + path_values[count * 4 + i * 2 + 1],
+                )
+                p2 = point(
+                    path_values[j * 2] + path_values[count * 2 + j * 2],
+                    path_values[j * 2 + 1] + path_values[count * 2 + j * 2 + 1],
+                )
+                for axis in (0, 1):
+                    a = -p0[axis] + 3 * p1[axis] - 3 * p2[axis] + p3[axis]
+                    b = 2 * (p0[axis] - 2 * p1[axis] + p2[axis])
+                    c = p1[axis] - p0[axis]
+                    roots = []
+                    if abs(a) < 1e-12:
+                        if abs(b) > 1e-12:
+                            roots = [-c / b]
+                    elif b * b - 4 * a * c >= 0:
+                        d = math.sqrt(b * b - 4 * a * c)
+                        roots = [(-b - d) / (2 * a), (-b + d) / (2 * a)]
+                    for t in roots:
+                        if 0 < t < 1:
+                            points.append(
+                                tuple(
+                                    (1 - t) ** 3 * p0[k]
+                                    + 3 * (1 - t) ** 2 * t * p1[k]
+                                    + 3 * (1 - t) * t * t * p2[k]
+                                    + t**3 * p3[k]
+                                    for k in (0, 1)
+                                )
+                            )
+        else:
+            (x, y), (w, h) = values[:2]
+            if draw["kind"] == 0:
+                center = point(x, y)
+                u, v = point(x + w / 2, y), point(x, y + h / 2)
+                radii = [math.hypot(u[k] - center[k], v[k] - center[k]) for k in (0, 1)]
+                return center[0] - radii[0], center[1] - radii[1], center[0] + radii[0], center[1] + radii[1]
+            radius = min(values[2][0], w / 2, h / 2)
+            # A rounded rectangle is the Minkowski sum of its inset rectangle
+            # and a radius-r circle; affine support bounds are exact.
+            points = [point(x + sx * (w / 2 - radius), y + sy * (h / 2 - radius)) for sx in (-1, 1) for sy in (-1, 1)]
+            origin, u, v = point(0, 0), point(radius, 0), point(0, radius)
+            rx, ry = [math.hypot(u[k] - origin[k], v[k] - origin[k]) for k in (0, 1)]
+            return (
+                min(p[0] for p in points) - rx,
+                min(p[1] for p in points) - ry,
+                max(p[0] for p in points) + rx,
+                max(p[1] for p in points) + ry,
+            )
+        return (
+            min(p[0] for p in points),
+            min(p[1] for p in points),
+            max(p[0] for p in points),
+            max(p[1] for p in points),
+        )
+
     def convert(self) -> bytes:
         doc = self.doc
         require(isinstance(doc, dict), "input", "$", "Lottie must be an object")
@@ -955,6 +1292,7 @@ class Lottie:
             if layer.get("ty") != 4:
                 self.error(name, f"layer type {layer.get('ty')} (only shape layers)", path + ".ty")
             self.scan(layer, path, name)
+            self.scan_blur(layer, path, i, layers)
         slots = doc.get("slots", {})
         require(isinstance(slots, dict), "input", "$.slots", "Expected slots object")
         for sid, default in slots.items():
@@ -984,6 +1322,7 @@ class Lottie:
         self.check_errors()
         self.draws = [draw for draws in self.paint_draws.values() for draw in draws]
         self.shared_fills()
+        self.validate_blur()
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),
             ("draws", len(self.draws), 8),
@@ -1010,12 +1349,17 @@ class Lottie:
             path + ".ks",
             name,
         )
+        if self.blur_layer is not None and self.blur_layer["index"] == index:
+            self.blur_layer["node"] = at
+            self.blur_track = self.prop(
+                layer["ef"][0]["ef"][0]["v"], None, path + ".ef[0].ef[0].v", name, (1,), 0, 1024
+            )
         self.group(layer["shapes"], at, name, path + ".shapes")
 
     def serialize(self) -> bytes:
         keys = [k for t in self.tracks for k in t["keys"]]
         slots = list(dict.fromkeys((t["slot"], t["dim"]) for t in self.tracks if t["slot"]))
-        offsets = [80]
+        offsets = [88]
         counts = (len(self.nodes), len(self.draws), len(self.tracks), len(keys), len(slots))
         for count, stride in zip(counts, (40, 68, 16, 32, 12), strict=True):
             offsets.append(offsets[-1] + count * stride)
@@ -1064,11 +1408,11 @@ class Lottie:
         body.extend(payload)
         fields = [x for pair in zip(offsets[:5], counts, strict=True) for x in pair]
         header = struct.pack(
-            "<4s4I3f12I",
+            "<4s4I3f12IiHH",
             b"SPAF",
             2,
             1,
-            80 + len(body),
+            88 + len(body),
             0,
             self.doc["fr"],
             self.doc["ip"],
@@ -1076,6 +1420,9 @@ class Lottie:
             *fields,
             offsets[-1],
             len(payload),
+            self.blur_track,
+            self.blur_draws,
+            self.blur_layer["node"] if self.blur_layer else 0,
         )
         blob = bytearray(header + body)
         struct.pack_into("<I", blob, 16, zlib.crc32(blob))

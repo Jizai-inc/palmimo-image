@@ -50,6 +50,36 @@ palmimo-display-assets inspect <.bin> [--json]
   座標は `gf` を宣言したグループのNodeを基準とし、内側の形への継承でも基準を保持する。円形は `s` が中心、`s` から `e` までの距離が半径。
   段の位置の外側は端の値で延ばす（pad）。色はsRGB値で線形補間し、透明度は独立に補間する。塗りの `o` とNodeの不透明度を全体に掛ける。
   `gs`、`h` が静的0以外のハイライト、`g`・`g.k`・`s`・`e` の `sid`、段の数・長さ・値・順序の不正は集約エラーで拒否する。
+- Gaussian Blur 効果（`ef` の `ty: 29`）は、表示する最下層の1レイヤーだけに対応する。効果は1つ、`en: 1`、Dimensions は Both（1）、Repeat Edge Pixels は off（0）にする。
+  **プレビューは lottie-web 5.12.2 の SVG renderer を使う。canvas renderer はぼかしを描かない。** `en: 0` でもSVGのプレビューではぼけるため、無効にする場合は効果を削除する。
+  中身は同じ色の単色塗り・線だけにする。同じ定数または同じアニメーションプロパティを共有できる。グラデーションは使えない。
+  群の `tr.o` はSlotなしの定数100にし、不透明度のアニメーションはレイヤーに付ける。
+  レイヤーの拡大は全キー・easingで縦横同じ、skewなし。親レイヤーは従来どおり非対応。
+  ぼかし量はキーフレーム可、`sid` 不可。画面上の σ = `0.3 × Blurriness × abs(scale)/100` を8〜64pxに保つ。
+  拡大とぼかし量の両方のキー時刻（hold・不連続な終値を含む）を組み合わせて検査する。0から出すときは量を0にせずレイヤーの不透明度で出す。
+  各整数フレーム（ip以上op未満）のレイヤーの幾何外接矩形（線幅を除く、群の変形とレイヤーの拡大を含む）の短辺が3σ以上必要。
+  lottie-webのSVGフィルタ領域は幾何外接矩形の各側に100%だけ広がるため、これより細い形ではプレビューの光が切れる。
+  出力の先頭 `blur_draws` 個がそのレイヤーのDraw全体になる。共有paint処理の結果、別レイヤーが混ざる場合は順序を変えず拒否する。
+
+ぼかしのエラー（messageにはレイヤー名と直し方、pathには対象のJSON位置を返す）:
+
+| code | 直すところ |
+|---|---|
+| `blur_effect` | Gaussian Blur 1つと標準の3コントロールだけにする |
+| `blur_disabled` | 効果を有効にするか削除する |
+| `blur_dimensions` | DimensionsをBoth（1）の定数にする |
+| `blur_repeat` | Repeat Edge Pixelsをoff（0）の定数にする |
+| `blur_slot` | Blurrinessのsidを外す |
+| `blur_layers` | ぼかすレイヤーを1つにする |
+| `blur_order` | 最下層に移し、そのDraw全体が出力先頭に連続するようpaintを分ける |
+| `blur_color` | グラデーションを外し、全paintの色プロパティを同じにする |
+| `blur_opacity` | 群の不透明度を定数100にする |
+| `blur_scale` | レイヤーの縦横の拡大値・easingを同じにする |
+| `blur_sigma` | σを8〜64pxにする（拡大100%なら量は約27〜213） |
+| `blur_bounds` | 幾何の短辺を3σ以上に広げ、SVGプレビューの光の切れを防ぐ |
+
+skewは既存の `unsupported`、値・次元などの不正は既存の `numeric` 等でも拒否する。
+
 - 成功は `{"ok": true, "kind": "vector|image|gif", "bytes": <int>, "crc32": "<8 桁の小文字 16 進>", "params": {"<sid>": {"dim": <int>}}, "warnings": [{"code", "message"}]}`。
   `inspect` は同じ形で既存の `.bin` を検査する（`convert` の結果を root 側で検査し直すのに使う）。
 - 警告: GIF のコマ間隔が約 30fps より遅い（高コントラストの動きがちらついて見える）、画像を標準アセットの差し替えに使う
@@ -75,10 +105,16 @@ v1（旧 FW の画像スロットの形式）との違いはフレームごと�
 ### SPAF v2（Lottie から変換したベクタ）
 
 固定長のレコードとオフセットで並べ、FW は Flash 上のまま（RAM に写さずに）読む。
+ヘッダ末尾はoffset 80のi32 `blur_track`、84のu16 `blur_draws`、86のu16 `blur_node`。
+ぼかし無しは `(-1, 0, 0)`。ぼかし有りでは、Slotなしの1次元量Track（全キー0〜1024）、先頭Draw数、レイヤーNodeを指す。
+先頭Draw全体は同じ単色色Trackを参照し、そのNodeはblur_node自身か子孫である。以後のDrawにその子孫は含めない。
+最初の表は88から始まる。未出荷のv2を更新したため版は2のまま、旧80Bヘッダは拒否する。
+`inspect` はぼかし有りのとき `blur: {draws, node, sigma_px: [min, max]}` を返し、無しでは `blur` を省略する。
+
 
 | 位置 | 中身 |
 |---|---|
-| ヘッダ 80B | `"SPAF"`、u32 版 = 2、u32 種類 = 1、u32 全長（4 の倍数、≤ 1MiB）、u32 CRC-32（16〜19 を 0 とみなした全体）、f32 fps・ip・op、Node・Draw・Track・Key・Slot・payload の位置と件数（各 u32 2 つ） |
+| ヘッダ 88B | `"SPAF"`、u32 版 = 2、u32 種類 = 1、u32 全長（4 の倍数、≤ 1MiB）、u32 CRC-32（16〜19 を 0 とみなした全体）、f32 fps・ip・op、Node・Draw・Track・Key・Slot・payload の位置と件数（各 u32 2 つ）、i32 blur_track・u16 blur_draws・u16 blur_node |
 | Node 40B | i32 親（-1 = 根）、i32 Track×5（位置・基準点・拡大・回転・不透明度）、f32 ip・op・開始・伸縮 |
 | Draw 68B | 先頭44B: u32 Node・種類（0 楕円・1 角丸四角・2 パス）・頂点数・閉じているか・塗りか、i32 形の Track×3・色・不透明度・線幅。残り24Bは下表 |
 | Track 16B | u32 次元・Key 数・先頭の Key、i32 Slot（-1 = 無し） |

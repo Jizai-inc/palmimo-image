@@ -24,9 +24,34 @@ loader.exec_module(fw)
 def asset(pages: int = 1, value: int = 0) -> bytes:
     size = pages * 4096
     blob = bytearray(
-        struct.pack("<4s4I3f12I", b"SPAF", 2, 1, size, 0, 30, 0, 1, 80, 0, 80, 0, 80, 0, 80, 0, 80, 0, 80, size - 80)
+        struct.pack(
+            "<4s4I3f12IiHH",
+            b"SPAF",
+            2,
+            1,
+            size,
+            0,
+            30,
+            0,
+            1,
+            88,
+            0,
+            88,
+            0,
+            88,
+            0,
+            88,
+            0,
+            88,
+            0,
+            88,
+            size - 88,
+            -1,
+            0,
+            0,
+        )
     )
-    blob.extend(bytes([value]) * (size - 80))
+    blob.extend(bytes([value]) * (size - 88))
     struct.pack_into("<I", blob, 16, zlib.crc32(blob))
     return bytes(blob)
 
@@ -465,7 +490,7 @@ def test_xfer_handles_final_partial_block_and_short_writes(
     paths, flash = rig
     data = bytearray(asset(6)[:-4])
     struct.pack_into("<I", data, 12, len(data))
-    struct.pack_into("<I", data, 76, len(data) - 80)
+    struct.pack_into("<I", data, 76, len(data) - 88)
     struct.pack_into("<I", data, 16, 0)
     struct.pack_into("<I", data, 16, zlib.crc32(data))
     installed(paths, "zip.demo", "a", bytes(data))
