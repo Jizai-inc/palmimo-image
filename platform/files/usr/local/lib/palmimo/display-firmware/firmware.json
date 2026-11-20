@@ -1,5 +1,17 @@
 {
-  "version": "0.1.3+36006f5",
-  "sha256": "d08ee4aef0633f2640850eab1cd0f3f7cdec207353218b8cff5726baa3507a91",
-  "source_commit": "36006f53ed9af6ebfa319c089e130bffac1a0a1d"
+  "schema": 2,
+  "firmware": {
+    "1": {
+      "version": "0.1.3+36006f5",
+      "sha256": "d08ee4aef0633f2640850eab1cd0f3f7cdec207353218b8cff5726baa3507a91",
+      "source_commit": "36006f53ed9af6ebfa319c089e130bffac1a0a1d",
+      "file": "face_serial_v1.bin.gz"
+    },
+    "2": {
+      "version": "2.0.0+90302846",
+      "sha256": "7c9383737deddd08d080a945242bbcf1cae59679fee34f21d95ffaff776103d2",
+      "source_commit": "9030284641e74e87fcea11eff16bbb3f629bd0f5",
+      "file": "face_serial_v2.bin.gz"
+    }
+  }
 }

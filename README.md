@@ -327,6 +327,15 @@ the result can't be mistaken for shippable.
 The corresponding-source addition to image size is not yet measured
 against a real build.
 
+### Face display firmware and standard assets
+
+The Jizai Inc. portions of the bundled face display firmware binaries (v1 and
+v2) and standard display assets are licensed under Apache-2.0, like this
+repository (see [LICENSE](LICENSE)). Third-party notices and full license texts
+remain in `files/boot/firmware/licenses/display-firmware/` and are also shipped
+under `/usr/share/doc/palmimo-display-firmware/`; `NOTICE-v2` records the
+v2 source notices and linked SDK/USB components.
+
 ### `/boot/firmware/licenses/`
 
 MIT, BSD, Apache-2.0, and OFL all require attaching copyright notices and
@@ -386,20 +395,37 @@ build recipe.
 ### Face display firmware
 
 Platform installs enable `palmimo-display-firmware.service`, which runs before
-Portal and retries interrupted face updates. The platform bundle includes
-firmware `0.1.3+6ea1932` in `/usr/local/lib/palmimo/display-firmware/` for boot
-and Portal platform updates. Firmware binaries are Jizai's copyrighted work,
-excluded from this repository's license; third-party notices and full license
-texts are in `/usr/share/doc/palmimo-display-firmware/`.
+Portal and retries interrupted face updates. It converges to the protocol in
+`/var/lib/palmimo/display-firmware/desired.json`. When that file is absent,
+`ensure` returns `{"result":"undesired"}` without contacting the display or
+writing state; Portal selects the initial protocol before calling `ensure`.
+The bundle's schema 2 `firmware.json` declares each available protocol's version,
+SHA-256 and filename under `/usr/local/lib/palmimo/display-firmware/`.
+Protocols 1 and 2 ship as `face_serial_v1.bin.gz` and `face_serial_v2.bin.gz`. Selecting an unavailable protocol makes `ensure` fail with a
+configuration error before accessing hardware. Licensing and third-party notices
+are described in [Licenses and corresponding source](#licenses-and-corresponding-source).
+
+Select the desired protocol without flashing it with
+`sudo /usr/local/libexec/palmimo/palmimo-display-firmware desire 1 --by initial`.
+Use `--by app-start` for app-driven selection. This root-only command atomically
+saves `{"schema":1,"protocol":1,"by":"initial"}` and reports
+`{"protocol":1,"changed":true}`; repeating the same protocol and reason reports
+`changed:false`. Both selection and flashing take the display reservation
+without waiting, so selection cannot race an ongoing write.
 
 Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --json` to
-retry manually. The tool reserves the display, checks its identity and version,
+apply the desired protocol or retry manually. The tool reserves the display, checks its identity and version,
 and restores an awake face after an update. Progress goes to stderr/journal;
 the final JSON and `/var/lib/palmimo/display-firmware/state.json` report results.
 Boot retries wait up to 15 seconds for USB and stop writing after three consecutive
-write failures for the same declared version. A manual retry resets that count.
+write failures for the same desired protocol and declared version. Changing the
+protocol or its declared version starts a new count; changing the other
+protocol's declaration or only the selection reason does not. A manual retry
+resets that count. VERSION matching is exact, and switching in either direction
+uses the same identity and write-order checks.
 
-If a previously seen face disappears, check USB and use its BOOT + RST buttons
+If a face is absent, `ensure` returns `absent` successfully so apps can still
+start. A previously seen face also includes a recovery reason; check USB and use its BOOT + RST buttons
 to enter BOOTSEL for recovery. If the SD card was reimaged and the face is already
 in BOOTSEL, disconnect every Pico except the face and explicitly adopt it with
 `sudo /usr/local/libexec/palmimo/palmimo-display-firmware ensure --adopt-bootsel --json`.
@@ -410,3 +436,47 @@ never adopt an unrecorded device automatically. After intentionally removing or 
 stop display users and remove `state.json` to forget its identity. To disable boot
 updates, create `/etc/palmimo/display-firmware.disabled`; platform verification
 checks the unit file, not whether the unit is enabled.
+
+
+### Face display assets
+
+The root-only `palmimo-display-firmware assets` commands store validated assets
+and synchronize them with protocol 2 firmware. Convert a source with
+`/usr/local/libexec/palmimo/palmimo-display-assets convert source.json -o asset.bin --json`, then install it
+with `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets install zip.my-app welcome asset.bin`.
+`assets uninstall zip.my-app` removes the local app assets; flash copies remain
+until space is needed. `assets override happy asset.bin` replaces a
+standard asset (catalogued or `system.*`), and `assets override --reset happy` restores its bundled default.
+
+Run `sudo /usr/local/libexec/palmimo/palmimo-display-firmware assets sync --app zip.my-app --json` before
+starting that app, or omit `--app` to synchronize only the standard assets.
+Sync skips firmware that does not advertise protocol 2 and returns busy when
+the display is reserved. Transfers use bounded windows and cumulative ACKs;
+only the final firmware reply confirms success. When flash space is fragmented,
+sync evicts other apps in launch order, then reloads the selected app's assets if
+needed. Standard assets are kept. Local overrides, app assets and the launch
+sequence are private to root under `/var/lib/palmimo/display-assets/`.
+
+The standard catalog is `/usr/local/share/palmimo/display-assets/catalog.json`.
+It provides 14 expression assets as SDK/agent vocabulary. The standard set is
+all 17 `.bin` files in that directory, including `system.idle`, `system.sleep`
+and `system.wake`, which are kept out of the vocabulary. Sync, overrides and
+capacity accounting use all 17. Portal enumerates the public `.bin` files for
+its replacement screen; no additional inventory CLI is needed.
+
+
+Portal installs and updates an app's complete collection with
+`palmimo-display-firmware assets replace <app-id> <staging-dir>` (using the same
+`/usr/local/libexec/palmimo/` path as above). A staging directory contains only
+validated `<name>.bin` files; an empty directory removes the app's collection.
+The tool stages the full collection before renaming it into place. Interruption
+between the two renames can leave an empty collection; the next replace,
+uninstall or status removes abandoned work directories.
+
+`assets status --json` reports effective and default standard metadata, per-app
+allocation, and orphan overrides without contacting the display. Portal reads
+this root-owned state through the tool instead of reading private files.
+Replace and override recheck capacity before saving; a rejected request reports
+`short_by` and leaves the previous content. Reset can also remove orphan
+overrides. Store operations wait up to 120 seconds for the store lock and return
+exit 75 if it stays busy; sync keeps its immediate busy response.

@@ -1,3 +1,4 @@
+import errno
 import gzip
 import hashlib
 import importlib.machinery
@@ -91,10 +92,23 @@ def rig(tmp_path: Path) -> tuple[Any, Fake]:
     paths = fw.Paths(tmp_path / "firmware", tmp_path / "state/state.json", tmp_path / "work", tmp_path / "locks")
     paths.firmware.mkdir()
     image = b"new\0" + b"A" * 8188
-    (paths.firmware / "face_serial.bin.gz").write_bytes(gzip.compress(image))
+    (paths.firmware / "face_serial_v1.bin.gz").write_bytes(gzip.compress(image))
     (paths.firmware / "firmware.json").write_text(
-        json.dumps({"version": "new", "sha256": hashlib.sha256(image).hexdigest()})
+        json.dumps(
+            {
+                "schema": 2,
+                "firmware": {
+                    "1": {
+                        "version": "new",
+                        "sha256": hashlib.sha256(image).hexdigest(),
+                        "file": "face_serial_v1.bin.gz",
+                    }
+                },
+            }
+        )
     )
+    paths.state.parent.mkdir()
+    (paths.state.parent / "desired.json").write_text(json.dumps({"schema": 1, "protocol": 1, "by": "initial"}))
     hw = Fake()
     return fw.Updater(paths, hw), hw
 
@@ -150,12 +164,13 @@ def test_unidentified_devices_are_never_written(rig: tuple[Any, Fake], case: str
 
 
 @pytest.mark.parametrize("seen", [False, True])
-def test_absence_remembers_previous_face(rig: tuple[Any, Fake], seen: bool) -> None:
+def test_absence_reports_known_and_unknown_face(rig: tuple[Any, Fake], seen: bool) -> None:
     updater, hw = rig
     updater.save({"seen": seen})
     hw.ports = []
     result, code = updater.ensure(boot=True)
-    assert (result["result"], code) == (("failed", 1) if seen else ("absent", 0))
+    assert (result["result"], result["before"], result["after"], code) == ("absent", None, None, 0)
+    assert bool(result["reason"]) is seen
     assert json.loads(updater.paths.state.read_text())["consecutive_failures"] == 0
 
 
@@ -163,7 +178,7 @@ def test_absence_remembers_previous_face(rig: tuple[Any, Fake], seen: bool) -> N
 def test_integrity_and_version_mismatch_fail(rig: tuple[Any, Fake], case: str) -> None:
     updater, hw = rig
     if case == "hash":
-        (updater.paths.firmware / "face_serial.bin.gz").write_bytes(gzip.compress(b"bad"))
+        (updater.paths.firmware / "face_serial_v1.bin.gz").write_bytes(gzip.compress(b"bad"))
     else:
         original = hw.picotool
 
@@ -226,8 +241,12 @@ def test_release_validation(rig: tuple[Any, Fake], case: str, forbidden: list[st
     elif case == "forbidden":
         data += b"/source/private-source-tree/file.c"
     digest = hashlib.sha256(data if case != "hash" else b"wrong").hexdigest()
-    (directory / "firmware.json").write_text(json.dumps({"version": version, "sha256": digest}))
-    (directory / "face_serial.bin.gz").write_bytes(gzip.compress(data))
+    (directory / "firmware.json").write_text(
+        json.dumps(
+            {"schema": 2, "firmware": {"1": {"version": version, "sha256": digest, "file": "face_serial_v1.bin.gz"}}}
+        )
+    )
+    (directory / "face_serial_v1.bin.gz").write_bytes(gzip.compress(data))
     if case == "valid" or (case == "forbidden" and not forbidden):
         fw.validate_artifact(directory, forbidden)
     else:
@@ -339,9 +358,8 @@ def test_chip_id_is_saved_before_flashing(rig: tuple[Any, Fake]) -> None:
 def test_state_failure_prevents_flashing(rig: tuple[Any, Fake], case: str) -> None:
     updater, hw = rig
     if case == "unwritable":
-        updater.paths.state.parent.write_text("not a directory")
+        updater.paths.state.mkdir()
     elif case == "corrupt":
-        updater.paths.state.parent.mkdir()
         updater.paths.state.write_text("{invalid json")
     else:
         original = updater.save
@@ -483,7 +501,7 @@ def test_cli_emits_one_json_line(
 @pytest.mark.parametrize("case", ["oversized", "corrupt", "truncated"])
 def test_bad_compressed_image_never_reaches_flash(rig: tuple[Any, Fake], case: str) -> None:
     updater, hw = rig
-    source = updater.paths.firmware / "face_serial.bin.gz"
+    source = updater.paths.firmware / "face_serial_v1.bin.gz"
     payload = gzip.compress(b"X" * (12 * 1024 * 1024 + 1)) if case == "oversized" else b"not gzip"
     if case == "truncated":
         payload = gzip.compress(b"X" * 8192)[:-8]
@@ -561,6 +579,90 @@ class SysfsFake(Fake):
         return output
 
 
+@pytest.mark.parametrize("mode", ["bootsel", "app"])
+@pytest.mark.parametrize("field", ["idVendor", "idProduct", "serial", "product"])
+@pytest.mark.parametrize("error_number", [errno.ENODEV, errno.ENOENT, errno.EACCES])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_update_waits_for_disappearing_sysfs_attributes(
+    rig: tuple[Any, Fake],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    field: str,
+    error_number: int,
+    persistent: bool,
+) -> None:
+    updater, _ = rig
+    hw = SysfsFake(tmp_path / "sysfs")
+    updater.hw = hw
+    original_read = Path.read_text
+    disappeared = False
+
+    def read(path: Path, *args: Any, **kwargs: Any) -> str:
+        nonlocal disappeared
+        rebooted = any(command[:2] == ["reboot", "-u" if mode == "bootsel" else "-a"] for command in hw.commands)
+        if path == hw.device / field and rebooted and (persistent or not disappeared):
+            disappeared = True
+            raise OSError(error_number, "Device is re-enumerating")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    result, code = updater.ensure()
+    assert disappeared
+    if persistent or error_number == errno.EACCES:
+        assert result["result"] == "failed" and code == 1
+        assert len(hw.payloads) == (0 if mode == "bootsel" else 3)
+        if error_number == errno.EACCES:
+            assert hw.now == 0
+        else:
+            assert 0 < hw.now <= 30
+            assert "requested USB mode" in result["reason"]
+    else:
+        assert (result["result"], result["before"], result["after"], code) == ("updated", "old", "new", 0)
+        assert len(hw.payloads) == 3
+
+
+@pytest.mark.parametrize("error_number", [errno.ENODEV, errno.ENOENT, errno.EACCES])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_version_waits_only_for_transient_tty_open_errors(
+    rig: tuple[Any, Fake],
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    persistent: bool,
+) -> None:
+    import sys
+    import types
+
+    updater, hw = rig
+    original_exchange = hw.exchange
+    attempts = 0
+
+    def serial_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise OSError(error_number, "Cannot open tty")
+
+    def exchange(port: str, command: str, timeout: float) -> str:
+        if command == "VERSION" and hw.version == "new" and (persistent or not attempts):
+            return fw.Hardware.exchange(hw, port, command, timeout)
+        return original_exchange(port, command, timeout)
+
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=serial_open))
+    monkeypatch.setattr(hw, "exchange", exchange)
+    result, code = updater.ensure()
+    if persistent or error_number == errno.EACCES:
+        assert result["result"] == "failed" and code == 1
+        assert hw.now <= 3
+        if error_number == errno.EACCES:
+            assert attempts == 1
+        else:
+            assert attempts > 1
+    else:
+        assert (result["result"], result["after"], code) == ("updated", "new", 0)
+        assert hw.now >= 0.25
+    assert len(hw.payloads) == 3
+
+
 @pytest.mark.parametrize(
     "case", ["app", "bootsel", "wrong-chip", "wrong-product", "wrong-vid", "wrong-pid", "missing-serial"]
 )
@@ -584,7 +686,7 @@ def test_sysfs_identity_does_not_query_picotool_info(rig: tuple[Any, Fake], tmp_
         assert (result["result"], result["after"], code) == ("updated", "new", 0)
         assert json.loads(updater.paths.state.read_text())["chip_id"] == hw.chip
     else:
-        assert result["result"] == ("absent" if case in {"wrong-vid", "wrong-pid"} else "failed")
+        assert result["result"] == ("absent" if case in {"wrong-vid", "wrong-pid", "missing-serial"} else "failed")
         assert not hw.payloads
     assert all(args[0] in {"reboot", "load"} for args in hw.commands)
 
@@ -830,3 +932,333 @@ def test_unresponsive_version_explains_identification_failure(rig: tuple[Any, Fa
         assert reason.endswith(f"({error})")
     assert json.loads(updater.paths.state.read_text())["last_reason"] == reason
     assert not hw.commands and not hw.payloads
+
+
+def test_undesired_does_not_touch_hardware_or_state(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    desired.unlink()
+    result, code = updater.ensure(boot=True)
+    assert (result, code) == ({"result": "undesired"}, 0)
+    assert not hw.commands and not hw.power
+    assert not updater.paths.state.exists()
+    assert not updater.paths.work.exists()
+    assert not updater.paths.locks.exists()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        {},
+        {"schema": 2, "protocol": 1, "by": "initial"},
+        {"schema": 1, "protocol": True, "by": "initial"},
+        {"schema": 1, "protocol": 3, "by": "initial"},
+        {"schema": 1, "protocol": 1, "by": "other"},
+        "broken-json",
+    ],
+)
+def test_corrupt_desired_prevents_hardware_access(rig: tuple[Any, Fake], value: Any) -> None:
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    original = "{" if value == "broken-json" else json.dumps(value)
+    desired.write_text(original)
+    result, code = updater.ensure()
+    assert (result["result"], code) == ("failed", 78)
+    assert not hw.commands and not hw.power
+    assert desired.read_text() == original
+    assert json.loads(updater.paths.state.read_text())["last_result"] == "failed"
+
+
+@pytest.mark.parametrize("target", [1, 2])
+def test_ensure_selects_desired_firmware_in_both_directions(rig: tuple[Any, Fake], target: int) -> None:
+    updater, hw = rig
+    data = {}
+    images = {}
+    for protocol, version in ((1, "v1-release"), (2, "v2-release")):
+        image = version.encode() + b"\0" + bytes([protocol]) * 8192
+        filename = f"face_serial_v{protocol}.bin.gz"
+        (updater.paths.firmware / filename).write_bytes(gzip.compress(image))
+        data[str(protocol)] = {"version": version, "sha256": hashlib.sha256(image).hexdigest(), "file": filename}
+        images[protocol] = image
+    (updater.paths.firmware / "firmware.json").write_text(json.dumps({"schema": 2, "firmware": data}))
+    updater.paths.state.with_name("desired.json").write_text(
+        json.dumps({"schema": 1, "protocol": target, "by": "app-start"})
+    )
+    hw.version = data[str(3 - target)]["version"]
+    original = hw.picotool
+
+    def pico(args: list[str], timeout: float) -> str:
+        output = original(args, timeout)
+        if args[:2] == ["reboot", "-a"]:
+            hw.version = data[str(target)]["version"]
+        return output
+
+    hw.picotool = pico  # type: ignore[method-assign]
+    result, code = updater.ensure()
+    assert (result["result"], result["before"], result["after"], code) == (
+        "updated",
+        data[str(3 - target)]["version"],
+        data[str(target)]["version"],
+        0,
+    )
+    assert hw.payloads == [b"\xff" * 4096, images[target][4096:], images[target][:4096]]
+    assert updater.ensure(boot=True)[0]["result"] == "current"
+    assert len(hw.payloads) == 3
+
+
+def test_missing_desired_firmware_is_configuration_failure(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    updater.paths.state.with_name("desired.json").write_text(json.dumps({"schema": 1, "protocol": 2, "by": "initial"}))
+    result, code = updater.ensure()
+    assert (result["result"], code) == ("failed", 78)
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        None,
+        [],
+        {"version": "bad", "sha256": "x", "file": "x.bin.gz"},
+        {"version": "bad", "sha256": "a" * 64, "file": "../outside.bin.gz"},
+        {"version": "bad", "sha256": "a" * 64, "file": "/outside.bin.gz"},
+    ],
+)
+def test_invalid_schema_two_entry_prevents_writes(rig: tuple[Any, Fake], bad_entry: Any) -> None:
+    updater, hw = rig
+    (updater.paths.firmware / "firmware.json").write_text(json.dumps({"schema": 2, "firmware": {"1": bad_entry}}))
+    assert updater.ensure()[1] == 78
+    assert not hw.payloads and not hw.power
+
+
+def test_schema_one_declaration_is_rejected(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    image = b"new\0" + b"A" * 8188
+    (updater.paths.firmware / "firmware.json").write_text(
+        json.dumps({"version": "new", "sha256": hashlib.sha256(image).hexdigest()})
+    )
+    assert updater.ensure()[1] == 78
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("change", ["protocol", "unselected-release", "by"])
+def test_boot_failure_limit_tracks_selected_firmware(rig: tuple[Any, Fake], change: str) -> None:
+    updater, hw = rig
+    hw.fail = 2
+    for _ in range(3):
+        hw.payloads.clear()
+        assert updater.ensure(boot=True)[0]["result"] == "failed"
+    data = json.loads((updater.paths.firmware / "firmware.json").read_text())
+    data["firmware"]["2"] = {**data["firmware"]["1"], "file": "face_serial_v2.bin.gz"}
+    (updater.paths.firmware / "face_serial_v2.bin.gz").write_bytes(
+        (updater.paths.firmware / "face_serial_v1.bin.gz").read_bytes()
+    )
+    if change == "unselected-release":
+        data["firmware"]["2"]["version"] = "other"
+    (updater.paths.firmware / "firmware.json").write_text(json.dumps(data))
+    updater.paths.state.with_name("desired.json").write_text(
+        json.dumps({"schema": 1, "protocol": 2 if change == "protocol" else 1, "by": "app-start"})
+    )
+    hw.payloads.clear()
+    hw.fail = 0
+    assert updater.ensure(boot=True)[0]["result"] == ("updated" if change == "protocol" else "skipped")
+    assert bool(hw.payloads) is (change == "protocol")
+
+
+@pytest.mark.parametrize("by", ["initial", "app-start"])
+def test_desire_cli_persists_target_without_flashing(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], by: str
+) -> None:
+    import sys
+
+    updater, hw = rig
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "desire", "2", "--by", by])
+    assert fw.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"protocol": 2, "changed": True}
+    desired = updater.paths.state.with_name("desired.json")
+    assert json.loads(desired.read_text()) == {"schema": 1, "protocol": 2, "by": by}
+    assert desired.stat().st_mode & 0o777 == 0o644
+    assert fw.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"protocol": 2, "changed": False}
+    assert not hw.commands and not hw.power
+    assert not updater.paths.state.exists()
+
+
+@pytest.mark.parametrize("stage", ["serialize", "fsync", "replace"])
+def test_desire_failed_save_preserves_previous_target(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    import sys
+
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    previous = desired.read_bytes()
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "desire", "2", "--by", "app-start"])
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise OSError("Disk failure")
+
+    if stage == "serialize":
+
+        def partial_write(data: Any, stream: Any) -> None:
+            stream.write('{"protocol":')
+            raise OSError("Interrupted JSON write")
+
+        monkeypatch.setattr(fw.json, "dump", partial_write)
+    else:
+        monkeypatch.setattr(fw.os, stage, fail)
+    assert fw.main() != 0
+    assert json.loads(capsys.readouterr().out)["result"] == "failed"
+    assert desired.read_bytes() == previous
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("command", [["ensure", "--json"], ["desire", "2", "--by", "initial"]])
+def test_firmware_cli_requires_root(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: list[str]
+) -> None:
+    import sys
+
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    previous = desired.read_bytes()
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", *command])
+    assert fw.main() == 1
+    assert json.loads(capsys.readouterr().out)["result"] == "failed"
+    assert desired.read_bytes() == previous
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("existing", ["missing", "corrupt", "different-reason"])
+def test_desire_creates_or_repairs_complete_intent(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], existing: str
+) -> None:
+    import sys
+
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    if existing == "missing":
+        desired.unlink()
+    elif existing == "corrupt":
+        desired.write_text("{")
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "desire", "1", "--by", "app-start"])
+    assert fw.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"protocol": 1, "changed": True}
+    assert json.loads(desired.read_text()) == {"schema": 1, "protocol": 1, "by": "app-start"}
+    assert not hw.commands and not hw.power
+
+
+def test_desire_respects_update_reservation(
+    rig: tuple[Any, Fake], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    updater, hw = rig
+    desired = updater.paths.state.with_name("desired.json")
+    previous = desired.read_bytes()
+    monkeypatch.setattr(fw.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(fw, "Paths", lambda: updater.paths)
+    monkeypatch.setattr(fw, "Hardware", lambda: hw)
+    monkeypatch.setattr(sys, "argv", ["palmimo-display-firmware", "desire", "2", "--by", "initial"])
+    with fw.reservation(updater.paths.locks):
+        assert fw.main() == 75
+    assert json.loads(capsys.readouterr().out)["result"] == "busy"
+    assert desired.read_bytes() == previous
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("corrupt_protocol", [None, 1, 2])
+def test_release_validation_checks_each_declared_protocol(rig: tuple[Any, Fake], corrupt_protocol: int | None) -> None:
+    updater, _ = rig
+    directory = updater.paths.firmware
+    data = json.loads((directory / "firmware.json").read_text())
+    data["firmware"]["2"] = {**data["firmware"]["1"], "file": "face_serial_v2.bin.gz"}
+    (directory / "face_serial_v2.bin.gz").write_bytes((directory / "face_serial_v1.bin.gz").read_bytes())
+    if corrupt_protocol is not None:
+        (directory / f"face_serial_v{corrupt_protocol}.bin.gz").write_bytes(gzip.compress(b"wrong"))
+    (directory / "firmware.json").write_text(json.dumps(data))
+    if corrupt_protocol is None:
+        fw.validate_artifact(directory, [])
+    else:
+        with pytest.raises(fw.FirmwareError):
+            fw.validate_artifact(directory, [])
+
+
+def test_known_absence_preserves_boot_write_failure_count(rig: tuple[Any, Fake]) -> None:
+    updater, hw = rig
+    updater.save(
+        {"seen": True, "chip_id": hw.chip, "desired_protocol": 1, "declared_version": "new", "consecutive_failures": 3}
+    )
+    hw.ports = []
+    result, code = updater.ensure(boot=True)
+    assert (result["result"], result["before"], result["after"], code) == ("absent", None, None, 0)
+    assert result["reason"]
+    state = json.loads(updater.paths.state.read_text())
+    assert state["consecutive_failures"] == 3
+    assert state["last_result"] == "absent" and state["last_reason"] == result["reason"]
+    assert not hw.commands and not hw.power
+
+
+@pytest.mark.parametrize("operation", ["validate", "ensure"])
+@pytest.mark.parametrize("protocol,limit", [(1, 10 * 1024 * 1024), (2, 2 * 1024 * 1024)])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_firmware_region_limit(
+    rig: tuple[Any, Fake],
+    operation: str,
+    protocol: int,
+    limit: int,
+    delta: int,
+) -> None:
+    updater, hw = rig
+    image = b"new\0" + b"A" * (limit + delta - 4)
+    filename = f"face_serial_v{protocol}.bin.gz"
+    (updater.paths.firmware / filename).write_bytes(gzip.compress(image))
+    (updater.paths.firmware / "firmware.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "firmware": {
+                    str(protocol): {
+                        "version": "new",
+                        "sha256": hashlib.sha256(image).hexdigest(),
+                        "file": filename,
+                    }
+                },
+            }
+        )
+    )
+    (updater.paths.state.parent / "desired.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "protocol": protocol,
+                "by": "initial",
+            }
+        )
+    )
+    if operation == "validate":
+        if delta < 0:
+            fw.validate_artifact(updater.paths.firmware, [])
+        else:
+            with pytest.raises(fw.FirmwareError):
+                fw.validate_artifact(updater.paths.firmware, [])
+    elif delta < 0:
+        result, code = updater.ensure()
+        assert code == 0 and result["result"] == "updated"
+        assert hw.payloads and hw.flash[: len(image)] == image
+    else:
+        result, code = updater.ensure()
+        assert code != 0 and result["result"] == "failed"
+        assert not hw.payloads

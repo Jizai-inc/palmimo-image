@@ -425,6 +425,7 @@ def test_packages_txt_is_the_one_list_apply_pi_sh_references() -> None:
         "python3-serial",
         "python3-zbar",
         "libturbojpeg0",
+        "python3-pil",
     ]
 
     apply_text = _text(APPLY_SCRIPT)
