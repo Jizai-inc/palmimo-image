@@ -1301,25 +1301,30 @@ def test_blur_filter_bounds_follow_layer_local_time(tmp_path: Path) -> None:
     assert status == 0, result
 
 
-@pytest.mark.parametrize("peak,expected_status,eased", [(400, 2, False), (220, 0, False), (220, 0, True)])
-def test_blur_sigma_samples_between_opposing_keys(tmp_path: Path, peak: int, expected_status: int, eased: bool) -> None:
+@pytest.mark.parametrize("case", ["opposing", "safe", "overshoot"])
+def test_blur_sigma_certifies_between_keys(tmp_path: Path, case: str) -> None:
     doc = blurred_composition()
     layer = doc["layers"][0]
+    doc["op"] = layer["op"] = 20_000
     layer["shapes"][0]["s"]["k"] = [480, 480]
     layer["ef"][0]["ef"][0]["v"] = {
         "a": 1,
-        "k": [{"t": 0, "s": [100]}, {"t": 60, "s": [peak]}],
+        "k": [{"t": 0, "s": [100]}, {"t": 10, "s": [400 if case == "opposing" else 105]}],
     }
-    layer["ks"]["s"] = {"a": 1, "k": [{"t": 0, "s": [200, 200]}, {"t": 60, "s": [50, 50]}]}
-    if eased:
-        layer["ef"][0]["ef"][0]["v"]["k"][0].update(o={"x": 1 / 3, "y": 0}, i={"x": 2 / 3, "y": 0})
+    end_scale = 50 if case == "opposing" else 100
+    layer["ks"]["s"] = {"a": 1, "k": [{"t": 0, "s": [200, 200]}, {"t": 10, "s": [end_scale, end_scale]}]}
+    if case == "overshoot":
+        layer["ks"]["s"] = {"k": [100, 100]}
+        layer["ef"][0]["ef"][0]["v"]["k"] = [
+            {"t": 0, "s": [40], "o": {"x": 1 / 3, "y": 4}, "i": {"x": 2 / 3, "y": 4}},
+            {"t": 10, "s": [100]},
+        ]
     status, result, output = convert_json(tmp_path, doc)
-    assert status == expected_status, result
-    if expected_status == 2:
+    assert status == (0 if case == "safe" else 2), result
+    if case != "safe":
         assert any(e["code"] == "blur_sigma" for e in result["errors"])
     else:
-        # The linear curve peaks between keys; easing moves its maximum back to a key.
-        assert result["blur"]["sigma_px"][1] == pytest.approx(60 if eased else 63.375)
+        assert result["blur"]["sigma_px"] == [30, 63]
         assert run_cli("inspect", output) == (0, result)
 
 

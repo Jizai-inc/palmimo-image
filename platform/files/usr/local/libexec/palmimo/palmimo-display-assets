@@ -28,6 +28,10 @@ MAX_COMPONENTS = 144
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_JSON_TOKENS = 1_000_000
 MAX_JSON_DEPTH = 64
+BLUR_SIGMA_MESSAGE = (
+    "Blur may leave 8–64 px between keys (0.3 × Blurriness × positive scale/100); "
+    "add keys to tighten the certified bounds; fade with layer opacity"
+)
 
 
 class AssetError(ValueError):
@@ -87,7 +91,22 @@ def blur_sample_times(
     first, stop = math.ceil(low), math.ceil(high)
     count = max(0, stop - first)
     frames = [first + (count - 1) * i / 1023 for i in range(1024)] if count > 1024 else list(range(first, stop))
-    times = {((frame - start) / stretch, False) for frame in frames}
+    frames = [(frame - start) / stretch for frame in frames]
+    key_times = sorted({key["t"] for track in tracks for key in track["keys"]})
+    subdivisions: set[float] = set()
+    for a, b in pairwise(key_times):
+        a, b = max(a, (low - start) / stretch), min(b, (high - start) / stretch)
+        if a < b:
+            subdivisions.update(a + (b - a) * i / 9 for i in range(1, 9))
+    extra = sorted(subdivisions)
+    # Reserve the same 1024 non-key budget for interval subdivisions and frames.
+    # When even the subdivisions exceed it, retain evenly distributed candidates.
+    if len(extra) > 1024:
+        extra = [extra[(len(extra) - 1) * i // 1023] for i in range(1024)]
+    remaining = 1024 - len(extra)
+    if len(frames) > remaining:
+        frames = [frames[(len(frames) - 1) * i // max(1, remaining - 1)] for i in range(remaining)]
+    times = {(time, False) for time in [*frames, *extra]}
     # Include subframe keys even when the frame budget is exhausted. All tracks
     # are available identically to conversion and binary inspection.
     for track in tracks:
@@ -103,17 +122,47 @@ def blur_sample_times(
     return sorted(times)
 
 
+def track_interval_bounds(track: dict[str, Any], time: float) -> tuple[float, float]:
+    """Enclose the entire key segment immediately to the right of time."""
+    keys = track["keys"]
+    if time < keys[0]["t"]:
+        return keys[0]["s"][0], keys[0]["s"][0]
+    index = max(i for i, key in enumerate(keys) if key["t"] <= time)
+    key = keys[index]
+    start = key["s"][0]
+    if key["hold"] or index == len(keys) - 1:
+        return start, start
+    delta = key["e"][0] - start
+    hull = (min(0, key["oy"][0], key["iy"][0]), max(1, key["oy"][0], key["iy"][0]))
+    values = [start + delta * y for y in hull]
+    return min(values), max(values)
+
+
 def sigma_range(
-    tracks: list[dict[str, Any]], blur_track: int, scale_track: int, samples: list[tuple[float, bool]]
+    tracks: list[dict[str, Any]], blur_track: int, scale_track: int, active: tuple[float, float]
 ) -> list[float]:
     blur, scale = tracks[blur_track], tracks[scale_track]
-    times = {k["t"] for track in (blur, scale) for k in track["keys"]} | {t for t, _ in samples}
-    values = [
-        0.3 * evaluate_track(blur, t, left)[0] * abs(evaluate_track(scale, t, left)[0]) / 100
-        for t in times
-        for left in (False, True)
-    ]
+    times = {k["t"] for track in (blur, scale) for k in track["keys"]}
+    values = []
+    for time in times:
+        for left in (False, True):
+            s = evaluate_track(scale, time, left)[0]
+            require(s > 0, "blur_sigma", "$", BLUR_SIGMA_MESSAGE)
+            values.append(0.3 * evaluate_track(blur, time, left)[0] * s / 100)
+    low, high = active
+    for a, b in pairwise(sorted(times | {low, high})):
+        if a >= high or b <= low:
+            continue
+        b_min, b_max = track_interval_bounds(blur, a)
+        s_min, s_max = track_interval_bounds(scale, a)
+        require(s_min > 0, "blur_sigma", "$", BLUR_SIGMA_MESSAGE)
+        values.extend((0.3 * b_min * s_min / 100, 0.3 * b_max * s_max / 100))
     return [min(values), max(values)]
+
+
+def blur_active_range(ip: float, op: float, node: tuple[float, float, float, float]) -> tuple[float, float]:
+    nip, nop, start, stretch = node
+    return (max(ip, nip) - start) / stretch, (min(op, nop) - start) / stretch
 
 
 def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int], dict[str, Any] | None]:
@@ -304,7 +353,7 @@ def inspect_spaf(blob: bytes) -> tuple[dict[str, dict[str, int]], dict[str, int]
                 evaluated_tracks,
                 blur_track,
                 nodes[blur_node][3],
-                blur_sample_times(evaluated_tracks, ip, op, nodes[blur_node][6:10]),
+                blur_active_range(ip, op, nodes[blur_node][6:10]),
             ),
         }
     return params, {"fill": fills, "stroke": len(draws) - fills}, blur
@@ -526,6 +575,7 @@ class Lottie:
         self.blur_layer: dict[str, Any] | None = None
         self.blur_track = -1
         self.blur_draws = 0
+        self.blur_easing_errors: list[dict[str, str]] = []
 
     def error(self, layer: str, feature: str, path: str, code: str = "unsupported") -> None:
         self.errors.append({"code": code, "path": path, "message": f"{layer}: {feature}"})
@@ -747,7 +797,27 @@ class Lottie:
                 require(len(handle) <= MAX_COMPONENTS, "limit", path, "Too many easing components")
                 handle = handle * dim if len(handle) == 1 else handle
                 if len(handle) != dim or any(not bounded(v, 0, 1) for v in handle):
-                    self.error(layer, "easing controls require dimension-matched values in 0..1", path, "numeric")
+                    sigma_property = self.blur_layer is not None and path in (
+                        self.blur_layer["path"] + ".ks.s",
+                        self.blur_layer["path"] + ".ef[0].ef[0].v",
+                    )
+                    if (
+                        sigma_property
+                        and axis == "y"
+                        and len(handle) == dim
+                        and all(bounded(v, -1e9, 1e9) for v in handle)
+                    ):
+                        # Diagnose unsafe sigma hulls first, but retain the binary
+                        # format's 0..1 easing restriction even for safe overshoots.
+                        self.blur_easing_errors.append(
+                            {
+                                "code": "numeric",
+                                "path": path,
+                                "message": f"{layer}: easing controls require values in 0..1",
+                            }
+                        )
+                    else:
+                        self.error(layer, "easing controls require dimension-matched values in 0..1", path, "numeric")
                 record[which + axis] = handle
             keys.append(record)
         dim = len(keys[0]["s"])
@@ -1186,11 +1256,19 @@ class Lottie:
         samples = blur_sample_times(
             self.tracks, self.doc["ip"], self.doc["op"], (n["ip"], n["op"], n["start"], n["stretch"])
         )
-        sigma = sigma_range(self.tracks, track, scale_id, samples)
+        try:
+            sigma = sigma_range(
+                self.tracks,
+                track,
+                scale_id,
+                blur_active_range(self.doc["ip"], self.doc["op"], (n["ip"], n["op"], n["start"], n["stretch"])),
+            )
+        except AssetError:
+            sigma = [-math.inf, math.inf]
         if not all(bounded(s, 8, 64) for s in sigma):
             self.error(
                 name,
-                "Keep screen sigma in 8..64 px (0.3 × Blurriness × scale/100); fade with layer opacity",
+                BLUR_SIGMA_MESSAGE,
                 path + ".ef[0].ef[0].v",
                 "blur_sigma",
             )
@@ -1373,6 +1451,7 @@ class Lottie:
         self.draws = [draw for draws in self.paint_draws.values() for draw in draws]
         self.shared_fills()
         self.validate_blur()
+        self.errors.extend(self.blur_easing_errors)
         for label, count, limit in (
             ("nodes", len(self.nodes), 32),
             ("draws", len(self.draws), 8),
