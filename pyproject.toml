@@ -11,6 +11,7 @@ package = false
 [dependency-groups]
 dev = [
     "mypy>=1.8,<2",
+    "pillow>=11,<13",
     "pytest>=9.0.3",
     "ruff>=0.3,<1",
 ]
@@ -28,6 +29,7 @@ include = [
     "tests/**/*.py",
     "platform/**/*.py",
     "**/palmimo-display-firmware",
+    "**/palmimo-display-assets",
     "**/identity-relocate",
 ]
 exclude = [
@@ -93,6 +95,7 @@ files = [
     "tests/",
     "platform/",
     "platform/files/usr/local/libexec/palmimo/palmimo-display-firmware",
+    "platform/files/usr/local/libexec/palmimo/palmimo-display-assets",
     "platform/files/usr/lib/palmimo/identity-relocate",
 ]
 exclude = [

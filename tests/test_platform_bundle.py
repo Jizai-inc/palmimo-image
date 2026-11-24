@@ -1737,3 +1737,52 @@ def test_install_records_offline_identity_relocate_unit_enable(installed_root: t
     unit_link.parent.mkdir(parents=True, exist_ok=True)
     unit_link.symlink_to("/not-required-by-verification")
     assert _run_install(root, accounts, None, command="verify").returncode == 0
+
+
+def test_install_ships_display_asset_converter_and_decoder(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, _ = installed_root
+    converter = root / "usr/local/libexec/palmimo/palmimo-display-assets"
+    assert (
+        converter.read_bytes() == (PLATFORM_DIR / "files/usr/local/libexec/palmimo/palmimo-display-assets").read_bytes()
+    )
+    assert stat.S_IMODE(converter.stat().st_mode) == 0o755
+    assert "apt-get install python3-pil" in accounts.read_text().splitlines()
+
+
+def test_install_ships_protocol_named_firmware_and_retires_legacy_file(installed_root: tuple[Path, Path, Path]) -> None:
+    root, accounts, uv_source = installed_root
+    directory = root / "usr/local/lib/palmimo/display-firmware"
+    manifest = json.loads((directory / "firmware.json").read_text())
+    assert manifest["schema"] == 2
+    assert set(manifest["firmware"]) == {"1", "2"}
+    for protocol in (1, 2):
+        filename = f"face_serial_v{protocol}.bin.gz"
+        assert manifest["firmware"][str(protocol)]["file"] == filename
+        assert (directory / filename).read_bytes() == (
+            PLATFORM_DIR / "files/usr/local/lib/palmimo/display-firmware" / filename
+        ).read_bytes()
+    documentation = PLATFORM_DIR / "files/usr/share/doc/palmimo-display-firmware"
+    for source in documentation.rglob("*"):
+        if source.is_file():
+            assert (
+                root / "usr/share/doc/palmimo-display-firmware" / source.relative_to(documentation)
+            ).read_bytes() == source.read_bytes()
+    legacy = directory / "face_serial.bin.gz"
+    legacy.write_bytes(b"old bundle leftover")
+    assert _run_install(root, accounts, uv_source).returncode == 0
+    assert not legacy.exists()
+
+
+def test_install_ships_asset_store_and_standard_assets(installed_root: tuple[Path, Path, Path]) -> None:
+    root, _accounts, _uv = installed_root
+    catalog = root / "usr/local/share/palmimo/display-assets/catalog.json"
+    source = PLATFORM_DIR / "files/usr/local/share/palmimo/display-assets"
+    assert json.loads(catalog.read_text()) == json.loads((source / "catalog.json").read_text())
+    assert len(json.loads(catalog.read_text())["assets"]) == 14
+    expected = {path.name: path.read_bytes() for path in source.glob("*.bin")}
+    actual = {path.name: path.read_bytes() for path in catalog.parent.glob("*.bin")}
+    assert len(actual) == 17
+    assert actual == expected
+    assert stat.S_IMODE(catalog.stat().st_mode) == 0o644
+    helper = root / "usr/local/libexec/palmimo/display_assets.py"
+    assert helper.read_bytes() == (PLATFORM_DIR / "files/usr/local/libexec/palmimo/display_assets.py").read_bytes()

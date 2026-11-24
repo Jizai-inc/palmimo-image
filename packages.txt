@@ -10,3 +10,4 @@ picotool
 python3-serial
 python3-zbar
 libturbojpeg0
+python3-pil
