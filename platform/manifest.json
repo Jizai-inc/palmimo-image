@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 12,
   "requires_portal": "0.4.0",
   "restart_portal": true,
   "summary": "App execution platform with protected device identity relocation, app sandboxes, shared resources, and display firmware.",
@@ -271,6 +271,108 @@
       },
       {
         "path": "usr/share/doc/palmimo-display-firmware/NOTICE-v2",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/angry.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/batsu.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/curious.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/excited.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/groove.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/happy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/love.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/maru.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sad.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/shy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sleeping.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/sleepy.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/surprise.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.idle.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.sleep.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/system.wake.json",
+        "owner": "root",
+        "group": "root",
+        "mode": "0644"
+      },
+      {
+        "path": "usr/local/share/palmimo/display-assets/source/thinking.json",
         "owner": "root",
         "group": "root",
         "mode": "0644"
