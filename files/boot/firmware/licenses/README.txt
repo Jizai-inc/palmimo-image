@@ -26,6 +26,8 @@ Subdirectories
   portal/
       License texts for Palmimo Portal's Python dependencies and, if
       generated, its npm THIRD_PARTY_LICENSES.txt. Built at image time.
+      python/<dist>/static-linked/ holds the licenses of C libraries and
+      Rust crates compiled into that dist's native extension.
 
 Corresponding source (GPL / LGPL)
 -----------------------------------

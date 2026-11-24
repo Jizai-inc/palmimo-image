@@ -243,6 +243,7 @@ def _write_manifest_defaults(**overrides: object) -> dict[str, object]:
         "portal_dists_without_license_text": [],
         "portal_third_party_licenses_present": True,
         "portal_python_runtime_dirs": [],
+        "portal_unreviewed_native_dists": [],
     }
     defaults.update(overrides)
     return defaults
@@ -339,6 +340,11 @@ def test_write_manifest_records_portal_dists_count(tmp_path: Path) -> None:
             {"portal_python_runtime_dirs": ["cpython-3.13.0-linux-aarch64-gnu"]},
             ["STATUS: INCOMPLETE", "cpython-3.13.0-linux-aarch64-gnu", "Uncovered binaries"],
             id="uncovered_uv_python_runtimes",
+        ),
+        pytest.param(
+            {"portal_unreviewed_native_dists": ["somenative-1.0"]},
+            ["STATUS: INCOMPLETE", "somenative-1.0", "Uncovered binaries", "map.txt"],
+            id="unreviewed_native_dists",
         ),
     ],
 )
@@ -518,6 +524,7 @@ def _make_fake_venv_at(portal_root: Path, python_minor: str) -> Path:
     dist_info = site_packages / "somepkg-1.0.dist-info"
     dist_info.mkdir(parents=True)
     (dist_info / "METADATA").write_text("Name: somepkg\nLicense: MIT\n\nbody\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text("somepkg/__init__.py,sha256=x,1\n", encoding="utf-8")
     return site_packages
 
 
@@ -616,9 +623,21 @@ def _make_dpkg_fake_run(
     return fake_run
 
 
+def _make_static_licenses_dir(tmp_path: Path, map_text: str = "") -> Path:
+    static_dir = tmp_path / "oss-static-licenses"
+    static_dir.mkdir(exist_ok=True)
+    (static_dir / "map.txt").write_text(map_text, encoding="utf-8")
+    return static_dir
+
+
 def _run_main(root: Path, exclude_file: Path, allow_file: Path, portal_root: Path, img_date: str = "2026-09-01") -> int:
+    static_dir = root.parent / "oss-static-licenses"
+    if not static_dir.is_dir():
+        _make_static_licenses_dir(root.parent)
     return coc.main(
         [
+            "--static-licenses-dir",
+            str(static_dir),
             "--root",
             str(root),
             "--exclude-file",
@@ -793,3 +812,79 @@ def test_main_requires_copyright_allow_file_to_exist(tmp_path: Path, capsys: pyt
     rc = _run_main(root, exclude_file, tmp_path / "does-not-exist.txt", tmp_path / "portal")
     assert rc != 0
     assert "does-not-exist.txt" in capsys.readouterr().err
+
+
+# Static-link review: native wheels need an oss-static-licenses/map.txt line.
+def _add_dist(site_packages: Path, name: str, version: str, record_paths: list[str]) -> None:
+    dist_info = site_packages / f"{name.replace('-', '_')}-{version}.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(f"Name: {name}\nVersion: {version}\nLicense: MIT\n\nbody\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text("".join(f"{p},sha256=x,1\n" for p in record_paths), encoding="utf-8")
+
+
+def test_main_marks_manifest_incomplete_for_a_native_dist_missing_from_the_static_link_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_integration_rootfs(tmp_path)
+    exclude_file, allow_file = _make_exclude_and_allow_files(tmp_path)
+    portal_root = tmp_path / "portal"
+    site_packages = _make_fake_venv_at(portal_root, "python3.12")
+    (portal_root / "THIRD_PARTY_NOTICES.md").write_text("notices\n", encoding="utf-8")
+    (portal_root / "palmimo_portal" / "static").mkdir(parents=True)
+    (portal_root / "palmimo_portal" / "static" / "THIRD_PARTY_LICENSES.txt").write_text("npm\n", encoding="utf-8")
+    # Mapped under another version: an upgrade needs a fresh review.
+    _add_dist(site_packages, "Fast_Thing", "2.0", ["fast_thing/_ext.cpython-312-aarch64-linux-gnu.so"])
+    # RECORD is CSV: a path containing a comma is quoted.
+    _add_dist(site_packages, "bundler", "1.0", ['"bundler.libs/libz,std-1a2b3c.so.1.5.6"', "bundler/__init__.py"])
+    _make_static_licenses_dir(tmp_path, "fast-thing 1.0\n")
+    _patch_subprocess_run(
+        monkeypatch, _make_dpkg_fake_run("comitup\tcomitup\t1.0\tinstalled\n", "comitup\tinstalled\n")
+    )
+    monkeypatch.setenv("PALMIMO_SKIP_CORRESPONDING_SOURCE", "1")
+
+    assert _run_main(root, exclude_file, allow_file, portal_root) == 0
+
+    manifest = (root / "usr" / "share" / "palmimo" / "sources" / "MANIFEST.txt").read_text(encoding="utf-8")
+    reason = next(line for line in manifest.splitlines() if "not reviewed for statically linked" in line)
+    assert "Fast_Thing-2.0" in reason
+    assert "bundler-1.0" in reason
+    assert "somepkg" not in reason
+
+
+def test_copy_portal_licenses_copies_mapped_static_link_licenses(tmp_path: Path) -> None:
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    _add_dist(site_packages, "uvloop", "0.22.1", ["uvloop/loop.cpython-312-aarch64-linux-gnu.so"])
+    static_dir = _make_static_licenses_dir(tmp_path, "uvloop 0.22.1 libuv  # vendored\n")
+    (static_dir / "libuv").mkdir()
+    (static_dir / "libuv" / "LICENSE").write_text("libuv MIT\n", encoding="utf-8")
+
+    out = tmp_path / "boot-out"
+    report = coc.copy_portal_licenses(
+        site_packages, tmp_path / "portal-repo", out, coc.load_static_link_map(static_dir)
+    )
+
+    assert report.unreviewed_native_dists == []
+    copied = out / "python" / "uvloop-0.22.1" / "static-linked" / "libuv" / "LICENSE"
+    assert copied.read_text(encoding="utf-8") == "libuv MIT\n"
+
+
+@pytest.mark.parametrize(
+    "map_text",
+    [
+        pytest.param("uvloop\n", id="missing_version"),
+        pytest.param("uvloop 0.22.1 libuv\n", id="missing_directory"),
+        pytest.param("uvloop 0.22.1 ../outside\n", id="directory_outside_root"),
+        pytest.param("uvloop 0.22.1\nUVLoop 0.22.1\n", id="duplicate_after_normalization"),
+    ],
+)
+def test_load_static_link_map_rejects_invalid_lines(tmp_path: Path, map_text: str) -> None:
+    repo = tmp_path / "repo"
+    (repo / "outside").mkdir(parents=True)
+    static_dir = _make_static_licenses_dir(repo, map_text)
+    with pytest.raises(ValueError):
+        coc.load_static_link_map(static_dir)
+
+
+def test_repository_static_link_map_loads() -> None:
+    entries = coc.load_static_link_map(REPO_ROOT / "oss-static-licenses")
+    assert entries
