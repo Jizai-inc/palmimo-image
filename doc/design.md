@@ -661,7 +661,12 @@ Wi-Fi 国コード JP は pi-gen 側では `config` の `WPA_COUNTRY=JP`
 3. **Portal の Python 依存ライセンス**: `*.dist-info/METADATA` から
    ライセンス行を抜き出し `/boot/firmware/licenses/portal/python/` に、
    `THIRD_PARTY_NOTICES.md` / `THIRD_PARTY_LICENSES.txt` も
-   `/boot/firmware/licenses/portal/` に写す。
+   `/boot/firmware/licenses/portal/` に写す。ネイティブ wheel が静的リンク
+   した C ライブラリと Rust crate は dist-info の申告に現れないので、
+   `oss-static-licenses/map.txt`（dist 名と版 → 追加のライセンス本文）で
+   補い、`portal/python/<dist>/static-linked/` に写す。`*.so` を入れた dist
+   のうち、その版の行が無いものは `MANIFEST.txt` を `STATUS: INCOMPLETE`
+   にする。
 
 収集結果は `/usr/share/palmimo/sources/MANIFEST.txt` に記録する。
 `PALMIMO_SKIP_CORRESPONDING_SOURCE=1`（`--skip-corresponding-source` から

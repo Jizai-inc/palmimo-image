@@ -855,7 +855,7 @@ def fake_comitup(tmp_path: Path) -> Path:
 
 
 def test_reconnect_patch_clear_entries_survives_an_avahi_restart(fake_comitup: Path) -> None:
-    # The on-device failure (woody3, 2026-10-20): 50-palmimo-avahi restarts
+    # The on-device failure (2026-10-20): 50-palmimo-avahi restarts
     # avahi on STA up, the cached group goes stale, and the next
     # hotspot_start() dies in clear_entries() before activating the AP.
     avahi = _FakeAvahi()

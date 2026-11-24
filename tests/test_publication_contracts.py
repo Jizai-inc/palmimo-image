@@ -29,6 +29,11 @@ MARKDOWN_LINK = re.compile(r"\]\(([^)\s]+)")
 MARKDOWN_LINK_DEFINITION = re.compile(r"^\s*\[[^\]]+\]:\s*(\S+)", re.MULTILINE)
 EXTERNAL_TARGET = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//|#)")
 
+# Third-party license texts copied verbatim: a copyright line naming its
+# author's address is part of the notice the license requires us to keep.
+PERSONAL_ADDRESS = r"(?i:@gmail\.com)"
+VERBATIM_LICENSE_ROOT = "oss-static-licenses/"
+
 # Content that must never appear in this repository's published history.
 BANNED_CONTENT = [
     # AWS access key IDs and private-key headers -- key material, not just
@@ -36,7 +41,7 @@ BANNED_CONTENT = [
     "AKIA[0-9A-Z]{16}",
     "BEGIN [A-Z ]*PRIVATE KEY",
     # Addresses that reach a person directly.
-    r"(?i:@gmail\.com)",
+    PERSONAL_ADDRESS,
     # Private-network addresses. Scoped to the two ranges actually in use
     # elsewhere in this project (the lab LAN and Tailscale's CGNAT range)
     # rather than all of RFC 1918, so a four-part version string cannot
@@ -131,6 +136,8 @@ def test_repository_carries_no_banned_content() -> None:
         # bytes only ever pulls ASCII runs together, never apart.
         text = data.decode("utf-8", errors="ignore")
         for pattern in _banned_hits(text):
+            if pattern == PERSONAL_ADDRESS and rel.startswith(VERBATIM_LICENSE_ROOT):
+                continue
             offenders.append(f"{rel} matched /{pattern}/")
 
     assert offenders == [], f"Content banned from this repository: {offenders}"

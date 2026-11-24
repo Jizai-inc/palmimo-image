@@ -39,8 +39,10 @@ tools/
   provision_sd.py        -> flash an SD card + inject the identity file
   make_identity.py       -> generate a test identity file
   build_platform_bundle.py -> build the platform/ release tarball deterministically
+  generate_rust_crate_licenses.py -> regenerate oss-static-licenses/rust-crates/<dist>-<version>/
 lib/
   collect_oss_compliance.py -> OSS source/license collector run in the pi-gen OSS stage
+oss-static-licenses/     -> license texts for code statically linked into Portal's native wheels (map.txt)
 packages.txt             -> apt package list (shared source for apply-pi.sh and pigen/)
 platform/                -> app execution platform bundle (see "Platform bundle" below)
   manifest.json            -> version, requires_portal, and the explicit "owns" enumeration
@@ -71,7 +73,7 @@ the Docker build (streamed to stdout and to `pigen/.workspace/build.log`),
 then copy the resulting `.img.xz` into `dist/` and print its sha256.
 
 Useful flags: `--portal-tag` (which palmimo-portal tag to bake in, default
-`v0.2.8`), `--pigen-ref` (pin override for one-off builds), `--dry-run`
+`v0.2.9`), `--pigen-ref` (pin override for one-off builds), `--dry-run`
 (print the plan, touch nothing), `--clean` (wipe the pi-gen workspace).
 
 Requires an arm64 Docker host (Docker Desktop on Apple Silicon works). The
@@ -129,9 +131,9 @@ trixie) machine over SSH. **Not used in the shipping path** — shipping
 always goes through image build + flash.
 
 ```bash
-PI_HOST=user@<addr> PORTAL_TAG=v0.2.8 apply-pi.sh
-PI_HOST=user@<addr> PORTAL_TAG=v0.2.8 apply-pi.sh --identity ./palmimo-identity.json
-PI_HOST=user@<addr> PORTAL_TAG=v0.2.8 apply-pi.sh --no-apt   # faster re-run once apt is done
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.9 apply-pi.sh
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.9 apply-pi.sh --identity ./palmimo-identity.json
+PI_HOST=user@<addr> PORTAL_TAG=v0.2.9 apply-pi.sh --no-apt   # faster re-run once apt is done
 ```
 
 Generate a test identity file:
@@ -349,6 +351,16 @@ per source of static third-party software:
 - `tools/uv/` — license texts for the `uv` binary this image installs.
 - `pi/`, `portal/` — apt package and Palmimo Portal dependency license
   trees, generated at build time by the `04-oss-compliance` pi-gen stage.
+  A native wheel's dist-info licenses cover only its own project, not the
+  C libraries or Rust crates it statically links, so
+  `oss-static-licenses/map.txt` maps each native dist, by exact version,
+  to the extra license texts kept beside it; the stage copies them to
+  `portal/python/<dist>/static-linked/`. A native dist (one that installed
+  a `*.so`) with no line for its version marks `MANIFEST.txt`
+  `STATUS: INCOMPLETE`, so a Portal dependency bump that adds or upgrades
+  one cannot ship unreviewed. Rust crate trees are regenerated with
+  `tools/generate_rust_crate_licenses.py --sdist <dist>-<version>.tar.gz
+  --out oss-static-licenses/rust-crates/<dist>-<version>` (needs cargo).
 
 See `files/boot/firmware/licenses/README.txt` for the full layout
 explanation, written for whoever is holding the SD card.
